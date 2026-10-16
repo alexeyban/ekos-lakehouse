@@ -1,7 +1,8 @@
 #!/bin/sh
 # Creates the `lakehouse` catalog in Polaris (once) and lets the root principal manage its
 # content. Pattern from Polaris's own getting-started guides (1.8.0), without credential vending:
-# SeaweedFS has no STS, so `stsUnavailable` is set and clients use static keys.
+# SeaweedFS has no STS, so `stsUnavailable` is set and clients use static keys. Trino's Iceberg
+# REST connector drops every table with purge, which Polaris refuses unless the catalog allows it.
 set -eu
 P=http://lh-polaris:8181
 H="Polaris-Realm: POLARIS"
@@ -24,7 +25,10 @@ curl -sf "$P/api/management/v1/catalogs" -H "$H" -H "Authorization: Bearer $TOKE
     "name": "lakehouse",
     "type": "INTERNAL",
     "readOnly": false,
-    "properties": { "default-base-location": "s3://lakehouse/warehouse" },
+    "properties": {
+      "default-base-location": "s3://lakehouse/warehouse",
+      "polaris.config.drop-with-purge.enabled": "true"
+    },
     "storageConfigInfo": {
       "storageType": "S3",
       "allowedLocations": ["s3://lakehouse/warehouse"],

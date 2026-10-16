@@ -16,7 +16,7 @@
 # docker-compose.migrate.yml in EKOS. Credentials are deliberately weak and local-only, passed by
 # environment variable; nothing here belongs in an ekos.toml.
 #
-# Memory: each service has a cap; together about 5 GB.
+# Memory: each service has a cap; together about 5.5 GB.
 name: ekos-lakehouse
 
 x-s3-env: &s3-env
@@ -62,7 +62,10 @@ services:
     volumes:
       - lh-s3-data:/data
       - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
-    mem_limit: 512m
+    # 512m was measured too small: parallel loads (four or more Parquet multipart uploads at
+    # once) got the all-in-one server OOM-killed mid-write.
+    mem_limit: 1g
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9333/cluster/status || exit 1"]
       interval: 5s
@@ -87,6 +90,9 @@ services:
           sleep 2;
         done; exit 1
 
+  # Polaris keeps its catalog in memory here: recreating the container empties the catalog
+  # (lh-polaris-setup recreates `lakehouse`), and tables written before are orphaned in S3.
+  # A persistent backend is a production concern (RFC 0190 M5), not a sandbox one.
   lh-polaris:
     image: apache/polaris:1.8.0
     depends_on:
@@ -137,10 +143,11 @@ services:
       - "127.0.0.1:58080:8080"
     volumes:
       - ./trino/catalog:/etc/trino/catalog:ro
-      - ./trino/etc/jvm.config:/etc/trino/jvm.config:ro
+    # The image's jvm.config sizes the heap at 80% of this limit.
     mem_limit: 2g
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/v1/info"]
+      # /v1/info answers 200 while the server is still starting; ready means `"starting":false`.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false'"]
       interval: 5s
       timeout: 10s
       retries: 40
