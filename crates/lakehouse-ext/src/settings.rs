@@ -12,8 +12,9 @@ pub struct Settings {
     pub trino_url: Option<String>,
     /// Polaris health endpoint (management port), e.g. `http://127.0.0.1:58182/q/health`.
     pub polaris_health_url: Option<String>,
-    /// MinIO (S3 API), e.g. `http://127.0.0.1:59000`.
-    pub minio_url: Option<String>,
+    /// The S3 endpoint the warehouse lives on (SeaweedFS in the sandbox), e.g.
+    /// `http://127.0.0.1:58333`.
+    pub s3_url: Option<String>,
     /// Dagster webserver, e.g. `http://127.0.0.1:53000`.
     pub dagster_url: Option<String>,
     /// The source PostgreSQL as `host:port`. The doctor only checks it accepts connections.
@@ -40,7 +41,7 @@ mod tests {
         let s = load(&c).unwrap();
         assert_eq!(s.trino_url.as_deref(), Some("http://t:8080"));
         assert_eq!(s.source.as_deref(), Some("db:5432"));
-        assert_eq!(s.minio_url, None);
+        assert_eq!(s.s3_url, None);
 
         let c: ekos_compiler_core::EkosConfig =
             toml::from_str("[extensions.lakehouse]\npassword = \"x\"\n").unwrap();

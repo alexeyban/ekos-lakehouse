@@ -1,0 +1,158 @@
+# EKOS Lakehouse sandbox (RFC 0190 M0): the whole data plane on one machine.
+#
+#   docker compose -f deploy/docker-compose.lakehouse.yml up -d
+#   docker compose -f deploy/docker-compose.lakehouse.yml down -v     # -v also drops the data
+#
+# Source PostgreSQL → Trino (postgresql + iceberg connectors) → Iceberg tables in a Polaris REST
+# catalog, files in SeaweedFS (S3 API); Dagster schedules. EKOS itself runs outside the stack and
+# never moves a row.
+#
+# Storage is SeaweedFS, not the spec's MinIO: MinIO's community edition stopped publishing images
+# in October 2025 and is unmaintained. Nothing in EKOS Lakehouse depends on which S3 store it is —
+# only on an endpoint, path-style access and keys.
+#
+# Every image is pinned (RFC 0190 risks: Polaris and Iceberg REST move fast). Ports are on
+# loopback and in the 5xxxx range, clear of a stack already using 8080/8181/9000 and of
+# docker-compose.migrate.yml in EKOS. Credentials are deliberately weak and local-only, passed by
+# environment variable; nothing here belongs in an ekos.toml.
+#
+# Memory: each service has a cap; together about 5 GB.
+name: ekos-lakehouse
+
+x-s3-env: &s3-env
+  AWS_ACCESS_KEY_ID: ${EKOS_LH_S3_KEY:-lakehouse}
+  AWS_SECRET_ACCESS_KEY: ${EKOS_LH_S3_SECRET:-lakehouse-local-only}
+  AWS_REGION: us-east-1
+
+services:
+  lh-postgres:
+    image: postgres:16.15-alpine
+    environment:
+      POSTGRES_USER: ekos
+      POSTGRES_PASSWORD: ${EKOS_LH_PG_PASSWORD:-ekos-local-only}
+      POSTGRES_DB: source
+      # Deterministic collation and time zone, as in EKOS Migrate: the canonical form is pinned
+      # by golden tests.
+      LANG: C
+      TZ: UTC
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - wal_level=logical
+      - -c
+      - track_activity_query_size=4096
+    ports:
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - lh-pg-data:/var/lib/postgresql/data
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ekos -d source"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  lh-seaweedfs:
+    image: chrislusf/seaweedfs:4.48
+    command: server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json -ip=lh-seaweedfs -ip.bind=0.0.0.0
+    ports:
+      - "127.0.0.1:58333:8333"   # S3 API
+    volumes:
+      - lh-s3-data:/data
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9333/cluster/status || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  lh-bucket:
+    image: amazon/aws-cli:2.36.44
+    depends_on:
+      lh-seaweedfs:
+        condition: service_healthy
+    environment:
+      <<: *s3-env
+      AWS_ENDPOINT_URL: http://lh-seaweedfs:8333
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - >-
+        for i in $$(seq 1 30); do
+          aws s3api head-bucket --bucket lakehouse 2>/dev/null && exit 0;
+          aws s3 mb s3://lakehouse && exit 0;
+          sleep 2;
+        done; exit 1
+
+  lh-polaris:
+    image: apache/polaris:1.8.0
+    depends_on:
+      lh-bucket:
+        condition: service_completed_successfully
+    environment:
+      <<: *s3-env
+      POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,root,${EKOS_LH_POLARIS_SECRET:-polaris-local-only}
+      polaris.realm-context.realms: POLARIS
+      quarkus.otel.sdk.disabled: "true"
+    ports:
+      - "127.0.0.1:58181:8181"   # REST catalog + management API
+      - "127.0.0.1:58182:8182"   # health
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8182/q/health"]
+      interval: 3s
+      timeout: 10s
+      retries: 40
+      start_period: 10s
+
+  lh-polaris-setup:
+    image: alpine/curl:8.22.0
+    depends_on:
+      lh-polaris:
+        condition: service_healthy
+    environment:
+      CLIENT_ID: root
+      CLIENT_SECRET: ${EKOS_LH_POLARIS_SECRET:-polaris-local-only}
+    volumes:
+      - ./polaris/create-catalog.sh:/create-catalog.sh:ro
+    entrypoint: /bin/sh
+    command: ["/create-catalog.sh"]
+
+  lh-trino:
+    image: trinodb/trino:483
+    depends_on:
+      lh-polaris-setup:
+        condition: service_completed_successfully
+      lh-postgres:
+        condition: service_healthy
+    environment:
+      <<: *s3-env
+      CLIENT_ID: root
+      CLIENT_SECRET: ${EKOS_LH_POLARIS_SECRET:-polaris-local-only}
+      PG_PASSWORD: ${EKOS_LH_PG_PASSWORD:-ekos-local-only}
+    ports:
+      - "127.0.0.1:58080:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/etc/jvm.config:/etc/trino/jvm.config:ro
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/v1/info"]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 30s
+
+  lh-dagster:
+    build: ./dagster
+    image: ekos-lakehouse/dagster:1.13.26
+    ports:
+      - "127.0.0.1:53000:3000"
+    mem_limit: 1g
+
+volumes:
+  lh-pg-data:
+  lh-s3-data:

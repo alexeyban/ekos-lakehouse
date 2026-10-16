@@ -1,7 +1,8 @@
 # EKOS Lakehouse
 
 Generated, maintained medallion pipelines from a PostgreSQL database into Apache Iceberg tables.
-Trino is the engine, Polaris the REST catalog and MinIO the storage; transforms are dbt-trino and
+Trino is the engine, Polaris the REST catalog and any S3 store the storage (SeaweedFS in the
+sandbox); transforms are dbt-trino and
 the orchestrator is Dagster.
 
 EKOS Lakehouse is an extension of [EKOS](https://github.com/alexeyban/EKOS), the compiler for
@@ -36,7 +37,7 @@ Settings live in the project's `ekos.toml`, in their own table. Credentials neve
 [extensions.lakehouse]
 trino-url          = "http://127.0.0.1:58080"
 polaris-health-url = "http://127.0.0.1:58182/q/health"
-minio-url          = "http://127.0.0.1:59000"
+s3-url             = "http://127.0.0.1:58333"
 dagster-url        = "http://127.0.0.1:53000"
 source             = "127.0.0.1:55433"
 ```

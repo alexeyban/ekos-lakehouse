@@ -1089,6 +1089,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekos-lakehouse-trino"
+version = "0.1.0"
+dependencies = [
+ "ekos-migrate-target-clickhouse",
+ "ekos-migrate-validate",
+ "postgres",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ekos-ledger"
 version = "1.1.0"
 dependencies = [
@@ -3798,7 +3812,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",

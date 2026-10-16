@@ -1,8 +1,9 @@
 //! `ekos-lakehouse lakehouse doctor`: does every service of the stack answer?
 //!
 //! Reachability and readiness only. It sends no credentials and reads no data: the Trino check
-//! is `/v1/info`, MinIO and Polaris their health endpoints, Dagster `/server_info`, and the
-//! source a TCP connect.
+//! is `/v1/info`, Polaris its health endpoint, the S3 store any answer at all (stores differ in
+//! health endpoints; an unauthenticated request is refused, which still proves it is up), Dagster
+//! `/server_info`, and the source a TCP connect.
 
 use crate::settings::Settings;
 use serde::Serialize;
@@ -69,12 +70,9 @@ pub async fn run(s: &Settings) -> Vec<Check> {
         None => Check::not_configured("polaris", "polaris-health-url"),
         Some(url) => Check::of("polaris", url.clone(), health_up(&client, url).await),
     });
-    out.push(match &s.minio_url {
-        None => Check::not_configured("minio", "minio-url"),
-        Some(base) => {
-            let url = format!("{}/minio/health/live", base.trim_end_matches('/'));
-            Check::of("minio", url.clone(), status_ok(&client, &url).await)
-        }
+    out.push(match &s.s3_url {
+        None => Check::not_configured("s3", "s3-url"),
+        Some(url) => Check::of("s3", url.clone(), answers(&client, url).await),
     });
     out.push(match &s.dagster_url {
         None => Check::not_configured("dagster", "dagster-url"),
@@ -129,6 +127,16 @@ async fn status_ok(client: &reqwest::Client, url: &str) -> Result<String, String
     get(client, url)
         .await
         .map(|r| format!("HTTP {}", r.status()))
+}
+
+/// Up when it answers with anything but a server error: S3 refuses an anonymous request with
+/// 403, and that refusal is the proof.
+async fn answers(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if resp.status().is_server_error() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(format!("answers (HTTP {})", resp.status().as_u16()))
 }
 
 async fn tcp(addr: &str) -> Result<String, String> {
@@ -213,12 +221,12 @@ mod tests {
             r#"{"nodeVersion":{"version":"476"},"starting":false}"#,
         );
         let polaris = serve("200 OK", r#"{"status":"UP","checks":[]}"#);
-        let minio = serve("200 OK", "{}");
+        let s3 = serve("403 Forbidden", "<Error/>");
         let source = TcpListener::bind("127.0.0.1:0").unwrap();
         let s = Settings {
             trino_url: Some(trino),
             polaris_health_url: Some(format!("{polaris}/q/health")),
-            minio_url: Some(minio),
+            s3_url: Some(s3),
             dagster_url: None,
             source: Some(source.local_addr().unwrap().to_string()),
         };
@@ -227,7 +235,11 @@ mod tests {
         assert_eq!(by("trino").status, Status::Ok, "{checks:?}");
         assert_eq!(by("trino").detail, "version 476");
         assert_eq!(by("polaris").status, Status::Ok);
-        assert_eq!(by("minio").status, Status::Ok);
+        assert_eq!(
+            by("s3").status,
+            Status::Ok,
+            "a refusal still proves the store is up"
+        );
         assert_eq!(by("dagster").status, Status::NotConfigured);
         assert_eq!(by("source").status, Status::Ok);
         verdict(&checks).unwrap();
@@ -239,17 +251,17 @@ mod tests {
         let s = Settings {
             trino_url: Some(serve("200 OK", r#"{"starting":true}"#)),
             polaris_health_url: Some(serve("503 Service Unavailable", r#"{"status":"DOWN"}"#)),
-            minio_url: None,
+            s3_url: Some(serve("500 Internal Server Error", "")),
             dagster_url: None,
             source: Some(closed()),
         };
         let checks = run(&s).await;
-        for svc in ["trino", "polaris", "source"] {
+        for svc in ["trino", "polaris", "s3", "source"] {
             let c = checks.iter().find(|c| c.service == svc).unwrap();
             assert_eq!(c.status, Status::Failed, "{svc}: {c:?}");
         }
         let err = verdict(&checks).unwrap_err().to_string();
-        assert!(err.contains("trino, polaris, source"), "{err}");
+        assert!(err.contains("trino, polaris, s3, source"), "{err}");
     }
 
     #[test]

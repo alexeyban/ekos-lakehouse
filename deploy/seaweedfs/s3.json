@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "lakehouse",
+      "credentials": [
+        { "accessKey": "lakehouse", "secretKey": "lakehouse-local-only" }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

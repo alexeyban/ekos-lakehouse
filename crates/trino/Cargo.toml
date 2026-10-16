@@ -1,0 +1,22 @@
+[package]
+name = "ekos-lakehouse-trino"
+description = "Trino client and read-only EngineReader for EKOS Lakehouse (RFC 0190)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ekos-migrate-validate.workspace = true
+ekos-migrate-target-clickhouse.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde.workspace = true
+serde_json.workspace = true
+sqlparser.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The live suite reads PostgreSQL directly, never through Trino: the independent-oracle rule
+# (RFC 0156) — a source read through the engine that wrote the target proves nothing.
+postgres = "0.19"
