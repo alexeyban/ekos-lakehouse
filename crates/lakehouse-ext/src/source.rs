@@ -25,11 +25,15 @@ pub fn read(
     trino: &TrinoReader,
     trino_catalog: &str,
     schemas: &[String],
+    redaction: &ekos_common::redaction::RedactionConfig,
+    max_measured_rows: i64,
 ) -> anyhow::Result<Vec<SourceTable>> {
+    let redact = |s: &str| ekos_common::redaction::redact(s, redaction);
     let list = in_list(schemas);
     let mut tables: BTreeMap<(String, String), SourceTable> = BTreeMap::new();
     for r in pg.rows(&format!(
-        "SELECT n.nspname, c.relname, GREATEST(c.reltuples, 0)::bigint \
+        "SELECT n.nspname, c.relname, GREATEST(c.reltuples, 0)::bigint, \
+                COALESCE(obj_description(c.oid, 'pg_class'), '') \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname IN ({list}) AND c.relkind IN ('r', 'p') AND NOT c.relispartition \
          ORDER BY 1, 2"
@@ -43,6 +47,8 @@ pub fn read(
                 primary_key: vec![],
                 row_estimate: r[2].parse().unwrap_or(0),
                 update_triggers: vec![],
+                foreign_keys: vec![],
+                comment: (!r[3].is_empty()).then(|| redact(&r[3])),
             },
         );
     }
@@ -52,7 +58,9 @@ pub fn read(
                 t.typtype, t.typcategory, \
                 CASE WHEN t.typtype = 'd' THEN format_type(t.typbasetype, t.typtypmod) END, \
                 CASE WHEN t.typcategory = 'A' THEN format_type(t.typelem, NULL) END, \
-                a.attnotnull \
+                a.attnotnull, COALESCE(col_description(c.oid, a.attnum), ''), \
+                CASE WHEN t.typtype = 'e' THEN (SELECT string_agg(e.enumlabel, chr(31) ORDER BY e.enumsortorder) \
+                     FROM pg_enum e WHERE e.enumtypid = t.oid) END \
          FROM pg_attribute a \
          JOIN pg_class c ON c.oid = a.attrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -78,6 +86,15 @@ pub fn read(
                 not_null: r[8] == "t",
                 trino_type: None,
                 numeric_used: None,
+                comment: (!r[9].is_empty()).then(|| redact(&r[9])),
+                enum_labels: if r[10].is_empty() {
+                    vec![]
+                } else {
+                    r[10].split('\u{1f}').map(str::to_string).collect()
+                },
+                pii_candidate: ekos_pg_live::pii::classify_name(&r[2])
+                    .map(|c| format!("{:?}", c.class).to_lowercase()),
+                infinite_values: None,
             });
         }
     }
@@ -93,6 +110,35 @@ pub fn read(
     ))? {
         if let Some(t) = tables.get_mut(&(r[0].clone(), r[1].clone())) {
             t.primary_key.push(r[2].clone());
+        }
+    }
+
+    // Declared foreign keys, column pairs in key order.
+    for r in pg.rows(&format!(
+        "SELECT n.nspname, c.relname, con.conname, rn.nspname, rc.relname, \
+                (SELECT string_agg(a.attname, chr(31) ORDER BY k.ord) FROM unnest(con.conkey) \
+                   WITH ORDINALITY AS k(num, ord) JOIN pg_attribute a \
+                   ON a.attrelid = con.conrelid AND a.attnum = k.num), \
+                (SELECT string_agg(a.attname, chr(31) ORDER BY k.ord) FROM unnest(con.confkey) \
+                   WITH ORDINALITY AS k(num, ord) JOIN pg_attribute a \
+                   ON a.attrelid = con.confrelid AND a.attnum = k.num) \
+         FROM pg_constraint con \
+         JOIN pg_class c ON c.oid = con.conrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_class rc ON rc.oid = con.confrelid \
+         JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
+         WHERE con.contype = 'f' AND n.nspname IN ({list}) AND NOT c.relispartition \
+         ORDER BY 1, 2, 3"
+    ))? {
+        if let Some(t) = tables.get_mut(&(r[0].clone(), r[1].clone())) {
+            let split = |s: &str| s.split('\u{1f}').map(str::to_string).collect::<Vec<_>>();
+            t.foreign_keys.push(ekos_lakehouse_bronze::ForeignKey {
+                name: r[2].clone(),
+                columns: split(&r[5]),
+                ref_schema: r[3].clone(),
+                ref_table: r[4].clone(),
+                ref_columns: split(&r[6]),
+            });
         }
     }
 
@@ -140,12 +186,24 @@ pub fn read(
         }
     }
 
-    // Unconstrained numerics: measure the precision and scale used (RFC 0192 §2).
+    // Unconstrained numerics: measure the precision and scale used (RFC 0192 §2). Timestamps
+    // and dates: count ±infinity, which the connector misreads (RFC 0193 finding, LedgerSMB).
+    // Full scans, so only for tables small enough to be loaded in full anyway; the per-run
+    // reconciliation catches what this does not measure.
     for t in tables.values_mut() {
         let qualified = format!("{}.{}", ident(&t.schema), ident(&t.name));
         for c in &mut t.columns {
             if c.pg_type == "numeric" {
                 c.numeric_used = measure_numeric(pg, &qualified, &c.name)?;
+            }
+            if (c.pg_type.starts_with("timestamp") || c.pg_type == "date")
+                && t.row_estimate <= max_measured_rows
+            {
+                let col = ident(&c.name);
+                let r = pg.rows(&format!(
+                    "SELECT count(*) FROM {qualified} WHERE {col} IN ('infinity', '-infinity')"
+                ))?;
+                c.infinite_values = r.first().and_then(|r| r.first()).and_then(|v| v.parse().ok());
             }
         }
     }

@@ -123,3 +123,26 @@ pub fn open_store_waiting(
         }
     }
 }
+
+/// One code-quality metric of the pipeline repository (RFC 0193 §6), with how it was measured.
+pub fn record_check(
+    store: &dyn KnowledgeStore,
+    run: &str,
+    m: &crate::check::Metric,
+) -> anyhow::Result<KirId> {
+    with_context(store, run, "check", || {
+        let mut obj = KirObject::new(
+            format!("pipeline {} {run}", m.metric),
+            ObjectKind::Custom(METRIC_KIND.into()),
+        );
+        obj.id = metric_id("pipeline", run, m.metric);
+        obj.properties.insert("table".into(), json!("pipeline"));
+        obj.properties.insert("run_id".into(), json!(run));
+        let serde_json::Value::Object(map) = serde_json::to_value(m)? else {
+            unreachable!("a struct serializes to an object")
+        };
+        obj.properties.extend(map);
+        store.append_object(&obj)?;
+        Ok(obj.id)
+    })
+}

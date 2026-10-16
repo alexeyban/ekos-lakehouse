@@ -120,6 +120,10 @@ pub fn map_column(col: &SourceColumn) -> Mapping {
             not_null: col.not_null,
             trino_type: expected_trino_type(base),
             numeric_used: col.numeric_used,
+            comment: None,
+            enum_labels: vec![],
+            pii_candidate: None,
+            infinite_values: None,
         });
         if inner.lossiness == Lossiness::Refused {
             return Mapping {
@@ -144,6 +148,15 @@ pub fn map_column(col: &SourceColumn) -> Mapping {
         };
     }
 
+    if let Some(n) = col.infinite_values.filter(|n| *n > 0) {
+        m.rule = "infinite-timestamp".into();
+        m.rationale = format!(
+            "{n} row(s) hold infinity or -infinity, which the Trino connector reads as a wrong \
+             finite value (measured: 'infinity' read as year -171979); land it through a source \
+             view that maps infinity explicitly"
+        );
+        return m;
+    }
     let pg_base = base_name(&col.pg_type);
     if col.kind == TypeKind::Enum && trino.starts_with("varchar") {
         return exact(
@@ -363,6 +376,10 @@ mod tests {
             not_null: false,
             trino_type: trino.map(str::to_string),
             numeric_used: None,
+            comment: None,
+            enum_labels: vec![],
+            pii_candidate: None,
+            infinite_values: None,
         }
     }
 
@@ -561,6 +578,16 @@ mod tests {
             m("weird", TypeKind::Base, "row(a integer)").lossiness,
             Lossiness::Refused
         );
+    }
+
+    #[test]
+    fn a_timestamp_holding_infinity_is_refused() {
+        let mut c = col("validto", "timestamp without time zone", TypeKind::Base, Some("timestamp(6)"));
+        c.infinite_values = Some(1);
+        let got = map_column(&c);
+        assert_eq!((got.lossiness, got.rule.as_str()), (Lossiness::Refused, "infinite-timestamp"));
+        c.infinite_values = Some(0);
+        assert_eq!(map_column(&c).lossiness, Lossiness::Exact);
     }
 
     #[test]

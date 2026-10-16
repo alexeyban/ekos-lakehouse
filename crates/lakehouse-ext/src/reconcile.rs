@@ -107,7 +107,7 @@ pub fn unit_plan(t: &TablePlan, s: &PlanSettings) -> (UnitPlan, Vec<String>) {
     (unit, not_compared)
 }
 
-fn describe(d: &[ekos_migrate_validate::divergence::Divergence]) -> Vec<String> {
+fn describe(d: &Vec<ekos_migrate_validate::divergence::Divergence>) -> Vec<String> {
     d.iter()
         .map(|x| format!("{}: {}", x.locus, x.detail))
         .collect()
@@ -128,23 +128,40 @@ pub fn reconcile(
         .filter(|m| m.compare.is_some())
         .map(|m| m.column.clone())
         .collect();
+    // A value a side cannot render canonically (a NULL bucket, an unparseable aggregate) is a
+    // difference to report, not a reason to stop: LedgerSMB's `infinity` timestamp, misread by
+    // the connector, surfaced first as "cannot parse '' as u32".
+    let as_result = |tier: &'static str, r: Result<_, ReadError>| TierResult {
+        tier,
+        divergences: match r {
+            Ok(o) => describe(&o),
+            Err(ReadError::Parse { value, as_type, column }) => vec![format!(
+                "{}: a side returned {value:?} where the tier expected {as_type} (column {column}) \
+                 — a value it cannot render canonically",
+                unit.unit
+            )],
+            Err(e) => vec![format!("{}: {e}", unit.unit)],
+        },
+    };
     let tiers = vec![
-        TierResult {
-            tier: "V1",
-            divergences: describe(&run_v1(&unit, source, target)?.divergences),
-        },
-        TierResult {
-            tier: "V2",
-            divergences: describe(&run_v2(&unit, source, target, &names)?.divergences),
-        },
-        TierResult {
-            tier: "V3",
-            divergences: describe(&run_v3(&unit, source, target)?.divergences),
-        },
+        as_result("V1", run_v1(&unit, source, target).map(|o| o.divergences)),
+        as_result("V2", run_v2(&unit, source, target, &names).map(|o| o.divergences)),
+        as_result("V3", run_v3(&unit, source, target).map(|o| o.divergences)),
     ];
     let diverged = tiers.iter().any(|t| !t.divergences.is_empty());
 
-    // The control: plant a difference in one existing row, in the query only.
+    // The control: plant a difference in one existing row, in the query only. Pointless once a
+    // tier already diverged: that run has proved the comparison can fail.
+    if diverged {
+        return Ok(Reconciliation {
+            table: unit.unit,
+            tiers,
+            not_compared,
+            control_fired: None,
+            control_detail: "not run: the tiers already found a difference".into(),
+            verdict: Verdict::Diverged,
+        });
+    }
     let first_key = target.query(&format!(
         "SELECT min({}) FROM {}",
         unit.target_pk, unit.target_table
@@ -173,17 +190,17 @@ pub fn reconcile(
                 target_columns,
                 buckets: unit.buckets,
             };
-            let fired = !run_v3(&planted, source, target)?.divergences.is_empty();
-            (
-                Some(fired),
-                format!("one row's {} changed in the query", names[n - 1]),
-            )
+            match run_v3(&planted, source, target) {
+                Ok(o) => (
+                    Some(!o.divergences.is_empty()),
+                    format!("one row's {} changed in the query", names[n - 1]),
+                ),
+                Err(e) => (Some(false), format!("the control could not be read: {e}")),
+            }
         }
         _ => (None, "no rows to plant a difference in".into()),
     };
-    let verdict = if diverged {
-        Verdict::Diverged
-    } else if control_fired == Some(false) {
+    let verdict = if control_fired == Some(false) {
         Verdict::Unverified
     } else {
         Verdict::Green

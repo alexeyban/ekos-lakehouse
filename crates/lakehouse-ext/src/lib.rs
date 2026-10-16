@@ -4,6 +4,7 @@
 //! repository the user owns and records every run and check as ledger facts. Trino moves the
 //! data and the orchestrator schedules it; nothing here ever moves a row.
 
+pub mod check;
 pub mod doctor;
 pub mod facts;
 pub mod plan_cmd;
@@ -73,6 +74,26 @@ impl EkosExtension for LakehouseExtension {
                             clap::Arg::new("run-id")
                                 .long("run-id")
                                 .help("The orchestrator's run id (default: manual-<time>)"),
+                        )
+                        .arg(
+                            clap::Arg::new("json")
+                                .long("json")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Machine-readable output"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("check")
+                        .about(
+                            "Measure the generated project: lineage through the compiled \
+                                ledger, test and documentation coverage, drift from generated, \
+                                lint (RFC 0193)",
+                        )
+                        .arg(
+                            clap::Arg::new("lint")
+                                .long("lint")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Also run sqlfluff (must be on PATH)"),
                         )
                         .arg(
                             clap::Arg::new("json")
@@ -152,6 +173,8 @@ impl EkosExtension for LakehouseExtension {
             // Reads the source and bronze, writes facts to the project's ledger.
             ("lakehouse reconcile", Class::External, false),
             ("lakehouse run-report", Class::Write, false),
+            // Reads the repository and the ledger; writes metric facts.
+            ("lakehouse check", Class::Write, false),
         ]
     }
 
@@ -174,7 +197,10 @@ impl EkosExtension for LakehouseExtension {
             }
             Some(("plan", m)) => {
                 let settings = settings::load(ctx.config)?;
-                let plan = off_runtime(|| plan_cmd::build_plan(&settings))?;
+                let plan = {
+                    let redaction = ctx.config.redaction_config();
+                    off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?
+                };
                 if m.get_flag("json") {
                     println!("{}", serde_json::to_string_pretty(&plan)?);
                 } else {
@@ -188,9 +214,20 @@ impl EkosExtension for LakehouseExtension {
                     Some(o) => ctx.invoked_from.join(o),
                     None => pipeline_dir(&settings, ctx),
                 };
-                let plan = off_runtime(|| plan_cmd::build_plan(&settings))?;
-                let n = plan_cmd::write(&plan, &out)?;
+                let plan = {
+                    let redaction = ctx.config.redaction_config();
+                    off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?
+                };
+                let w = plan_cmd::write(&plan, &settings.silver_settings(), &out)?;
+                let n = w.files;
                 print!("{}", plan_cmd::render_summary(&plan));
+                print!("{}", plan_cmd::render_silver_report(&w.silver));
+                for k in &w.kept {
+                    println!("kept (edited by hand, not regenerated): {k}");
+                }
+                for r in &w.removed {
+                    println!("removed (no longer in the plan): {r}");
+                }
                 println!("wrote {n} files under {}", out.display());
                 Ok(())
             }
@@ -259,6 +296,61 @@ impl EkosExtension for LakehouseExtension {
                     .collect();
                 if !bad.is_empty() {
                     anyhow::bail!("not green: {}", bad.join(", "));
+                }
+                Ok(())
+            }
+            Some(("check", m)) => {
+                let settings = settings::load(ctx.config)?;
+                let repo = pipeline_dir(&settings, ctx);
+                let plan = plan_cmd::read_lock(&repo)?;
+                let silver = settings.silver_settings();
+                let mut metrics = vec![];
+                {
+                    let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+                    metrics.push(check::lineage(&plan, &silver, store.as_ref())?);
+                }
+                metrics.extend(check::coverage(&plan, &silver, &repo)?);
+                metrics.push(check::drift(&plan, &silver, &repo));
+                if m.get_flag("lint") {
+                    metrics.push(check::lint(&repo));
+                }
+                let run = format!(
+                    "check-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                );
+                let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+                for x in &metrics {
+                    facts::record_check(store.as_ref(), &run, x)?;
+                }
+                if m.get_flag("json") {
+                    println!("{}", serde_json::to_string(&metrics)?);
+                } else {
+                    for x in &metrics {
+                        println!(
+                            "{:<4} {:<28} {}/{}",
+                            if x.passed { "ok" } else { "FAIL" },
+                            x.metric,
+                            x.measured,
+                            x.of
+                        );
+                        for g in x.gaps.iter().take(10) {
+                            println!("       {g}");
+                        }
+                        if x.gaps.len() > 10 {
+                            println!("       … {} more", x.gaps.len() - 10);
+                        }
+                    }
+                }
+                let failed: Vec<&str> = metrics
+                    .iter()
+                    .filter(|x| !x.passed)
+                    .map(|x| x.metric)
+                    .collect();
+                if !failed.is_empty() {
+                    anyhow::bail!("not met: {}", failed.join(", "));
                 }
                 Ok(())
             }

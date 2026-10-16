@@ -5,6 +5,7 @@
 resolver = "3"
 members = [
     "crates/bronze",
+    "crates/silver",
     "crates/trino",
     "crates/lakehouse-ext",
     "crates/ekos-lakehouse",
@@ -22,6 +23,7 @@ rust-version = "1.98"
 ekos               = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-compiler-core = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-migrate-validate = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-common           = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-kir              = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-ledger           = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-pg-live          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
@@ -33,6 +35,7 @@ ekos-migrate-target-clickhouse = { git = "https://github.com/alexeyban/EKOS", br
 ekos-lakehouse-ext   = { path = "crates/lakehouse-ext" }
 ekos-lakehouse-trino  = { path = "crates/trino" }
 ekos-lakehouse-bronze = { path = "crates/bronze" }
+ekos-lakehouse-silver = { path = "crates/silver" }
 
 # ── Third party (versions match the EKOS workspace) ──
 anyhow      = "1"
@@ -41,6 +44,8 @@ clap        = "4"
 reqwest     = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
+serde_yaml  = "0.9"
+sha2        = "0.10"
 sqlparser   = "0.53"
 thiserror   = "2"
 tokio       = { version = "1", features = ["full"] }

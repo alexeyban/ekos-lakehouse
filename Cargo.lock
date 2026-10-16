@@ -1088,9 +1088,11 @@ dependencies = [
  "async-trait",
  "clap",
  "ekos",
+ "ekos-common",
  "ekos-compiler-core",
  "ekos-kir",
  "ekos-lakehouse-bronze",
+ "ekos-lakehouse-silver",
  "ekos-lakehouse-trino",
  "ekos-ledger",
  "ekos-migrate",
@@ -1100,9 +1102,21 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
  "tokio",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "ekos-lakehouse-silver"
+version = "0.1.0"
+dependencies = [
+ "ekos-lakehouse-bronze",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

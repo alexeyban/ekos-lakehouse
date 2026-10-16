@@ -120,7 +120,7 @@ fn pagila_lands_in_bronze_reconciles_and_follows_changes() {
         eprintln!("skipped: set EKOS_LAKEHOUSE_LIVE=1 with the sandbox and Pagila up");
         return;
     }
-    let plan = ekos_lakehouse_ext::plan_cmd::build_plan(&settings()).unwrap();
+    let plan = ekos_lakehouse_ext::plan_cmd::build_plan(&settings(), &Default::default()).unwrap();
     assert_eq!(plan.tables.len(), 16, "{:?}", plan.refused);
     assert!(plan.refused.is_empty(), "{:?}", plan.refused);
     let admin = Client::new(settings().trino_connection().unwrap()).unwrap();

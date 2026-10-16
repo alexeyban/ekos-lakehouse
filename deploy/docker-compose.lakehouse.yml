@@ -175,6 +175,8 @@ services:
       EKOS_LH_TRINO_URL: http://127.0.0.1:58080
       EKOS_LAKEHOUSE_BIN: /usr/local/bin/ekos-lakehouse
       EKOS_LH_PG_PASSWORD: ${EKOS_LH_PG_PASSWORD:-ekos-local-only}
+      # Silver's HMAC masking key (RFC 0193 §2): local-only, like every credential here.
+      EKOS_LH_PII_KEY: ${EKOS_LH_PII_KEY:-sandbox-only-pii-key}
       DAGSTER_HOME: ${EKOS_LH_PROJECT:-/project-not-set}/.dagster
       HOME: /tmp
     volumes:

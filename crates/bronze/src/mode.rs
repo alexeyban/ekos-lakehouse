@@ -127,6 +127,10 @@ mod tests {
             not_null: true,
             trino_type: None,
             numeric_used: None,
+            comment: None,
+            enum_labels: vec![],
+            pii_candidate: None,
+            infinite_values: None,
         };
         SourceTable {
             schema: "public".into(),
@@ -139,6 +143,8 @@ mod tests {
             primary_key: pk.iter().map(|s| s.to_string()).collect(),
             row_estimate: rows,
             update_triggers: triggers,
+            foreign_keys: vec![],
+            comment: None,
         }
     }
 

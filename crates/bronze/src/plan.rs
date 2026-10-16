@@ -43,6 +43,36 @@ pub struct TablePlan {
     pub primary_key: Vec<String>,
     pub decision: ModeDecision,
     pub columns: Vec<Mapping>,
+    /// The source facts silver is generated from (RFC 0193): keys, comments, labels, candidates.
+    #[serde(default)]
+    pub facts: TableFacts,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign_keys: Vec<crate::model::ForeignKey>,
+    pub columns: Vec<ColumnFacts>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnFacts {
+    pub name: String,
+    pub not_null: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pii_candidate: Option<String>,
+}
+
+impl TablePlan {
+    pub fn column_facts(&self, name: &str) -> Option<&ColumnFacts> {
+        self.facts.columns.iter().find(|c| c.name == name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +92,8 @@ pub struct Plan {
     pub refused: Vec<RefusedTable>,
 }
 
-pub const FORMAT: u32 = 1;
+/// 2: table and column facts for silver (RFC 0193).
+pub const FORMAT: u32 = 2;
 
 /// Every table's plan, sorted by (schema, table). A table with any refused column is refused
 /// whole: bronze never drops a column.
@@ -97,6 +128,21 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
             primary_key: t.primary_key.clone(),
             decision: choose(t, &settings.modes),
             columns,
+            facts: TableFacts {
+                comment: t.comment.clone(),
+                foreign_keys: t.foreign_keys.clone(),
+                columns: t
+                    .columns
+                    .iter()
+                    .map(|c| ColumnFacts {
+                        name: c.name.clone(),
+                        not_null: c.not_null,
+                        comment: c.comment.clone(),
+                        enum_labels: c.enum_labels.clone(),
+                        pii_candidate: c.pii_candidate.clone(),
+                    })
+                    .collect(),
+            },
         });
     }
     out

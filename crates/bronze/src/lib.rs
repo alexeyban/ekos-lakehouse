@@ -9,6 +9,6 @@ pub mod render;
 pub mod typemap;
 
 pub use mode::{LoadMode, ModeSettings};
-pub use model::{SourceColumn, SourceTable, TypeKind, UpdateTrigger};
+pub use model::{ForeignKey, SourceColumn, SourceTable, TypeKind, UpdateTrigger};
 pub use plan::{Plan, TablePlan, plan};
 pub use typemap::{CompareRule, Lossiness, Mapping};

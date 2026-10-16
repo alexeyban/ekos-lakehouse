@@ -9,8 +9,10 @@ rust-version.workspace = true
 
 [dependencies]
 ekos.workspace = true
+ekos-common.workspace = true
 ekos-compiler-core.workspace = true
 ekos-lakehouse-bronze.workspace = true
+ekos-lakehouse-silver.workspace = true
 ekos-lakehouse-trino.workspace = true
 ekos-kir.workspace = true
 ekos-ledger.workspace = true
@@ -23,6 +25,8 @@ clap.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 

@@ -33,6 +33,28 @@ pub struct SourceColumn {
     /// From a P1 profile, for an unconstrained `numeric` (RFC 0157): precision and scale the data
     /// actually uses.
     pub numeric_used: Option<(u32, u32)>,
+    /// `COMMENT ON COLUMN`, redacted (RFC 0043).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// An enum's labels, in their declared order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_labels: Vec<String>,
+    /// RFC 0157's name classifier: a candidate, never applied without approval (RFC 0193 §2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pii_candidate: Option<String>,
+    /// Rows holding `infinity` / `-infinity` in a timestamp or date column, when measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infinite_values: Option<u64>,
+}
+
+/// A declared foreign key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForeignKey {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub ref_schema: String,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
 }
 
 /// A `BEFORE UPDATE … FOR EACH ROW` trigger whose function assigns `NEW.<column>`.
@@ -52,6 +74,11 @@ pub struct SourceTable {
     /// `reltuples`, or an exact count when one was taken.
     pub row_estimate: i64,
     pub update_triggers: Vec<UpdateTrigger>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign_keys: Vec<ForeignKey>,
+    /// `COMMENT ON TABLE`, redacted (RFC 0043).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 impl SourceTable {

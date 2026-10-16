@@ -41,6 +41,19 @@ pub struct Settings {
     /// Cron for the bronze job (default hourly) and for Iceberg maintenance (default 03:00).
     pub bronze_schedule: Option<String>,
     pub maintenance_schedule: Option<String>,
+    /// Approved masks, `"schema.table.column" = "null" | "hmac"` (RFC 0193 §2).
+    pub pii: std::collections::BTreeMap<String, ekos_lakehouse_silver::MaskMethod>,
+    /// Tables that keep SCD2 history in silver (RFC 0193 §4).
+    pub history: Vec<String>,
+}
+
+impl Settings {
+    pub fn silver_settings(&self) -> ekos_lakehouse_silver::SilverSettings {
+        ekos_lakehouse_silver::SilverSettings {
+            pii: self.pii.clone(),
+            history: self.history.clone(),
+        }
+    }
 }
 
 impl Settings {

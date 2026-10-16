@@ -268,6 +268,10 @@ mod tests {
             not_null: true,
             trino_type: Some(trino.into()),
             numeric_used: None,
+            comment: None,
+            enum_labels: vec![],
+            pii_candidate: None,
+            infinite_values: None,
         }
     }
 
@@ -292,6 +296,8 @@ mod tests {
                     function: "last_updated()".into(),
                     assigns: vec!["last_update".into()],
                 }],
+                foreign_keys: vec![],
+                comment: None,
             },
             SourceTable {
                 schema: "public".into(),
@@ -303,6 +309,8 @@ mod tests {
                 primary_key: vec!["actor_id".into()],
                 row_estimate: 200,
                 update_triggers: vec![],
+                foreign_keys: vec![],
+                comment: None,
             },
         ]
     }
