@@ -8,7 +8,9 @@
 use ekos_lakehouse_bronze::plan::{PlanSettings, TablePlan};
 use ekos_lakehouse_bronze::typemap::ident;
 use ekos_lakehouse_bronze::{CompareRule, render};
-use ekos_migrate_validate::dialect::{ColumnRule, Dialect, canon_expr};
+use ekos_migrate_validate::dialect::{
+    ColumnRule, Dialect, bucket_checksum_query, canon_expr, count_query,
+};
 use ekos_migrate_validate::tiers::{UnitPlan, run_v1, run_v2, run_v3};
 use ekos_migrate_validate::{EngineReader, ReadError};
 use serde::Serialize;
@@ -194,4 +196,28 @@ pub fn reconcile(
         control_detail,
         verdict,
     })
+}
+
+/// The queries a reconciliation runs, for the fact's evidence: counts and bucket checksums on
+/// both sides. They read aggregates only.
+pub fn evidence_queries(t: &TablePlan, s: &PlanSettings) -> Vec<String> {
+    let (u, _) = unit_plan(t, s);
+    vec![
+        count_query(Dialect::Postgres, &u.source_table),
+        count_query(Dialect::Trino, &u.target_table),
+        bucket_checksum_query(
+            Dialect::Postgres,
+            &u.source_table,
+            &u.source_pk,
+            &u.source_columns,
+            u.buckets,
+        ),
+        bucket_checksum_query(
+            Dialect::Trino,
+            &u.target_table,
+            &u.target_pk,
+            &u.target_columns,
+            u.buckets,
+        ),
+    ]
 }

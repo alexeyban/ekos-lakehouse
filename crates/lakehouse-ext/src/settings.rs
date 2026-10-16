@@ -35,6 +35,12 @@ pub struct Settings {
     /// `"schema.table" = "column"` watermarks (RFC 0192 §3).
     pub watermarks: std::collections::BTreeMap<String, String>,
     pub full_refresh_max_rows: Option<i64>,
+    /// The pipeline repository `generate` writes and `reconcile` reads the deployed plan from,
+    /// relative to the project. Default: `pipeline`.
+    pub pipeline_dir: Option<String>,
+    /// Cron for the bronze job (default hourly) and for Iceberg maintenance (default 03:00).
+    pub bronze_schedule: Option<String>,
+    pub maintenance_schedule: Option<String>,
 }
 
 impl Settings {
@@ -50,6 +56,11 @@ impl Settings {
                     .full_refresh_max_rows
                     .unwrap_or(d.modes.full_refresh_max_rows),
             },
+            bronze_schedule: self.bronze_schedule.clone().unwrap_or(d.bronze_schedule),
+            maintenance_schedule: self
+                .maintenance_schedule
+                .clone()
+                .unwrap_or(d.maintenance_schedule),
         }
     }
 

@@ -1089,8 +1089,10 @@ dependencies = [
  "clap",
  "ekos",
  "ekos-compiler-core",
+ "ekos-kir",
  "ekos-lakehouse-bronze",
  "ekos-lakehouse-trino",
+ "ekos-ledger",
  "ekos-migrate",
  "ekos-migrate-validate",
  "ekos-pg-live",
@@ -1100,6 +1102,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml",
+ "uuid",
 ]
 
 [[package]]

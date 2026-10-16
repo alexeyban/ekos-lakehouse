@@ -17,6 +17,9 @@ pub struct PlanSettings {
     pub namespace_prefix: String,
     #[serde(flatten)]
     pub modes: ModeSettings,
+    /// Cron for the bronze job, and for Iceberg maintenance.
+    pub bronze_schedule: String,
+    pub maintenance_schedule: String,
 }
 
 impl Default for PlanSettings {
@@ -26,6 +29,8 @@ impl Default for PlanSettings {
             target_catalog: "iceberg".into(),
             namespace_prefix: "bronze_".into(),
             modes: ModeSettings::default(),
+            bronze_schedule: "0 * * * *".into(),
+            maintenance_schedule: "0 3 * * *".into(),
         }
     }
 }

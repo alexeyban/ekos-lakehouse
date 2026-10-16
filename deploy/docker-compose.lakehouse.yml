@@ -156,11 +156,34 @@ services:
       retries: 40
       start_period: 30s
 
+  # The orchestrator runs a pipeline repository that `ekos-lakehouse lakehouse generate` wrote:
+  #
+  #   EKOS_LH_PROJECT=/abs/path/to/project EKOS_LAKEHOUSE_BIN=/abs/path/to/ekos-lakehouse \
+  #     docker compose -f deploy/docker-compose.lakehouse.yml --profile orchestrator up -d lh-dagster
+  #
+  # Host network, so it reaches every service at the same loopback ports the project's ekos.toml
+  # names; it binds its own UI to 127.0.0.1:53000. It runs as the host user, because it writes
+  # the project's ledger (reconcile, run-report) and Dagster's state under the project.
   lh-dagster:
     build: ./dagster
     image: ekos-lakehouse/dagster:1.13.26
-    ports:
-      - "127.0.0.1:53000:3000"
+    profiles: ["orchestrator"]
+    network_mode: host
+    user: "${EKOS_LH_UID:-1000}:${EKOS_LH_GID:-1000}"
+    environment:
+      EKOS_LH_PROJECT: ${EKOS_LH_PROJECT:-/project-not-set}
+      EKOS_LH_TRINO_URL: http://127.0.0.1:58080
+      EKOS_LAKEHOUSE_BIN: /usr/local/bin/ekos-lakehouse
+      EKOS_LH_PG_PASSWORD: ${EKOS_LH_PG_PASSWORD:-ekos-local-only}
+      DAGSTER_HOME: ${EKOS_LH_PROJECT:-/project-not-set}/.dagster
+      HOME: /tmp
+    volumes:
+      - ${EKOS_LH_PROJECT:-/project-not-set}:${EKOS_LH_PROJECT:-/project-not-set}
+      - ${EKOS_LAKEHOUSE_BIN:-/binary-not-set}:/usr/local/bin/ekos-lakehouse:ro
+    command:
+      - sh
+      - -c
+      - mkdir -p "$$DAGSTER_HOME" && exec dagster dev -h 127.0.0.1 -p 53000 -f "$$EKOS_LH_PROJECT/pipeline/dagster/definitions.py"
     mem_limit: 1g
 
 volumes:

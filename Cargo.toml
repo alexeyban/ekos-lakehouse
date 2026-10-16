@@ -22,6 +22,8 @@ rust-version = "1.98"
 ekos               = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-compiler-core = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-migrate-validate = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-kir              = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-ledger           = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-pg-live          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-migrate          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 # The statement classifier (RFC 0160), used with Trino's grammar through `classify_with`.
@@ -43,6 +45,7 @@ sqlparser   = "0.53"
 thiserror   = "2"
 tokio       = { version = "1", features = ["full"] }
 toml        = "0.8"
+uuid        = { version = "1", features = ["v5"] }
 
 # Local development against a sibling EKOS checkout (`../EKOS`). Active while this repository
 # needs EKOS changes that are not on its `main` yet (RFC 0191, the extension seam v2); comment it

@@ -2,7 +2,8 @@
 # placeholder definitions; versions are pinned to what the generator targets.
 FROM python:3.12.15-slim
 RUN pip install --no-cache-dir \
-      dagster==1.13.26 dagster-webserver==1.13.26 dagster-dbt==0.29.26 dbt-trino==1.10.6
+      dagster==1.13.26 dagster-webserver==1.13.26 dagster-dbt==0.29.26 dbt-trino==1.10.6 \
+      trino==0.340.0
 WORKDIR /opt/dagster
 COPY placeholder.py .
 ENV DAGSTER_HOME=/opt/dagster/home

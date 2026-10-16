@@ -11,9 +11,11 @@ from that knowledge this extension generates pipeline code into a Git repository
 never moves data itself: Trino moves rows, Dagster schedules runs, and people approve what is
 lossy, breaking or business-facing.
 
-**Status: early development (milestone M0 of six).** The design is
-[RFC 0190](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0190-lakehouse.md). Today the
-binary contains all of EKOS plus one command, `lakehouse doctor`. Nothing generates pipelines yet.
+**Status: bronze works (milestones M0 and M1 of six).** The design is
+[RFC 0190](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0190-lakehouse.md), bronze is
+[RFC 0192](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0192-lakehouse-bronze.md).
+A PostgreSQL source lands in Iceberg bronze tables on a schedule, and every table is reconciled
+against its source on every run. Silver, schema-change handling and gold are not built yet.
 
 ## Build
 
@@ -42,8 +44,38 @@ dagster-url        = "http://127.0.0.1:53000"
 source             = "127.0.0.1:55433"
 ```
 
+```toml
+source-database     = "pagila"
+source-user         = "ekos"
+source-password-env = "EKOS_LH_PG_PASSWORD"     # the variable's name, never the password
+source-catalog      = "pagila"                  # the Trino catalog that reads the source
+bronze-schedule     = "0 * * * *"
+
+[extensions.lakehouse.watermarks]
+"public.film" = "last_update"     # used only when a BEFORE UPDATE trigger proves it
+```
+
 ```bash
 ekos-lakehouse lakehouse doctor          # which services answer; --json for a program
+ekos-lakehouse lakehouse plan            # each table's mode, mappings and refusals
+ekos-lakehouse lakehouse generate        # SQL + lakehouse.lock.json + Dagster project → pipeline/
+ekos-lakehouse lakehouse reconcile       # V1–V3 with a planted control, recorded in the ledger
+```
+
+The source's Trino catalog needs `postgresql.array-mapping=AS_ARRAY` and
+`unsupported-type-handling=CONVERT_TO_VARCHAR`: with the defaults the connector silently drops
+columns of types it does not map. A table whose column the connector does not expose is refused.
+
+## Try it on the sandbox
+
+```bash
+docker compose -f deploy/docker-compose.lakehouse.yml up -d      # everything but Dagster
+deploy/fixtures/pagila.sh                                         # Pagila, pinned
+# in a project directory with the ekos.toml above:
+ekos-lakehouse init && ekos-lakehouse lakehouse generate
+EKOS_LH_PROJECT=$PWD EKOS_LAKEHOUSE_BIN=$(which ekos-lakehouse) \
+  docker compose -f <repo>/deploy/docker-compose.lakehouse.yml --profile orchestrator up -d lh-dagster
+# Dagster at http://127.0.0.1:53000 — the bronze job runs on its schedule
 ```
 
 ## Roadmap
