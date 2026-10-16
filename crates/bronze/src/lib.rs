@@ -1,0 +1,14 @@
+//! The bronze layer of EKOS Lakehouse (RFC 0192): what each source table lands as, how it is
+//! loaded, and the SQL that does it. Pure functions over source facts — no connection, no clock,
+//! no randomness — so the same facts always generate the same files.
+
+pub mod mode;
+pub mod model;
+pub mod plan;
+pub mod render;
+pub mod typemap;
+
+pub use mode::{LoadMode, ModeSettings};
+pub use model::{SourceColumn, SourceTable, TypeKind, UpdateTrigger};
+pub use plan::{Plan, TablePlan, plan};
+pub use typemap::{CompareRule, Lossiness, Mapping};

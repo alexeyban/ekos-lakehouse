@@ -10,6 +10,11 @@ rust-version.workspace = true
 [dependencies]
 ekos.workspace = true
 ekos-compiler-core.workspace = true
+ekos-lakehouse-bronze.workspace = true
+ekos-lakehouse-trino.workspace = true
+ekos-migrate.workspace = true
+ekos-migrate-validate.workspace = true
+ekos-pg-live.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true
@@ -20,3 +25,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 toml.workspace = true
+postgres = "0.19"

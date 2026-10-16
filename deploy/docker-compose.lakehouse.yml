@@ -26,7 +26,9 @@ x-s3-env: &s3-env
 
 services:
   lh-postgres:
-    image: postgres:16.15-alpine
+    # PostgreSQL 18 with pgvector: what Pagila's current schema needs (`uuidv7()`, a `vector`
+    # column), and a realistic source — vector columns are a type-mapping case for bronze.
+    image: pgvector/pgvector:0.8.7-pg18-trixie
     environment:
       POSTGRES_USER: ekos
       POSTGRES_PASSWORD: ${EKOS_LH_PG_PASSWORD:-ekos-local-only}
@@ -46,7 +48,8 @@ services:
     ports:
       - "127.0.0.1:55433:5432"
     volumes:
-      - lh-pg-data:/var/lib/postgresql/data
+      # From 18 the image keeps its data under /var/lib/postgresql/<major>/; mount the parent.
+      - lh-pg-data:/var/lib/postgresql
     mem_limit: 512m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ekos -d source"]

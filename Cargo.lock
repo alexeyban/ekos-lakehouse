@@ -1073,6 +1073,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekos-lakehouse-bronze"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ekos-lakehouse-ext"
 version = "0.1.0"
 dependencies = [
@@ -1081,6 +1089,12 @@ dependencies = [
  "clap",
  "ekos",
  "ekos-compiler-core",
+ "ekos-lakehouse-bronze",
+ "ekos-lakehouse-trino",
+ "ekos-migrate",
+ "ekos-migrate-validate",
+ "ekos-pg-live",
+ "postgres",
  "reqwest",
  "serde",
  "serde_json",

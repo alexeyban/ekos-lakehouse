@@ -229,6 +229,7 @@ mod tests {
             s3_url: Some(s3),
             dagster_url: None,
             source: Some(source.local_addr().unwrap().to_string()),
+            ..Default::default()
         };
         let checks = run(&s).await;
         let by = |n: &str| checks.iter().find(|c| c.service == n).unwrap().clone();
@@ -254,6 +255,7 @@ mod tests {
             s3_url: Some(serve("500 Internal Server Error", "")),
             dagster_url: None,
             source: Some(closed()),
+            ..Default::default()
         };
         let checks = run(&s).await;
         for svc in ["trino", "polaris", "s3", "source"] {
