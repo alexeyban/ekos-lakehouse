@@ -2,3 +2,6 @@ target/
 *.swp
 .env
 deploy/fixtures/.cache/
+
+# Release builds (scripts/release.sh)
+/dist/
