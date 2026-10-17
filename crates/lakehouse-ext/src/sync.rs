@@ -55,6 +55,40 @@ fn commit_all(repo: &Path, message: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// The open pull request for `branch`, opened with `gh` when there is none (RFC 0194 §4). A
+/// request `gh` cannot open is reported, not an error: the branch is pushed and stays the
+/// proposal.
+fn ensure_pull_request(
+    repo: &Path,
+    base: &str,
+    branch: &str,
+    table: &str,
+    id: &str,
+) -> anyhow::Result<String> {
+    let gh = |args: &[&str]| Command::new("gh").current_dir(repo).args(args).output();
+    let open = gh(&[
+        "pr", "list", "--head", branch, "--state", "open", "--json", "url", "-q", ".[0].url",
+    ])?;
+    let url = String::from_utf8_lossy(&open.stdout).trim().to_string();
+    if open.status.success() && !url.is_empty() {
+        return Ok(url);
+    }
+    // The proposal file is on the branch only, not in this checkout.
+    let body = git(repo, &["show", &format!("{branch}:proposals/{id}.md")])?;
+    let title = format!("Schema change in {table} ({id})");
+    let out = gh(&[
+        "pr", "create", "--base", base, "--head", branch, "--title", &title, "--body", &body,
+    ])?;
+    Ok(if out.status.success() {
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    } else {
+        format!(
+            "not opened: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+    })
+}
+
 /// [`commit_all`] for the other commands that build branches (gold, RFC 0195).
 pub fn commit_all_pub(repo: &Path, message: &str) -> anyhow::Result<bool> {
     commit_all(repo, message)
@@ -199,6 +233,15 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
             repo.display()
         );
     }
+    let base = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if let Some(remote) = i.git_remote {
+        // With a remote, approval is a merge there: bring it in before comparing.
+        git(repo, &["pull", "-q", "--ff-only", remote, &base]).map_err(|e| {
+            anyhow::anyhow!(
+                "bringing {base} up to date from {remote} (sync only fast-forwards): {e}"
+            )
+        })?;
+    }
     let deployed = plan_cmd::read_lock(repo)?;
     let changes = diff(&deployed, i.live, i.policy);
 
@@ -230,6 +273,9 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
                 applied.join("\n")
             ),
         )?;
+        if let (true, Some(remote)) = (committed, i.git_remote) {
+            git(repo, &["push", "-q", remote, &base])?;
+        }
     }
     let applied: Vec<Change> = changes
         .iter()
@@ -294,7 +340,6 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
         if exists && !current {
             git(repo, &["branch", "-D", &branch])?;
         }
-        let mut pull_request = None;
         if !current {
             let mut impact_lines = vec![];
             for c in cs {
@@ -319,14 +364,12 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
                     "HEAD",
                 ],
             )?;
+            let body = proposal_markdown(&id, table, cs, &impact_lines);
             let built = (|| -> anyhow::Result<()> {
                 let proposed = with_table(&next, i.live, table);
                 plan_cmd::write(&proposed, i.silver, &wt)?;
                 std::fs::create_dir_all(wt.join("proposals"))?;
-                std::fs::write(
-                    wt.join(format!("proposals/{id}.md")),
-                    proposal_markdown(&id, table, cs, &impact_lines),
-                )?;
+                std::fs::write(wt.join(format!("proposals/{id}.md")), &body)?;
                 commit_all(
                     &wt,
                     &format!(
@@ -351,24 +394,20 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
             built?;
             if let Some(remote) = i.git_remote {
                 git(repo, &["push", "-q", "--force", "-u", remote, &branch])?;
-                if !exists {
-                    let out = Command::new("gh")
-                        .current_dir(repo)
-                        .args(["pr", "create", "--base", &base_branch, "--head", &branch])
-                        .args(["--title", &format!("Schema change in {table} ({id})")])
-                        .args(["--body-file", &format!("proposals/{id}.md")])
-                        .output()?;
-                    pull_request = Some(if out.status.success() {
-                        String::from_utf8_lossy(&out.stdout).trim().to_string()
-                    } else {
-                        format!(
-                            "not opened: {}",
-                            String::from_utf8_lossy(&out.stderr).trim()
-                        )
-                    });
-                }
             }
         }
+        // Every proposal has its pull request, also when opening one failed on an earlier run
+        // (a rebuilt branch updates its open request by the push above).
+        let pull_request = match i.git_remote {
+            Some(_) => Some(ensure_pull_request(
+                repo,
+                &base_branch,
+                &branch,
+                table,
+                &id,
+            )?),
+            None => None,
+        };
         proposals.push(Proposal {
             id,
             table: table.clone(),
@@ -398,6 +437,11 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
             .map(|(t, _)| t);
         if table.is_some_and(|t| !by_table.contains_key(t)) {
             git(repo, &["branch", "-D", b])?;
+            if let Some(remote) = i.git_remote {
+                // Gone already when the host deletes merged branches; deleting an unmerged
+                // one closes its pull request, whose change the source no longer has.
+                let _ = git(repo, &["push", "-q", remote, "--delete", b]);
+            }
         }
     }
 

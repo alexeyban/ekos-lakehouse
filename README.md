@@ -102,7 +102,10 @@ repository's branch; a rename, a drop, a narrowed type, a new required column, a
 a changed watermark trigger becomes a branch `ekos/change/<table>/<id>` with
 `proposals/<id>.md` (the change, its evidence, the silver columns and tests it reaches).
 Merging the branch is the approval. With `git-remote = "origin"` the branch is pushed and a
-pull request opened with `gh`. `[extensions.lakehouse.policy]` changes a class's action.
+pull request opened with `gh` (signed in, with rights on the repository); `sync` then starts by
+fast-forwarding from the remote, so a request merged there resumes its table on the next run,
+pushes the safe changes it commits, and removes merged proposal branches from the remote.
+`[extensions.lakehouse.policy]` changes a class's action.
 
 Masking and history are opt-in, by a person:
 
