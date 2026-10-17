@@ -11,11 +11,13 @@ from that knowledge this extension generates pipeline code into a Git repository
 never moves data itself: Trino moves rows, Dagster schedules runs, and people approve what is
 lossy, breaking or business-facing.
 
-**Status: bronze works (milestones M0 and M1 of six).** The design is
+**Status: bronze and silver work (milestones M0–M2 of six).** The design is
 [RFC 0190](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0190-lakehouse.md), bronze is
 [RFC 0192](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0192-lakehouse-bronze.md).
-A PostgreSQL source lands in Iceberg bronze tables on a schedule, and every table is reconciled
-against its source on every run. Silver, schema-change handling and gold are not built yet.
+A PostgreSQL source lands in Iceberg bronze tables on a schedule, every table is reconciled
+against its source on every run, and a generated dbt-trino project builds tested silver tables
+([RFC 0193](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0193-lakehouse-silver.md)).
+Schema-change handling and gold are not built yet.
 
 ## Build
 
@@ -60,6 +62,18 @@ ekos-lakehouse lakehouse doctor          # which services answer; --json for a p
 ekos-lakehouse lakehouse plan            # each table's mode, mappings and refusals
 ekos-lakehouse lakehouse generate        # SQL + lakehouse.lock.json + Dagster project → pipeline/
 ekos-lakehouse lakehouse reconcile       # V1–V3 with a planted control, recorded in the ledger
+ekos-lakehouse lakehouse check --lint    # lineage, test/doc coverage, drift, sqlfluff
+```
+
+Masking and history are opt-in, by a person:
+
+```toml
+[extensions.lakehouse]
+history = ["public.customer"]            # SCD2 snapshot in silver
+
+[extensions.lakehouse.pii]
+"public.customer.email" = "hmac"         # key from EKOS_LH_PII_KEY
+"public.staff.password" = "null"
 ```
 
 The source's Trino catalog needs `postgresql.array-mapping=AS_ARRAY` and
