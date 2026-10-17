@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-17
 **PRs:** none (local)
-**Branch:** main (EKOS `[patch]` active: needs EKOS RFC 0198/0199 changes not yet on EKOS `main`)
+**Branch:** main (EKOS by git, `main` at 1f0a4dc with RFC 0198/0199)
 **Design:** EKOS RFC 0198 (console pages from extensions), RFC 0199 (this repository's part)
 
 ---
