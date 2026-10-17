@@ -17,6 +17,8 @@ pub enum Status {
     Ok,
     Failed,
     NotConfigured,
+    /// Works, but not the way it should (a source role that can write).
+    Warning,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,7 +30,7 @@ pub struct Check {
 }
 
 impl Check {
-    fn not_configured(service: &'static str, key: &str) -> Self {
+    pub fn not_configured(service: &'static str, key: &str) -> Self {
         Self {
             service,
             target: None,
@@ -37,7 +39,7 @@ impl Check {
         }
     }
 
-    fn of(service: &'static str, target: String, outcome: Result<String, String>) -> Self {
+    pub fn of(service: &'static str, target: String, outcome: Result<String, String>) -> Self {
         let (status, detail) = match outcome {
             Ok(d) => (Status::Ok, d),
             Err(d) => (Status::Failed, d),
@@ -147,6 +149,119 @@ async fn tcp(addr: &str) -> Result<String, String> {
     }
 }
 
+/// Checks that need the source and the engine together (RFC 0196 §4): failures that would
+/// otherwise happen later and quietly. Blocking: the caller runs it off the async runtime.
+pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -> Vec<Check> {
+    let mut out = vec![];
+    if s.source_database.is_none() || s.trino_url.is_none() {
+        out.push(Check::not_configured(
+            "columns",
+            "source-database and trino-url",
+        ));
+        return out;
+    }
+    let pg = crate::plan_cmd::connect_source(s, "lakehouse-doctor");
+    let trino = s
+        .trino_connection()
+        .and_then(|c| ekos_lakehouse_trino::TrinoReader::new(c).map_err(Into::into));
+    match (&pg, &trino) {
+        (Ok(pg), Ok(trino)) => {
+            let ps = s.plan_settings();
+            let target = format!(
+                "{} via catalog {}",
+                s.source_database.as_deref().unwrap_or("?"),
+                ps.source_catalog
+            );
+            match crate::source::read(pg, trino, &ps.source_catalog, &s.schemas(), redaction, 0) {
+                Ok(tables) => {
+                    let hidden: Vec<String> = tables
+                        .iter()
+                        .flat_map(|t| {
+                            t.columns
+                                .iter()
+                                .filter(|c| c.trino_type.is_none())
+                                .map(move |c| format!("{}.{}.{}", t.schema, t.name, c.name))
+                        })
+                        .collect();
+                    let n: usize = tables.iter().map(|t| t.columns.len()).sum();
+                    out.push(Check::of(
+                        "columns",
+                        target,
+                        if hidden.is_empty() {
+                            Ok(format!("the connector exposes all {n} columns of {} tables", tables.len()))
+                        } else {
+                            Err(format!(
+                                "the connector hides {} of {n} columns ({}…): set postgresql.array-mapping=AS_ARRAY \
+                                 and unsupported-type-handling=CONVERT_TO_VARCHAR on catalog {}",
+                                hidden.len(),
+                                hidden.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+                                ps.source_catalog
+                            ))
+                        },
+                    ));
+                }
+                Err(e) => out.push(Check::of("columns", target, Err(e.to_string()))),
+            }
+            out.push(match pg.check_write_refused() {
+                Ok(w) if w.is_safe() => Check::of("role", s.source_user.clone().unwrap_or_default(), Ok("the source refuses this role's writes".into())),
+                Ok(_) => Check {
+                    service: "role",
+                    target: s.source_user.clone(),
+                    status: Status::Warning,
+                    detail: "this role can write to the source: EKOS only reads, but a read-only role is the guarantee".into(),
+                },
+                Err(e) => Check::of("role", s.source_user.clone().unwrap_or_default(), Err(e.to_string())),
+            });
+            let catalog = s.plan_settings().target_catalog;
+            out.push(Check::of(
+                "iceberg",
+                catalog.clone(),
+                ekos_lakehouse_trino::Client::new(s.trino_connection().expect("checked"))
+                    .and_then(|c| {
+                        c.execute(&format!(
+                            "SHOW SCHEMAS FROM \"{}\"",
+                            catalog.replace('"', "\"\"")
+                        ))
+                    })
+                    .map(|r| format!("the catalog answers ({} namespaces)", r.rows.len()))
+                    .map_err(|e| e.to_string()),
+            ));
+        }
+        (Err(e), _) => out.push(Check::of("columns", "source".into(), Err(e.to_string()))),
+        (_, Err(e)) => out.push(Check::of("columns", "trino".into(), Err(e.to_string()))),
+    }
+    if let Some(model) = &s.gold_model {
+        let url = format!(
+            "{}/api/tags",
+            s.ollama_url.as_deref().unwrap_or("http://127.0.0.1:11434")
+        );
+        let found = reqwest::blocking::get(&url)
+            .and_then(|r| r.json::<serde_json::Value>())
+            .map_err(|e| e.to_string())
+            .and_then(|v| {
+                let names: Vec<String> = v["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m["name"].as_str().map(str::to_string))
+                    .collect();
+                if names
+                    .iter()
+                    .any(|n| n == model || n.split(':').next() == Some(model.as_str()))
+                {
+                    Ok(format!("{model} is available"))
+                } else {
+                    Err(format!(
+                        "{model} is not pulled (have: {})",
+                        names.join(", ")
+                    ))
+                }
+            });
+        out.push(Check::of("gold-model", url, found));
+    }
+    out
+}
+
 pub fn render(checks: &[Check]) -> String {
     let mut out = String::new();
     for c in checks {
@@ -154,6 +269,7 @@ pub fn render(checks: &[Check]) -> String {
             Status::Ok => "ok  ",
             Status::Failed => "FAIL",
             Status::NotConfigured => "--  ",
+            Status::Warning => "WARN",
         };
         out.push_str(&format!(
             "{mark}  {:<8} {}  {}\n",
@@ -176,7 +292,10 @@ pub fn verdict(checks: &[Check]) -> anyhow::Result<()> {
     if !failed.is_empty() {
         anyhow::bail!("not reachable: {}", failed.join(", "));
     }
-    if checks.iter().all(|c| c.status == Status::NotConfigured) {
+    if checks
+        .iter()
+        .all(|c| matches!(c.status, Status::NotConfigured | Status::Warning))
+    {
         anyhow::bail!("nothing to check: [extensions.lakehouse] names no service");
     }
     Ok(())

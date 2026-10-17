@@ -188,6 +188,20 @@ services:
       - mkdir -p "$$DAGSTER_HOME" && exec dagster dev -h 127.0.0.1 -p 53000 -f "$$EKOS_LH_PROJECT/pipeline/dagster/definitions.py"
     mem_limit: 1g
 
+  # Metrics for an existing Prometheus/Grafana stack (RFC 0196): `lakehouse metrics` pushes
+  # OTLP here; Prometheus scrapes :58889/metrics.
+  #   docker compose -f deploy/docker-compose.lakehouse.yml --profile observability up -d lh-otel
+  lh-otel:
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    profiles: ["observability"]
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./otel/collector.yaml:/etc/otel/collector.yaml:ro
+    ports:
+      - "127.0.0.1:54318:4318"   # OTLP/HTTP
+      - "127.0.0.1:58889:8889"   # Prometheus scrape
+    mem_limit: 256m
+
 volumes:
   lh-pg-data:
   lh-s3-data:

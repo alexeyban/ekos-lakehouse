@@ -1104,6 +1104,7 @@ dependencies = [
  "ekos-lakehouse-bronze",
  "ekos-lakehouse-changes",
  "ekos-lakehouse-gold",
+ "ekos-lakehouse-health",
  "ekos-lakehouse-silver",
  "ekos-lakehouse-trino",
  "ekos-ledger",
@@ -1136,6 +1137,14 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "sqlparser",
+]
+
+[[package]]
+name = "ekos-lakehouse-health"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

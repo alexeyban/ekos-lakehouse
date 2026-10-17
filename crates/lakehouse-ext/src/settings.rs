@@ -53,6 +53,12 @@ pub struct Settings {
     pub gold_model: Option<String>,
     /// Default `http://127.0.0.1:11434`.
     pub ollama_url: Option<String>,
+    /// A table with no successful run for this long is late (RFC 0196). Default 120.
+    pub late_after_minutes: Option<i64>,
+    /// The environment variable holding the alert webhook's URL (a URL with a token is a secret).
+    pub alert_webhook_env: Option<String>,
+    /// An OTLP/HTTP endpoint (a collector), e.g. `http://127.0.0.1:54318`.
+    pub otlp_endpoint: Option<String>,
 }
 
 impl Settings {

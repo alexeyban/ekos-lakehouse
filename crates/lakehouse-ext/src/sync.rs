@@ -27,7 +27,8 @@ pub fn git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
         .arg("-C")
         .arg(repo)
         .args(args)
-        .output()?;
+        .output()
+        .map_err(|e| anyhow::anyhow!("running git (is it installed and on PATH?): {e}"))?;
     if !out.status.success() {
         anyhow::bail!(
             "git {}: {}",

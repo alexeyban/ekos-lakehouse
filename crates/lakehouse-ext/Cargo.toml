@@ -15,6 +15,7 @@ ekos-lakehouse-bronze.workspace = true
 ekos-lakehouse-silver.workspace = true
 ekos-lakehouse-changes.workspace = true
 ekos-lakehouse-gold.workspace = true
+ekos-lakehouse-health.workspace = true
 ekos-recovery.workspace = true
 ekos-lakehouse-trino.workspace = true
 ekos-kir.workspace = true

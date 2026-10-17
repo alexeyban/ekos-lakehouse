@@ -1,6 +1,9 @@
 # Dagster for the EKOS Lakehouse sandbox. The generated pipeline project (M1) replaces the
 # placeholder definitions; versions are pinned to what the generator targets.
 FROM python:3.12.15-slim
+# `lakehouse sync` commits and branches in the pipeline repository (RFC 0194).
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
       dagster==1.13.26 dagster-webserver==1.13.26 dagster-dbt==0.29.26 dbt-trino==1.10.6 \
       trino==0.340.0 sqlfluff==4.3.0

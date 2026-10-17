@@ -228,14 +228,47 @@ resources = {}
 DBT_DIR = REPO / "dbt"
 if (DBT_DIR / "dbt_project.yml").exists():
     dbt_project = DbtProject(project_dir=DBT_DIR, profiles_dir=DBT_DIR)
-    dbt_project.prepare_if_dev()
+    # Always, not only under `dagster dev`: EKOS regenerates the dbt project, so the manifest
+    # must follow it, and a one-off `dagster job execute` has none otherwise.
+    dbt_project.preparer.prepare(dbt_project)
 
     @dbt_assets(manifest=dbt_project.manifest_path, project=dbt_project)
     def silver(context: dg.AssetExecutionContext, dbt: DbtCliResource):
-        yield from dbt.cli(["build"], context=context).stream()
+        invocation = dbt.cli(["build"], context=context)
+        try:
+            yield from invocation.stream()
+        finally:
+            # Every model's build and tests become ledger facts, failed or not (RFC 0196).
+            # dagster-dbt gives each invocation its own target directory: read that one, never
+            # dbt/target/, which may hold an older run's results (a false green, found by the
+            # quickstart test).
+            report = _ekos("lakehouse", "run-report", "--run-id", context.run_id,
+                           "--dbt-results", str(invocation.target_path))
+            context.log.info(report.stdout + report.stderr)
+            if report.returncode != 0:
+                raise dg.Failure(description="dbt results could not be recorded",
+                                 metadata={"output": report.stdout + report.stderr})
 
     assets.append(silver)
     resources["dbt"] = DbtCliResource(project_dir=dbt_project)
+
+
+@dg.asset(key=["lakehouse", "health"], group_name="lakehouse",
+          deps=[a for a in assets if a is not sync])
+def health(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """After every load and build: alert on state transitions, push metrics (RFC 0196)."""
+    alert = _ekos("lakehouse", "alert")
+    context.log.info(alert.stdout + alert.stderr)
+    metrics = _ekos("lakehouse", "metrics")
+    context.log.info(metrics.stdout + metrics.stderr)
+    status = _ekos("lakehouse", "status")
+    return dg.MaterializeResult(metadata={
+        "status": dg.MetadataValue.text(status.stdout.strip().splitlines()[-1] if status.stdout.strip() else ""),
+        "alerts": dg.MetadataValue.text(alert.stdout.strip()),
+    })
+
+
+assets.append(health)
 
 # Four loads at a time: the sandbox's measured best (RFC 0190 M0), and gentle on the source.
 bronze_job = dg.define_asset_job(

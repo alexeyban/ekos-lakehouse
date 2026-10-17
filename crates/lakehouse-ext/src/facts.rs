@@ -19,8 +19,8 @@ fn det_id(seed: &str) -> KirId {
     KirId(Uuid::new_v5(&Uuid::NAMESPACE_URL, seed.as_bytes()))
 }
 
-pub fn run_id(table: &str, run: &str) -> KirId {
-    det_id(&format!("lakehouse-run:{table}:{run}"))
+pub fn run_id(table: &str, layer: &str, run: &str) -> KirId {
+    det_id(&format!("lakehouse-run:{layer}:{table}:{run}"))
 }
 
 pub fn metric_id(table: &str, run: &str, metric: &str) -> KirId {
@@ -31,6 +31,8 @@ pub fn metric_id(table: &str, run: &str, metric: &str) -> KirId {
 #[derive(Debug, Clone, Serialize)]
 pub struct RunReport {
     pub table: String,
+    /// `bronze`, `silver` or `gold`.
+    pub layer: String,
     pub run_id: String,
     pub status: String,
     pub rows: Option<i64>,
@@ -58,10 +60,10 @@ fn with_context<T>(
 pub fn record_run(store: &dyn KnowledgeStore, r: &RunReport) -> anyhow::Result<KirId> {
     with_context(store, &r.run_id, "run-report", || {
         let mut obj = KirObject::new(
-            format!("{} run {}", r.table, r.run_id),
+            format!("{} {} run {}", r.table, r.layer, r.run_id),
             ObjectKind::Custom(RUN_KIND.into()),
         );
-        obj.id = run_id(&r.table, &r.run_id);
+        obj.id = run_id(&r.table, &r.layer, &r.run_id);
         let serde_json::Value::Object(map) = serde_json::to_value(r)? else {
             unreachable!("a struct serializes to an object")
         };
@@ -216,6 +218,32 @@ pub fn record_mart(
             json!(o.checked_atoms),
         );
         obj.properties.insert("drafts".into(), json!(o.drafts));
+        obj.properties.insert("run_id".into(), json!(run));
+        store.append_object(&obj)?;
+        Ok(obj.id)
+    })
+}
+
+/// A table's schema state after `sync` (RFC 0196 §1): one fixed id per table, so the ledger's
+/// current version is the current state.
+pub fn record_schema_state(
+    store: &dyn KnowledgeStore,
+    run: &str,
+    table: &str,
+    state: &str,
+    proposal: Option<&str>,
+) -> anyhow::Result<KirId> {
+    with_context(store, run, "sync", || {
+        let mut obj = KirObject::new(
+            format!("{table} schema state"),
+            ObjectKind::Custom(METRIC_KIND.into()),
+        );
+        obj.id = det_id(&format!("lakehouse-schema-state:{table}"));
+        obj.properties.insert("table".into(), json!(table));
+        obj.properties
+            .insert("metric".into(), json!("schema_state"));
+        obj.properties.insert("state".into(), json!(state));
+        obj.properties.insert("proposal".into(), json!(proposal));
         obj.properties.insert("run_id".into(), json!(run));
         store.append_object(&obj)?;
         Ok(obj.id)

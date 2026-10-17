@@ -1,0 +1,17 @@
+# EKOS Lakehouse sandbox collector (RFC 0196): OTLP in, Prometheus out — the shape a team's
+# existing Prometheus/Grafana stack scrapes.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  debug:
+    verbosity: basic
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [prometheus, debug]

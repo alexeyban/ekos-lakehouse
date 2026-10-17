@@ -8,6 +8,7 @@ pub mod check;
 pub mod doctor;
 pub mod facts;
 pub mod gold_cmd;
+pub mod monitor;
 pub mod plan_cmd;
 pub mod reconcile;
 pub mod settings;
@@ -27,6 +28,81 @@ pub struct LakehouseExtension;
 impl EkosExtension for LakehouseExtension {
     fn name(&self) -> &'static str {
         NAME
+    }
+
+    fn mcp_tools(&self, _config: &ekos_compiler_core::EkosConfig) -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({
+                "name": "ekos_pipeline_status",
+                "description": "EKOS Lakehouse: every table's health per layer (bronze, silver, gold) — healthy, late, unverified (a planted reconciliation control missed), failing, or schema_pending (a source change awaits approval) — with the facts that put it there and, for a failing table, the probable cause. Read-only: it cannot rerun, merge or approve anything.",
+                "inputSchema": {"type": "object", "properties": {
+                    "late_after_minutes": {"type": "integer", "description": "A table with no successful run for this long is late (default 120)"},
+                    "only_unhealthy": {"type": "boolean", "description": "Leave out healthy tables"}
+                }}
+            }),
+            serde_json::json!({
+                "name": "ekos_table_health",
+                "description": "EKOS Lakehouse: one table's health per layer with its evidence, recent runs, reconciliations (tiers, divergences, planted control) and schema changes. Read-only.",
+                "inputSchema": {"type": "object", "required": ["table"], "properties": {
+                    "table": {"type": "string", "description": "schema.table, e.g. public.orders"},
+                    "late_after_minutes": {"type": "integer"}
+                }}
+            }),
+        ]
+    }
+
+    fn mcp_tool_is_scoped(&self, name: &str) -> bool {
+        // Both read only through the store they are handed (RFC 0191).
+        matches!(name, "ekos_pipeline_status" | "ekos_table_health")
+    }
+
+    fn call_mcp_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        ledger: &dyn ekos_ledger::KnowledgeStore,
+    ) -> Option<anyhow::Result<serde_json::Value>> {
+        let late = args["late_after_minutes"].as_i64().unwrap_or(120);
+        match name {
+            "ekos_pipeline_status" => Some((|| {
+                let h = monitor::health(ledger, late)?;
+                let only = args["only_unhealthy"].as_bool().unwrap_or(false);
+                let shown: Vec<_> = h
+                    .iter()
+                    .filter(|x| !only || x.state != ekos_lakehouse_health::State::Healthy)
+                    .collect();
+                Ok(
+                    serde_json::json!({"tables": shown, "summary": monitor::render(&h).lines().last()}),
+                )
+            })()),
+            "ekos_table_health" => Some((|| {
+                let table = args["table"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("`table` is required"))?;
+                let f = monitor::facts(ledger)?;
+                let h: Vec<_> = ekos_lakehouse_health::evaluate(&f, monitor::now(), late)
+                    .into_iter()
+                    .filter(|x| x.table == table)
+                    .collect();
+                anyhow::ensure!(!h.is_empty(), "no lakehouse facts for {table}");
+                let mut runs: Vec<_> = f.runs.iter().filter(|r| r.table == table).collect();
+                runs.sort_by_key(|r| std::cmp::Reverse(r.at));
+                let mut recon: Vec<_> = f
+                    .reconciliations
+                    .iter()
+                    .filter(|r| r.table == table)
+                    .collect();
+                recon.sort_by_key(|r| std::cmp::Reverse(r.at));
+                let changes: Vec<_> = f.changes.iter().filter(|c| c.table == table).collect();
+                Ok(serde_json::json!({
+                    "health": h,
+                    "recent_runs": runs.into_iter().take(10).collect::<Vec<_>>(),
+                    "recent_reconciliations": recon.into_iter().take(5).collect::<Vec<_>>(),
+                    "schema_changes": changes,
+                }))
+            })()),
+            _ => None,
+        }
     }
 
     fn commands(&self) -> Vec<clap::Command> {
@@ -116,6 +192,27 @@ impl EkosExtension for LakehouseExtension {
                         ),
                 )
                 .subcommand(
+                    clap::Command::new("status")
+                        .about(
+                            "Every table's health per layer, with the facts behind it (RFC 0196)",
+                        )
+                        .arg(
+                            clap::Arg::new("json")
+                                .long("json")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Machine-readable output"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("alert")
+                        .about("Post each health transition once to the alert webhook (RFC 0196)"),
+                )
+                .subcommand(
+                    clap::Command::new("metrics").about(
+                        "Push health as OpenTelemetry metrics to the OTLP endpoint (RFC 0196)",
+                    ),
+                )
+                .subcommand(
                     clap::Command::new("check")
                         .about(
                             "Measure the generated project: lineage through the compiled \
@@ -141,7 +238,7 @@ impl EkosExtension for LakehouseExtension {
                         .arg(
                             clap::Arg::new("table")
                                 .long("table")
-                                .required(true)
+                                .required_unless_present("dbt-results")
                                 .help("schema.table"),
                         )
                         .arg(
@@ -153,9 +250,24 @@ impl EkosExtension for LakehouseExtension {
                         .arg(
                             clap::Arg::new("status")
                                 .long("status")
-                                .required(true)
+                                .required_unless_present("dbt-results")
                                 .value_parser(["ok", "failed"])
                                 .help("How the load ended"),
+                        )
+                        .arg(
+                            clap::Arg::new("layer")
+                                .long("layer")
+                                .default_value("bronze")
+                                .value_parser(["bronze", "silver", "gold"])
+                                .help("The layer the run wrote"),
+                        )
+                        .arg(
+                            clap::Arg::new("dbt-results")
+                                .long("dbt-results")
+                                .value_parser(clap::value_parser!(std::path::PathBuf))
+                                .help(
+                                    "dbt's target/ directory: record every model's build and tests",
+                                ),
                         )
                         .arg(
                             clap::Arg::new("rows")
@@ -206,6 +318,10 @@ impl EkosExtension for LakehouseExtension {
             // Reads the source and bronze, writes facts to the project's ledger.
             ("lakehouse reconcile", Class::External, false),
             ("lakehouse run-report", Class::Write, false),
+            ("lakehouse status", Class::Read, false),
+            // Reach a webhook / a collector outside the home.
+            ("lakehouse alert", Class::External, false),
+            ("lakehouse metrics", Class::External, false),
             // Reads the live source; commits and branches in the pipeline repository.
             ("lakehouse sync", Class::External, false),
             // Calls the configured (local) model for prose terms.
@@ -224,7 +340,9 @@ impl EkosExtension for LakehouseExtension {
         match matches.subcommand() {
             Some(("doctor", m)) => {
                 let settings = settings::load(ctx.config)?;
-                let checks = doctor::run(&settings).await;
+                let mut checks = doctor::run(&settings).await;
+                let redaction = ctx.config.redaction_config();
+                checks.extend(off_runtime(|| Ok(doctor::deep(&settings, &redaction)))?);
                 if m.get_flag("json") {
                     println!("{}", serde_json::to_string(&checks)?);
                 } else {
@@ -368,6 +486,16 @@ impl EkosExtension for LakehouseExtension {
                         facts::record_change(store.as_ref(), &run, c, Some(&p.branch))?;
                     }
                 }
+                for (table, (state, proposal)) in &outcome.status {
+                    let state = format!("{state:?}").to_lowercase();
+                    facts::record_schema_state(
+                        store.as_ref(),
+                        &run,
+                        table,
+                        &state,
+                        proposal.as_deref(),
+                    )?;
+                }
                 if m.get_flag("json") {
                     println!("{}", serde_json::to_string(&outcome)?);
                 } else {
@@ -475,6 +603,60 @@ impl EkosExtension for LakehouseExtension {
                     )
                 }
             }
+            Some(("status", m)) => {
+                let settings = settings::load(ctx.config)?;
+                let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+                let h =
+                    monitor::health(store.as_ref(), settings.late_after_minutes.unwrap_or(120))?;
+                if m.get_flag("json") {
+                    println!("{}", serde_json::to_string(&h)?);
+                } else {
+                    print!("{}", monitor::render(&h));
+                }
+                Ok(())
+            }
+            Some(("alert", _)) => {
+                let settings = settings::load(ctx.config)?;
+                let h = {
+                    let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+                    monitor::health(store.as_ref(), settings.late_after_minutes.unwrap_or(120))?
+                };
+                let webhook = match &settings.alert_webhook_env {
+                    Some(var) => Some(std::env::var(var).map_err(|_| {
+                        anyhow::anyhow!("{var} names the alert webhook but is not set")
+                    })?),
+                    None => None,
+                };
+                let dir = pipeline_dir(&settings, ctx).join(".lakehouse");
+                let sent = off_runtime(|| monitor::alert(&h, &dir, webhook.as_deref()))?;
+                for t in &sent {
+                    println!("{t}");
+                }
+                println!(
+                    "{} transition(s){}",
+                    sent.len(),
+                    if webhook.is_some() {
+                        " posted"
+                    } else {
+                        " (no alert-webhook-env: printed only)"
+                    }
+                );
+                Ok(())
+            }
+            Some(("metrics", _)) => {
+                let settings = settings::load(ctx.config)?;
+                let endpoint = settings.otlp_endpoint.clone().ok_or_else(|| {
+                    anyhow::anyhow!("set `otlp-endpoint` in [extensions.lakehouse]")
+                })?;
+                let h = {
+                    let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+                    monitor::health(store.as_ref(), settings.late_after_minutes.unwrap_or(120))?
+                };
+                let body = monitor::otlp(&h, monitor::now());
+                off_runtime(|| monitor::push_metrics(&endpoint, &body))?;
+                println!("pushed {} table/layer series to {endpoint}", h.len());
+                Ok(())
+            }
             Some(("check", m)) => {
                 let settings = settings::load(ctx.config)?;
                 let repo = pipeline_dir(&settings, ctx);
@@ -530,8 +712,28 @@ impl EkosExtension for LakehouseExtension {
                 }
                 Ok(())
             }
+            Some(("run-report", m)) if m.get_one::<std::path::PathBuf>("dbt-results").is_some() => {
+                let target = ctx.invoked_from.join(
+                    m.get_one::<std::path::PathBuf>("dbt-results")
+                        .expect("checked"),
+                );
+                let run = m.get_one::<String>("run-id").cloned().expect("required");
+                let reports = monitor::dbt_results(&target)?;
+                let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+                let failed = reports.iter().filter(|r| r.status != "ok").count();
+                for mut r in reports.clone() {
+                    r.run_id = run.clone();
+                    facts::record_run(store.as_ref(), &r)?;
+                }
+                println!(
+                    "recorded {} dbt model results ({failed} failing) for run {run}",
+                    reports.len()
+                );
+                Ok(())
+            }
             Some(("run-report", m)) => {
                 let report = facts::RunReport {
+                    layer: m.get_one::<String>("layer").cloned().expect("defaulted"),
                     table: m.get_one::<String>("table").cloned().expect("required"),
                     run_id: m.get_one::<String>("run-id").cloned().expect("required"),
                     status: m.get_one::<String>("status").cloned().expect("required"),

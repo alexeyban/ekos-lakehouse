@@ -11,7 +11,7 @@ from that knowledge this extension generates pipeline code into a Git repository
 never moves data itself: Trino moves rows, Dagster schedules runs, and people approve what is
 lossy, breaking or business-facing.
 
-**Status: bronze, silver, schema changes and gold work (milestones M0–M4 of six).** The design is
+**Status: all six milestones of RFC 0190's v1 plan are built (M0–M5).** The design is
 [RFC 0190](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0190-lakehouse.md), bronze is
 [RFC 0192](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0192-lakehouse-bronze.md).
 A PostgreSQL source lands in Iceberg bronze tables on a schedule, every table is reconciled
@@ -21,7 +21,11 @@ Source schema changes are classified and either applied or proposed as branches 
 impact ([RFC 0194](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0194-lakehouse-schema-changes.md)).
 Gold marts are drafted from written descriptions, with every term resolved or asked back and
 nothing invented ([RFC 0195](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0195-lakehouse-gold.md)).
-Monitoring and self-serve docs (M5) are next.
+Health per table and layer, alerts, OpenTelemetry metrics and MCP tools for agents
+([RFC 0196](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0196-lakehouse-monitoring.md)).
+
+**Start here: [docs/quickstart.md](docs/quickstart.md)** — your PostgreSQL database to monitored
+Iceberg tables. Then the [runbook](docs/runbook.md) and [troubleshooting](docs/troubleshooting.md).
 
 ## Build
 
