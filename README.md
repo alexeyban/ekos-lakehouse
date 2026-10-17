@@ -11,13 +11,15 @@ from that knowledge this extension generates pipeline code into a Git repository
 never moves data itself: Trino moves rows, Dagster schedules runs, and people approve what is
 lossy, breaking or business-facing.
 
-**Status: bronze and silver work (milestones M0–M2 of six).** The design is
+**Status: bronze, silver and schema-change handling work (milestones M0–M3 of six).** The design is
 [RFC 0190](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0190-lakehouse.md), bronze is
 [RFC 0192](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0192-lakehouse-bronze.md).
 A PostgreSQL source lands in Iceberg bronze tables on a schedule, every table is reconciled
 against its source on every run, and a generated dbt-trino project builds tested silver tables
 ([RFC 0193](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0193-lakehouse-silver.md)).
-Schema-change handling and gold are not built yet.
+Source schema changes are classified and either applied or proposed as branches with their
+impact ([RFC 0194](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0194-lakehouse-schema-changes.md)).
+Gold is not built yet.
 
 ## Build
 
@@ -63,7 +65,15 @@ ekos-lakehouse lakehouse plan            # each table's mode, mappings and refus
 ekos-lakehouse lakehouse generate        # SQL + lakehouse.lock.json + Dagster project → pipeline/
 ekos-lakehouse lakehouse reconcile       # V1–V3 with a planted control, recorded in the ledger
 ekos-lakehouse lakehouse check --lint    # lineage, test/doc coverage, drift, sqlfluff
+ekos-lakehouse lakehouse sync            # source changes: safe ones committed, the rest proposed
 ```
+
+`sync` commits a new table, a new nullable column and a widened type on the pipeline
+repository's branch; a rename, a drop, a narrowed type, a new required column, a key change or
+a changed watermark trigger becomes a branch `ekos/change/<table>/<id>` with
+`proposals/<id>.md` (the change, its evidence, the silver columns and tests it reaches).
+Merging the branch is the approval. With `git-remote = "origin"` the branch is pushed and a
+pull request opened with `gh`. `[extensions.lakehouse.policy]` changes a class's action.
 
 Masking and history are opt-in, by a person:
 

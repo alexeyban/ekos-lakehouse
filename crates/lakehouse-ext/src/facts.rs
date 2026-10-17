@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 pub const RUN_KIND: &str = "LakehouseRun";
 pub const METRIC_KIND: &str = "LakehouseMetric";
+pub const CHANGE_KIND: &str = "LakehouseChange";
 
 fn det_id(seed: &str) -> KirId {
     KirId(Uuid::new_v5(&Uuid::NAMESPACE_URL, seed.as_bytes()))
@@ -142,6 +143,37 @@ pub fn record_check(
             unreachable!("a struct serializes to an object")
         };
         obj.properties.extend(map);
+        store.append_object(&obj)?;
+        Ok(obj.id)
+    })
+}
+
+/// One detected schema change and what was done with it (RFC 0194).
+pub fn record_change(
+    store: &dyn KnowledgeStore,
+    run: &str,
+    c: &ekos_lakehouse_changes::Change,
+    proposal: Option<&str>,
+) -> anyhow::Result<KirId> {
+    with_context(store, run, "sync", || {
+        let what = c.column.as_deref().unwrap_or("");
+        let mut obj = KirObject::new(
+            format!("{} {} {what}", c.table, c.class.name()),
+            ObjectKind::Custom(CHANGE_KIND.into()),
+        );
+        obj.id = det_id(&format!(
+            "lakehouse-change:{}:{}:{what}:{}:{}",
+            c.table,
+            c.class.name(),
+            c.from.as_deref().unwrap_or(""),
+            c.to.as_deref().unwrap_or("")
+        ));
+        let serde_json::Value::Object(map) = serde_json::to_value(c)? else {
+            unreachable!("a struct serializes to an object")
+        };
+        obj.properties.extend(map);
+        obj.properties.insert("run_id".into(), json!(run));
+        obj.properties.insert("proposal".into(), json!(proposal));
         store.append_object(&obj)?;
         Ok(obj.id)
     })

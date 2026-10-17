@@ -124,6 +124,8 @@ pub fn map_column(col: &SourceColumn) -> Mapping {
             enum_labels: vec![],
             pii_candidate: None,
             infinite_values: None,
+            attnum: 0,
+            has_default: false,
         });
         if inner.lossiness == Lossiness::Refused {
             return Mapping {
@@ -380,6 +382,8 @@ mod tests {
             enum_labels: vec![],
             pii_candidate: None,
             infinite_values: None,
+            attnum: 0,
+            has_default: false,
         }
     }
 
@@ -582,10 +586,18 @@ mod tests {
 
     #[test]
     fn a_timestamp_holding_infinity_is_refused() {
-        let mut c = col("validto", "timestamp without time zone", TypeKind::Base, Some("timestamp(6)"));
+        let mut c = col(
+            "validto",
+            "timestamp without time zone",
+            TypeKind::Base,
+            Some("timestamp(6)"),
+        );
         c.infinite_values = Some(1);
         let got = map_column(&c);
-        assert_eq!((got.lossiness, got.rule.as_str()), (Lossiness::Refused, "infinite-timestamp"));
+        assert_eq!(
+            (got.lossiness, got.rule.as_str()),
+            (Lossiness::Refused, "infinite-timestamp")
+        );
         c.infinite_values = Some(0);
         assert_eq!(map_column(&c).lossiness, Lossiness::Exact);
     }

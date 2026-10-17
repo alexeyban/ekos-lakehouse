@@ -78,6 +78,14 @@ pub fn choose(t: &SourceTable, s: &ModeSettings) -> ModeDecision {
                             "trigger {} runs {} before every update and assigns NEW.{w}",
                             tr.trigger, tr.function
                         ));
+                        if !tr.body_sha.is_empty() {
+                            // A changed routine is a change (RFC 0194): the proof names its body.
+                            d.evidence.push(format!(
+                                "{} body sha256 {}",
+                                tr.function,
+                                &tr.body_sha[..tr.body_sha.len().min(16)]
+                            ));
+                        }
                         let keyed = !t.primary_key.is_empty();
                         if keyed {
                             d.evidence.push(format!(
@@ -131,9 +139,12 @@ mod tests {
             enum_labels: vec![],
             pii_candidate: None,
             infinite_values: None,
+            attnum: 0,
+            has_default: false,
         };
         SourceTable {
             schema: "public".into(),
+            oid: 0,
             name: "film".into(),
             columns: vec![
                 c("film_id", "integer"),
@@ -153,6 +164,7 @@ mod tests {
             trigger: "last_updated".into(),
             function: "public.last_updated()".into(),
             assigns: vec!["last_update".into()],
+            body_sha: String::new(),
         }
     }
 

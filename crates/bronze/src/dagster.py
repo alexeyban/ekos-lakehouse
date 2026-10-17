@@ -77,6 +77,17 @@ def _ident(name):
     return '"' + name.replace('"', '""') + '"'
 
 
+STATUS = REPO / ".lakehouse" / "status.json"
+
+
+def _state(qualified):
+    """The table's run-time state from the last `lakehouse sync` (RFC 0194 §5)."""
+    try:
+        return json.loads(STATUS.read_text()).get(qualified, ["active", None])
+    except (FileNotFoundError, json.JSONDecodeError):
+        return ["active", None]
+
+
 def _ekos(*args):
     return subprocess.run(
         [BIN, *args], cwd=PROJECT, capture_output=True, text=True, check=False
@@ -107,6 +118,17 @@ def _source_lsn(cur):
         return ""
 
 
+@dg.asset(key=["lakehouse", "sync"], group_name="lakehouse")
+def sync(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """Detect source schema changes before any load (RFC 0194): commit safe ones, propose the
+    rest. A table added by a safe change gets its asset when the code location reloads."""
+    result = _ekos("lakehouse", "sync")
+    context.log.info(result.stdout + result.stderr)
+    if result.returncode != 0:
+        raise dg.Failure(description="lakehouse sync failed", metadata={"output": result.stderr})
+    return dg.MaterializeResult(metadata={"sync": dg.MetadataValue.text(result.stdout.strip())})
+
+
 def _make_asset(table):
     schema, name = table["schema"], table["table"]
     qualified = f"{schema}.{name}"
@@ -120,10 +142,17 @@ def _make_asset(table):
         name=f"{schema}__{name}",
         key_prefix=["bronze"],
         group_name="bronze",
+        deps=[sync],
         description=f"{qualified} → {table['namespace']}.{name} ({mode['mode']})",
     )
     def _load(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         run_id = context.run_id
+        state, waiting_on = _state(qualified)
+        if state == "paused":
+            context.log.warning(f"{qualified} is paused: a schema change waits on {waiting_on}")
+            return dg.MaterializeResult(
+                metadata={"status": f"paused — waiting on {waiting_on}", "rows_written": 0}
+            )
         started = time.monotonic()
         cur = _connect().cursor()
         try:
@@ -131,8 +160,9 @@ def _make_asset(table):
             lsn = _source_lsn(cur)
             watermark = "NULL"
             if mode["mode"] == "incremental":
-                for stmt in _statements((base / "create.sql").read_text()):
-                    _run(cur, stmt)
+                for f in ("create.sql", "schema.sql"):
+                    for stmt in _statements((base / f).read_text()):
+                        _run(cur, stmt)
                 wm_type = next(
                     c["iceberg_type"]
                     for c in table["columns"]
@@ -190,7 +220,7 @@ def bronze_maintenance(context: dg.OpExecutionContext):
         context.log.info(f"maintained {table['schema']}.{table['table']}")
 
 
-assets = [_make_asset(t) for t in LOCK["tables"]]
+assets = [sync] + [_make_asset(t) for t in LOCK["tables"]]
 resources = {}
 
 # Silver (RFC 0193): the generated dbt project. Its sources carry the bronze asset keys, so each
@@ -210,7 +240,7 @@ if (DBT_DIR / "dbt_project.yml").exists():
 # Four loads at a time: the sandbox's measured best (RFC 0190 M0), and gentle on the source.
 bronze_job = dg.define_asset_job(
     "bronze",
-    selection=dg.AssetSelection.groups("bronze", "silver"),
+    selection=dg.AssetSelection.groups("lakehouse", "bronze", "silver"),
     config={"execution": {"config": {"multiprocess": {"max_concurrent": 4}}}},
 )
 

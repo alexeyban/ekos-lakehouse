@@ -45,6 +45,12 @@ pub struct SourceColumn {
     /// Rows holding `infinity` / `-infinity` in a timestamp or date column, when measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub infinite_values: Option<u64>,
+    /// `pg_attribute.attnum`: a column's identity across renames (RFC 0194 §1).
+    #[serde(default)]
+    pub attnum: i32,
+    /// Whether the column has a default (a new column with one is not "nullable, no default").
+    #[serde(default)]
+    pub has_default: bool,
 }
 
 /// A declared foreign key.
@@ -63,12 +69,18 @@ pub struct UpdateTrigger {
     pub trigger: String,
     pub function: String,
     pub assigns: Vec<String>,
+    /// SHA-256 of the function's source: a changed routine is a change (RFC 0194 §2).
+    #[serde(default)]
+    pub body_sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceTable {
     pub schema: String,
     pub name: String,
+    /// `pg_class.oid`: a table's identity across renames (RFC 0194 §1).
+    #[serde(default)]
+    pub oid: u32,
     pub columns: Vec<SourceColumn>,
     pub primary_key: Vec<String>,
     /// `reltuples`, or an exact count when one was taken.

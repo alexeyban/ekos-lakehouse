@@ -33,7 +33,7 @@ pub fn read(
     let mut tables: BTreeMap<(String, String), SourceTable> = BTreeMap::new();
     for r in pg.rows(&format!(
         "SELECT n.nspname, c.relname, GREATEST(c.reltuples, 0)::bigint, \
-                COALESCE(obj_description(c.oid, 'pg_class'), '') \
+                COALESCE(obj_description(c.oid, 'pg_class'), ''), c.oid \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname IN ({list}) AND c.relkind IN ('r', 'p') AND NOT c.relispartition \
          ORDER BY 1, 2"
@@ -42,6 +42,7 @@ pub fn read(
             (r[0].clone(), r[1].clone()),
             SourceTable {
                 schema: r[0].clone(),
+                oid: r[4].parse().unwrap_or(0),
                 name: r[1].clone(),
                 columns: vec![],
                 primary_key: vec![],
@@ -60,7 +61,8 @@ pub fn read(
                 CASE WHEN t.typcategory = 'A' THEN format_type(t.typelem, NULL) END, \
                 a.attnotnull, COALESCE(col_description(c.oid, a.attnum), ''), \
                 CASE WHEN t.typtype = 'e' THEN (SELECT string_agg(e.enumlabel, chr(31) ORDER BY e.enumsortorder) \
-                     FROM pg_enum e WHERE e.enumtypid = t.oid) END \
+                     FROM pg_enum e WHERE e.enumtypid = t.oid) END, \
+                a.attnum, a.atthasdef \
          FROM pg_attribute a \
          JOIN pg_class c ON c.oid = a.attrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -95,6 +97,8 @@ pub fn read(
                 pii_candidate: ekos_pg_live::pii::classify_name(&r[2])
                     .map(|c| format!("{:?}", c.class).to_lowercase()),
                 infinite_values: None,
+                attnum: r[11].parse().unwrap_or(0),
+                has_default: r[12] == "t",
             });
         }
     }
@@ -157,10 +161,12 @@ pub fn read(
         if let Some(t) = tables.get_mut(&(r[0].clone(), r[1].clone())) {
             let assigns = assigned_new_columns(&r[4]);
             if !assigns.is_empty() {
+                use sha2::{Digest, Sha256};
                 t.update_triggers.push(UpdateTrigger {
                     trigger: r[2].clone(),
                     function: r[3].clone(),
                     assigns,
+                    body_sha: format!("{:x}", Sha256::digest(r[4].as_bytes())),
                 });
             }
         }
@@ -203,7 +209,10 @@ pub fn read(
                 let r = pg.rows(&format!(
                     "SELECT count(*) FROM {qualified} WHERE {col} IN ('infinity', '-infinity')"
                 ))?;
-                c.infinite_values = r.first().and_then(|r| r.first()).and_then(|v| v.parse().ok());
+                c.infinite_values = r
+                    .first()
+                    .and_then(|r| r.first())
+                    .and_then(|v| v.parse().ok());
             }
         }
     }

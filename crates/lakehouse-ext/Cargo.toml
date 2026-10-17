@@ -13,6 +13,7 @@ ekos-common.workspace = true
 ekos-compiler-core.workspace = true
 ekos-lakehouse-bronze.workspace = true
 ekos-lakehouse-silver.workspace = true
+ekos-lakehouse-changes.workspace = true
 ekos-lakehouse-trino.workspace = true
 ekos-kir.workspace = true
 ekos-ledger.workspace = true

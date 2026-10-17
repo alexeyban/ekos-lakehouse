@@ -5,6 +5,7 @@
 resolver = "3"
 members = [
     "crates/bronze",
+    "crates/changes",
     "crates/silver",
     "crates/trino",
     "crates/lakehouse-ext",
@@ -36,6 +37,7 @@ ekos-lakehouse-ext   = { path = "crates/lakehouse-ext" }
 ekos-lakehouse-trino  = { path = "crates/trino" }
 ekos-lakehouse-bronze = { path = "crates/bronze" }
 ekos-lakehouse-silver = { path = "crates/silver" }
+ekos-lakehouse-changes = { path = "crates/changes" }
 
 # ── Third party (versions match the EKOS workspace) ──
 anyhow      = "1"

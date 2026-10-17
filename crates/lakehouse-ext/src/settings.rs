@@ -45,6 +45,10 @@ pub struct Settings {
     pub pii: std::collections::BTreeMap<String, ekos_lakehouse_silver::MaskMethod>,
     /// Tables that keep SCD2 history in silver (RFC 0193 §4).
     pub history: Vec<String>,
+    /// A change class's action, overriding RFC 0190's default (`rename = "auto"`), RFC 0194.
+    pub policy: ekos_lakehouse_changes::Policy,
+    /// Push proposal branches to this git remote and open pull requests with `gh` (RFC 0194).
+    pub git_remote: Option<String>,
 }
 
 impl Settings {

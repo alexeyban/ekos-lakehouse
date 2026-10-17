@@ -11,6 +11,7 @@ pub mod plan_cmd;
 pub mod reconcile;
 pub mod settings;
 pub mod source;
+pub mod sync;
 
 use async_trait::async_trait;
 use ekos::commands::catalogue::Class;
@@ -74,6 +75,19 @@ impl EkosExtension for LakehouseExtension {
                             clap::Arg::new("run-id")
                                 .long("run-id")
                                 .help("The orchestrator's run id (default: manual-<time>)"),
+                        )
+                        .arg(
+                            clap::Arg::new("json")
+                                .long("json")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Machine-readable output"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("sync")
+                        .about(
+                            "Compare the live source with the deployed plan: commit safe \
+                                changes, propose the rest on branches (RFC 0194)",
                         )
                         .arg(
                             clap::Arg::new("json")
@@ -173,6 +187,8 @@ impl EkosExtension for LakehouseExtension {
             // Reads the source and bronze, writes facts to the project's ledger.
             ("lakehouse reconcile", Class::External, false),
             ("lakehouse run-report", Class::Write, false),
+            // Reads the live source; commits and branches in the pipeline repository.
+            ("lakehouse sync", Class::External, false),
             // Reads the repository and the ledger; writes metric facts.
             ("lakehouse check", Class::Write, false),
         ]
@@ -219,6 +235,7 @@ impl EkosExtension for LakehouseExtension {
                     off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?
                 };
                 let w = plan_cmd::write(&plan, &settings.silver_settings(), &out)?;
+                sync::commit_generated(&out, "lakehouse: generate")?;
                 let n = w.files;
                 print!("{}", plan_cmd::render_summary(&plan));
                 print!("{}", plan_cmd::render_silver_report(&w.silver));
@@ -296,6 +313,84 @@ impl EkosExtension for LakehouseExtension {
                     .collect();
                 if !bad.is_empty() {
                     anyhow::bail!("not green: {}", bad.join(", "));
+                }
+                Ok(())
+            }
+            Some(("sync", m)) => {
+                let settings = settings::load(ctx.config)?;
+                let repo = pipeline_dir(&settings, ctx);
+                let live = {
+                    let redaction = ctx.config.redaction_config();
+                    off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?
+                };
+                let run = format!(
+                    "sync-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                );
+                let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+                let outcome = sync::sync(sync::SyncInputs {
+                    repo: &repo,
+                    live: &live,
+                    silver: &settings.silver_settings(),
+                    policy: &settings.policy,
+                    store: store.as_ref(),
+                    git_remote: settings.git_remote.as_deref(),
+                })?;
+                for c in &outcome.applied {
+                    facts::record_change(store.as_ref(), &run, c, None)?;
+                }
+                for p in &outcome.proposals {
+                    for c in &p.changes {
+                        facts::record_change(store.as_ref(), &run, c, Some(&p.branch))?;
+                    }
+                }
+                if m.get_flag("json") {
+                    println!("{}", serde_json::to_string(&outcome)?);
+                } else {
+                    for c in &outcome.applied {
+                        println!(
+                            "applied   {:<22} {}{}",
+                            c.class.name(),
+                            c.table,
+                            c.column
+                                .as_ref()
+                                .map(|x| format!(".{x}"))
+                                .unwrap_or_default()
+                        );
+                    }
+                    for p in &outcome.proposals {
+                        for c in &p.changes {
+                            println!(
+                                "proposed  {:<22} {}{}  → {}{}",
+                                c.class.name(),
+                                c.table,
+                                c.column
+                                    .as_ref()
+                                    .map(|x| format!(".{x}"))
+                                    .unwrap_or_default(),
+                                p.branch,
+                                if p.new { " (new)" } else { "" }
+                            );
+                        }
+                        if let Some(pr) = &p.pull_request {
+                            println!("          pull request: {pr}");
+                        }
+                    }
+                    let held: Vec<String> = outcome
+                        .status
+                        .iter()
+                        .filter(|(_, (s, _))| *s != sync::TableState::Active)
+                        .map(|(t, (s, _))| format!("{t} {s:?}").to_lowercase())
+                        .collect();
+                    if outcome.applied.is_empty() && outcome.proposals.is_empty() {
+                        println!("no changes: the source matches the deployed plan");
+                    }
+                    if !held.is_empty() {
+                        println!("waiting on a proposal: {}", held.join(", "));
+                    }
                 }
                 Ok(())
             }

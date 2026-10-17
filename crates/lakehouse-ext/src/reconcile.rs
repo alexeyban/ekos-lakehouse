@@ -107,7 +107,7 @@ pub fn unit_plan(t: &TablePlan, s: &PlanSettings) -> (UnitPlan, Vec<String>) {
     (unit, not_compared)
 }
 
-fn describe(d: &Vec<ekos_migrate_validate::divergence::Divergence>) -> Vec<String> {
+fn describe(d: &[ekos_migrate_validate::divergence::Divergence]) -> Vec<String> {
     d.iter()
         .map(|x| format!("{}: {}", x.locus, x.detail))
         .collect()
@@ -131,21 +131,32 @@ pub fn reconcile(
     // A value a side cannot render canonically (a NULL bucket, an unparseable aggregate) is a
     // difference to report, not a reason to stop: LedgerSMB's `infinity` timestamp, misread by
     // the connector, surfaced first as "cannot parse '' as u32".
-    let as_result = |tier: &'static str, r: Result<_, ReadError>| TierResult {
-        tier,
-        divergences: match r {
-            Ok(o) => describe(&o),
-            Err(ReadError::Parse { value, as_type, column }) => vec![format!(
-                "{}: a side returned {value:?} where the tier expected {as_type} (column {column}) \
+    let as_result =
+        |tier: &'static str,
+         r: Result<Vec<ekos_migrate_validate::divergence::Divergence>, ReadError>| {
+            TierResult {
+                tier,
+                divergences: match r {
+                    Ok(o) => describe(&o),
+                    Err(ReadError::Parse {
+                        value,
+                        as_type,
+                        column,
+                    }) => vec![format!(
+                        "{}: a side returned {value:?} where the tier expected {as_type} (column {column}) \
                  — a value it cannot render canonically",
-                unit.unit
-            )],
-            Err(e) => vec![format!("{}: {e}", unit.unit)],
-        },
-    };
+                        unit.unit
+                    )],
+                    Err(e) => vec![format!("{}: {e}", unit.unit)],
+                },
+            }
+        };
     let tiers = vec![
         as_result("V1", run_v1(&unit, source, target).map(|o| o.divergences)),
-        as_result("V2", run_v2(&unit, source, target, &names).map(|o| o.divergences)),
+        as_result(
+            "V2",
+            run_v2(&unit, source, target, &names).map(|o| o.divergences),
+        ),
         as_result("V3", run_v3(&unit, source, target).map(|o| o.divergences)),
     ];
     let diverged = tiers.iter().any(|t| !t.divergences.is_empty());

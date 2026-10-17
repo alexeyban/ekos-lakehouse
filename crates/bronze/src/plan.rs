@@ -39,6 +39,9 @@ impl Default for PlanSettings {
 pub struct TablePlan {
     pub schema: String,
     pub table: String,
+    /// The source table's OID (RFC 0194 §1).
+    #[serde(default)]
+    pub oid: u32,
     pub namespace: String,
     pub primary_key: Vec<String>,
     pub decision: ModeDecision,
@@ -60,7 +63,12 @@ pub struct TableFacts {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnFacts {
     pub name: String,
+    /// `attnum` (RFC 0194 §1).
+    #[serde(default)]
+    pub attnum: i32,
     pub not_null: bool,
+    #[serde(default)]
+    pub has_default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -79,6 +87,8 @@ impl TablePlan {
 pub struct RefusedTable {
     pub schema: String,
     pub table: String,
+    #[serde(default)]
+    pub oid: u32,
     /// One per refused column.
     pub reasons: Vec<String>,
 }
@@ -92,8 +102,8 @@ pub struct Plan {
     pub refused: Vec<RefusedTable>,
 }
 
-/// 2: table and column facts for silver (RFC 0193).
-pub const FORMAT: u32 = 2;
+/// 2: table and column facts for silver (RFC 0193). 3: OIDs, attnums, defaults (RFC 0194).
+pub const FORMAT: u32 = 3;
 
 /// Every table's plan, sorted by (schema, table). A table with any refused column is refused
 /// whole: bronze never drops a column.
@@ -117,6 +127,7 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
             out.refused.push(RefusedTable {
                 schema: t.schema.clone(),
                 table: t.name.clone(),
+                oid: t.oid,
                 reasons,
             });
             continue;
@@ -124,6 +135,7 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
         out.tables.push(TablePlan {
             schema: t.schema.clone(),
             table: t.name.clone(),
+            oid: t.oid,
             namespace: format!("{}{}", settings.namespace_prefix, t.schema),
             primary_key: t.primary_key.clone(),
             decision: choose(t, &settings.modes),
@@ -136,7 +148,9 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
                     .iter()
                     .map(|c| ColumnFacts {
                         name: c.name.clone(),
+                        attnum: c.attnum,
                         not_null: c.not_null,
+                        has_default: c.has_default,
                         comment: c.comment.clone(),
                         enum_labels: c.enum_labels.clone(),
                         pii_candidate: c.pii_candidate.clone(),

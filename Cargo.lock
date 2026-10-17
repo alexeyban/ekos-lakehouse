@@ -1081,6 +1081,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekos-lakehouse-changes"
+version = "0.1.0"
+dependencies = [
+ "ekos-lakehouse-bronze",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ekos-lakehouse-ext"
 version = "0.1.0"
 dependencies = [
@@ -1092,6 +1102,7 @@ dependencies = [
  "ekos-compiler-core",
  "ekos-kir",
  "ekos-lakehouse-bronze",
+ "ekos-lakehouse-changes",
  "ekos-lakehouse-silver",
  "ekos-lakehouse-trino",
  "ekos-ledger",

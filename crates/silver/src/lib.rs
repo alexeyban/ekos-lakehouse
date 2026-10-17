@@ -577,6 +577,8 @@ mod tests {
             enum_labels: vec![],
             pii_candidate: None,
             infinite_values: None,
+            attnum: 0,
+            has_default: false,
         }
     }
 
@@ -601,12 +603,18 @@ mod tests {
         vec![
             SourceTable {
                 schema: "public".into(),
+                oid: 0,
                 name: "film".into(),
                 columns: vec![
                     col("film_id", "integer", "integer", true),
                     col("language_id", "integer", "integer", true),
                     rating,
-                    col("last_update", "timestamp with time zone", "timestamp(6) with time zone", true),
+                    col(
+                        "last_update",
+                        "timestamp with time zone",
+                        "timestamp(6) with time zone",
+                        true,
+                    ),
                 ],
                 primary_key: vec!["film_id".into()],
                 row_estimate: 1000,
@@ -614,17 +622,24 @@ mod tests {
                     trigger: "last_updated".into(),
                     function: "last_updated()".into(),
                     assigns: vec!["last_update".into()],
+                    body_sha: String::new(),
                 }],
                 // Declared twice, as LedgerSMB does: one test.
                 foreign_keys: vec![
                     fk("film_language_fk", "language_id", "language", "language_id"),
-                    fk("film_language_fk_again", "language_id", "language", "language_id"),
+                    fk(
+                        "film_language_fk_again",
+                        "language_id",
+                        "language",
+                        "language_id",
+                    ),
                     fk("film_studio_fk", "language_id", "studio", "id"),
                 ],
                 comment: Some("A film.".into()),
             },
             SourceTable {
                 schema: "public".into(),
+                oid: 0,
                 name: "language".into(),
                 columns: vec![col("language_id", "integer", "integer", true)],
                 primary_key: vec!["language_id".into()],
@@ -635,6 +650,7 @@ mod tests {
             },
             SourceTable {
                 schema: "public".into(),
+                oid: 0,
                 name: "customer".into(),
                 columns: vec![
                     col("store_id", "integer", "integer", true),
@@ -671,13 +687,20 @@ mod tests {
         let (f, _) = files(&the_plan(), &settings());
         let film = &f["dbt/models/silver/public/public__film.sql"];
         assert!(film.starts_with(HEADER));
-        assert!(film.contains("{{ config(materialized='table', schema='silver_public', alias='film') }}"));
+        assert!(
+            film.contains(
+                "{{ config(materialized='table', schema='silver_public', alias='film') }}"
+            )
+        );
         assert!(film.contains("select * from {{ source('bronze_public', 'film') }}"));
         assert!(film.contains("partition by \"film_id\""), "{film}");
         assert!(film.contains("where \"_ekos_rn\" = 1 and \"_ekos_op\" != 'delete'"));
         assert!(film.contains("\"_ekos_loaded_at\" as \"_ekos_bronze_loaded_at\""));
         let lang = &f["dbt/models/silver/public/public__language.sql"];
-        assert!(lang.contains("from bronze\n") && !lang.contains("row_number"), "{lang}");
+        assert!(
+            lang.contains("from bronze\n") && !lang.contains("row_number"),
+            "{lang}"
+        );
     }
 
     #[test]
@@ -686,12 +709,21 @@ mod tests {
         let customer = &f["dbt/models/silver/public/public__customer.sql"];
         assert!(customer.contains("hmac_sha256("), "{customer}");
         assert!(customer.contains("var(\"ekos_pii_key\")"));
-        assert!(customer.contains("    \"first_name\","), "a candidate is not masked");
+        assert!(
+            customer.contains("    \"first_name\","),
+            "a candidate is not masked"
+        );
         assert_eq!(r.masked, ["public.customer.email (hmac)"]);
-        assert_eq!(r.pii_candidates, ["public.customer.first_name (personname)"]);
+        assert_eq!(
+            r.pii_candidates,
+            ["public.customer.first_name (personname)"]
+        );
         assert!(f["dbt/dbt_project.yml"].contains("env_var('EKOS_LH_PII_KEY')"));
         let (no_hmac, _) = files(&the_plan(), &SilverSettings::default());
-        assert!(!no_hmac["dbt/dbt_project.yml"].contains("ekos_pii_key"), "no key needed");
+        assert!(
+            !no_hmac["dbt/dbt_project.yml"].contains("ekos_pii_key"),
+            "no key needed"
+        );
     }
 
     #[test]
@@ -710,19 +742,30 @@ mod tests {
             .iter()
             .filter(|t| t.get("relationships").is_some())
             .collect();
-        assert_eq!(rels.len(), 1, "two declarations of one key, one test: {lang:?}");
+        assert_eq!(
+            rels.len(),
+            1,
+            "two declarations of one key, one test: {lang:?}"
+        );
         assert!(
             serde_yaml::to_string(rels[0])
                 .unwrap()
                 .contains("film_language_fk, film_language_fk_again")
         );
         let rating = cols.iter().find(|c| c["name"] == "rating").unwrap();
-        assert!(serde_yaml::to_string(rating).unwrap().contains("accepted_values"));
+        assert!(
+            serde_yaml::to_string(rating)
+                .unwrap()
+                .contains("accepted_values")
+        );
         assert_eq!(
             r.skipped_foreign_keys,
             ["public.film film_studio_fk: public.studio is not planned"]
         );
-        let customer = models.iter().find(|m| m["name"] == "public__customer").unwrap();
+        let customer = models
+            .iter()
+            .find(|m| m["name"] == "public__customer")
+            .unwrap();
         assert!(
             serde_yaml::to_string(&customer["data_tests"])
                 .unwrap()
@@ -735,9 +778,15 @@ mod tests {
     fn history_is_a_yaml_snapshot_and_assets_are_keyed() {
         let (f, _) = files(&the_plan(), &settings());
         let snaps = &f["dbt/snapshots/_snapshots.yml"];
-        assert!(snaps.contains("relation: ref('public__customer')"), "{snaps}");
+        assert!(
+            snaps.contains("relation: ref('public__customer')"),
+            "{snaps}"
+        );
         assert!(snaps.contains("strategy: check"));
-        assert!(snaps.contains("- customer_id"), "composite unique_key: {snaps}");
+        assert!(
+            snaps.contains("- customer_id"),
+            "composite unique_key: {snaps}"
+        );
         let sources = &f["dbt/models/bronze_sources.yml"];
         assert!(sources.contains("- bronze\n") && sources.contains("- public__film"));
         assert!(f["dbt/models/silver/public/_public__models.yml"].contains("group: silver"));
@@ -745,6 +794,9 @@ mod tests {
 
     #[test]
     fn the_same_plan_renders_the_same_project() {
-        assert_eq!(files(&the_plan(), &settings()), files(&the_plan(), &settings()));
+        assert_eq!(
+            files(&the_plan(), &settings()),
+            files(&the_plan(), &settings())
+        );
     }
 }
