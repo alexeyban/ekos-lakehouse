@@ -7,6 +7,7 @@
 pub mod check;
 pub mod doctor;
 pub mod facts;
+pub mod gold_cmd;
 pub mod plan_cmd;
 pub mod reconcile;
 pub mod settings;
@@ -94,6 +95,24 @@ impl EkosExtension for LakehouseExtension {
                                 .long("json")
                                 .action(clap::ArgAction::SetTrue)
                                 .help("Machine-readable output"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("gold")
+                        .about("Gold marts from written descriptions (RFC 0195)")
+                        .subcommand_required(true)
+                        .subcommand(
+                            clap::Command::new("draft")
+                                .about(
+                                    "Resolve a mart description's terms; ask about what does \
+                                        not resolve, or propose the mart on a branch",
+                                )
+                                .arg(
+                                    clap::Arg::new("description")
+                                        .required(true)
+                                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                                        .help("marts/<name>.md"),
+                                ),
                         ),
                 )
                 .subcommand(
@@ -189,6 +208,8 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse run-report", Class::Write, false),
             // Reads the live source; commits and branches in the pipeline repository.
             ("lakehouse sync", Class::External, false),
+            // Calls the configured (local) model for prose terms.
+            ("lakehouse gold draft", Class::External, true),
             // Reads the repository and the ledger; writes metric facts.
             ("lakehouse check", Class::Write, false),
         ]
@@ -393,6 +414,66 @@ impl EkosExtension for LakehouseExtension {
                     }
                 }
                 Ok(())
+            }
+            Some(("gold", g)) => {
+                let Some(("draft", m)) = g.subcommand() else {
+                    anyhow::bail!("unknown gold command");
+                };
+                let settings = settings::load(ctx.config)?;
+                let repo = pipeline_dir(&settings, ctx);
+                let description = ctx.invoked_from.join(
+                    m.get_one::<std::path::PathBuf>("description")
+                        .expect("required"),
+                );
+                let (outcome, _) = gold_cmd::draft(
+                    &repo,
+                    &description,
+                    settings.gold_model.as_deref().unwrap_or("llama3"),
+                    settings
+                        .ollama_url
+                        .as_deref()
+                        .unwrap_or("http://127.0.0.1:11434"),
+                    &settings.trino_connection()?,
+                )
+                .await?;
+                let run = format!(
+                    "gold-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                );
+                let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+                facts::record_mart(store.as_ref(), &run, &outcome)?;
+                let questions_path = description.with_extension("questions.md");
+                if outcome.questions.is_empty() {
+                    let _ = std::fs::remove_file(&questions_path);
+                    println!(
+                        "proposed gold mart {} on {} ({} atoms checked, nothing invented)",
+                        outcome.mart,
+                        outcome.branch.as_deref().unwrap_or("?"),
+                        outcome.checked_atoms
+                    );
+                    for (term, n) in &outcome.drafts {
+                        println!("  {term}: drafted by the model in {n} attempt(s)");
+                    }
+                    Ok(())
+                } else {
+                    let spec = ekos_lakehouse_gold::parse(&std::fs::read_to_string(&description)?)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    std::fs::write(
+                        &questions_path,
+                        ekos_lakehouse_gold::questions_markdown(&spec, &outcome.questions),
+                    )?;
+                    for (term, q) in &outcome.questions {
+                        println!("question about `{term}`: {}", q.text);
+                    }
+                    anyhow::bail!(
+                        "{} question(s) for the author, written to {}",
+                        outcome.questions.len(),
+                        questions_path.display()
+                    )
+                }
             }
             Some(("check", m)) => {
                 let settings = settings::load(ctx.config)?;

@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub const RUN_KIND: &str = "LakehouseRun";
 pub const METRIC_KIND: &str = "LakehouseMetric";
 pub const CHANGE_KIND: &str = "LakehouseChange";
+pub const MART_KIND: &str = "LakehouseMart";
 
 fn det_id(seed: &str) -> KirId {
     KirId(Uuid::new_v5(&Uuid::NAMESPACE_URL, seed.as_bytes()))
@@ -174,6 +175,48 @@ pub fn record_change(
         obj.properties.extend(map);
         obj.properties.insert("run_id".into(), json!(run));
         obj.properties.insert("proposal".into(), json!(proposal));
+        store.append_object(&obj)?;
+        Ok(obj.id)
+    })
+}
+
+/// A gold mart drafted from a description: proposed, or asked back (RFC 0195).
+pub fn record_mart(
+    store: &dyn KnowledgeStore,
+    run: &str,
+    o: &crate::gold_cmd::DraftOutcome,
+) -> anyhow::Result<KirId> {
+    with_context(store, run, "gold", || {
+        let mut obj = KirObject::new(
+            format!("gold mart {}", o.mart),
+            ObjectKind::Custom(MART_KIND.into()),
+        );
+        obj.id = det_id(&format!("lakehouse-mart:{}", o.mart));
+        obj.properties.insert("mart".into(), json!(o.mart));
+        obj.properties.insert(
+            "status".into(),
+            json!(if o.branch.is_some() {
+                "proposed"
+            } else {
+                "questions"
+            }),
+        );
+        obj.properties.insert("branch".into(), json!(o.branch));
+        obj.properties.insert(
+            "questions".into(),
+            json!(
+                o.questions
+                    .iter()
+                    .map(|(t, q)| format!("{t}: {}", q.text))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        obj.properties.insert(
+            "anti_invention_atoms_checked".into(),
+            json!(o.checked_atoms),
+        );
+        obj.properties.insert("drafts".into(), json!(o.drafts));
+        obj.properties.insert("run_id".into(), json!(run));
         store.append_object(&obj)?;
         Ok(obj.id)
     })

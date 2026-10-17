@@ -1103,12 +1103,14 @@ dependencies = [
  "ekos-kir",
  "ekos-lakehouse-bronze",
  "ekos-lakehouse-changes",
+ "ekos-lakehouse-gold",
  "ekos-lakehouse-silver",
  "ekos-lakehouse-trino",
  "ekos-ledger",
  "ekos-migrate",
  "ekos-migrate-validate",
  "ekos-pg-live",
+ "ekos-recovery",
  "postgres",
  "reqwest",
  "serde",
@@ -1118,6 +1120,22 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "ekos-lakehouse-gold"
+version = "0.1.0"
+dependencies = [
+ "ekos-lakehouse-bronze",
+ "ekos-lakehouse-silver",
+ "ekos-migrate-logic",
+ "ekos-plugin-sql-dialect-trino",
+ "ekos-sql-dialect-sdk",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "sqlparser",
 ]
 
 [[package]]

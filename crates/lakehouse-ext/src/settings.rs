@@ -49,6 +49,10 @@ pub struct Settings {
     pub policy: ekos_lakehouse_changes::Policy,
     /// Push proposal branches to this git remote and open pull requests with `gh` (RFC 0194).
     pub git_remote: Option<String>,
+    /// The local Ollama model that drafts a gold mart's prose terms (RFC 0195). Default `llama3`.
+    pub gold_model: Option<String>,
+    /// Default `http://127.0.0.1:11434`.
+    pub ollama_url: Option<String>,
 }
 
 impl Settings {

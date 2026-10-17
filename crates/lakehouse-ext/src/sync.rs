@@ -49,6 +49,11 @@ fn commit_all(repo: &Path, message: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// [`commit_all`] for the other commands that build branches (gold, RFC 0195).
+pub fn commit_all_pub(repo: &Path, message: &str) -> anyhow::Result<bool> {
+    commit_all(repo, message)
+}
+
 /// Make the pipeline repository a git repository on first generate, and commit.
 pub fn commit_generated(repo: &Path, message: &str) -> anyhow::Result<bool> {
     if !repo.join(".git").exists() {

@@ -11,7 +11,7 @@ from that knowledge this extension generates pipeline code into a Git repository
 never moves data itself: Trino moves rows, Dagster schedules runs, and people approve what is
 lossy, breaking or business-facing.
 
-**Status: bronze, silver and schema-change handling work (milestones M0–M3 of six).** The design is
+**Status: bronze, silver, schema changes and gold work (milestones M0–M4 of six).** The design is
 [RFC 0190](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0190-lakehouse.md), bronze is
 [RFC 0192](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0192-lakehouse-bronze.md).
 A PostgreSQL source lands in Iceberg bronze tables on a schedule, every table is reconciled
@@ -19,7 +19,9 @@ against its source on every run, and a generated dbt-trino project builds tested
 ([RFC 0193](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0193-lakehouse-silver.md)).
 Source schema changes are classified and either applied or proposed as branches with their
 impact ([RFC 0194](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0194-lakehouse-schema-changes.md)).
-Gold is not built yet.
+Gold marts are drafted from written descriptions, with every term resolved or asked back and
+nothing invented ([RFC 0195](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0195-lakehouse-gold.md)).
+Monitoring and self-serve docs (M5) are next.
 
 ## Build
 
@@ -66,7 +68,30 @@ ekos-lakehouse lakehouse generate        # SQL + lakehouse.lock.json + Dagster p
 ekos-lakehouse lakehouse reconcile       # V1–V3 with a planted control, recorded in the ledger
 ekos-lakehouse lakehouse check --lint    # lineage, test/doc coverage, drift, sqlfluff
 ekos-lakehouse lakehouse sync            # source changes: safe ones committed, the rest proposed
+ekos-lakehouse lakehouse gold draft marts/revenue.md   # a mart from a description, or questions
 ```
+
+A gold mart starts as a committed description:
+
+```markdown
+---
+mart: receivables_by_customer_month
+grain: [customer, month]
+dimensions:
+  customer: entity_credit_account.meta_number
+  month: month of transactions.transdate
+measures:
+  invoiced: sum of ar.amount_bc
+  average_invoice: the amount_bc total divided by the number of invoices
+filters:
+  - transactions.approved is true
+---
+What each customer was invoiced per month.
+```
+
+Every term must resolve to a silver column, or it comes back as a question. Prose terms are
+drafted by a local model (`gold-model`, Ollama) and must state nothing the description does not
+and run on Trino. The mart is proposed on a branch with grain and reconciliation tests.
 
 `sync` commits a new table, a new nullable column and a widened type on the pipeline
 repository's branch; a rename, a drop, a narrowed type, a new required column, a key change or
