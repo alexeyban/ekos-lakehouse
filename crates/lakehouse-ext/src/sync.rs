@@ -40,6 +40,11 @@ pub fn git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
 }
 
 fn commit_all(repo: &Path, message: &str) -> anyhow::Result<bool> {
+    // A file committed before the generated `.gitignore` covered it (a Dagster `__pycache__`)
+    // stays tracked otherwise.
+    for f in git(repo, &["ls-files", "-ci", "--exclude-standard"])?.lines() {
+        git(repo, &["rm", "-q", "--cached", "--", f])?;
+    }
     git(repo, &["add", "-A"])?;
     if git(repo, &["status", "--porcelain"])?.is_empty() {
         return Ok(false);
