@@ -1,0 +1,16 @@
+# RFC 0199: the orchestrator for a project in the EKOS home, as `lakehouse install` sets it up.
+# Used on top of docker-compose.lakehouse.yml:
+#
+#   EKOS_HOME=... EKOS_LH_PROJECT=<sources dir> EKOS_LH_PROJECT_NAME=<project> \
+#     docker compose -f docker-compose.lakehouse.yml -f docker-compose.home.yml \
+#       --profile orchestrator up -d lh-dagster
+#
+# The project's ekos.toml and ledger live in the home, so the home is mounted at the same path
+# and every `ekos-lakehouse` call the pipeline makes says `--project <name>`.
+services:
+  lh-dagster:
+    environment:
+      EKOS_HOME: ${EKOS_HOME:?set EKOS_HOME}
+      EKOS_LH_PROJECT_NAME: ${EKOS_LH_PROJECT_NAME:?set EKOS_LH_PROJECT_NAME}
+    volumes:
+      - ${EKOS_HOME:?set EKOS_HOME}:${EKOS_HOME:?set EKOS_HOME}

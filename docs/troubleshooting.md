@@ -21,3 +21,34 @@ Every entry here happened while EKOS Lakehouse was built (devlogs 1–7).
 | `cargo build` cannot resolve `zip 2.x` | every `zip 2.x` release is yanked | keep the committed `Cargo.lock` (seeded from EKOS's) |
 | a new table has no Dagster asset after `sync` | Dagster loaded the definitions before the table existed | reload the code location (restart `lh-dagster`) |
 | Claude Code / builds killed for memory | the stack (~4 GB) + Dagster (1 GB) + a desktop on 16 GB | stop Dagster between runs; `docker compose … down` when idle |
+
+## The installer and the console (RFC 0199)
+
+**"these ports are taken by something other than this stack"** — another program holds one of
+the stack's loopback ports. The stack's own containers never count (a second run updates them).
+Stop the other program, or install on a machine where the ports are free.
+
+**`Docker Compose v2 failed`** — `docker compose version` must work for your user. The Compose
+plugin is looked up in `~/.docker/cli-plugins` (or `$DOCKER_CONFIG`); a package-manager install
+of `docker-compose-plugin` puts it where every user finds it.
+
+**Doctor in the console: `columns … source` fails, "names this connection's password but is not
+set"** — the project was set up by hand with `source-password-env` only. Console jobs do not
+inherit your shell's variables. Add `source-password-file = ".lakehouse/source-password"` to the
+project's `[extensions.lakehouse]` and put the password in that file with mode 600 (the installer
+does both).
+
+**"the password file … readable by others"** — `chmod 600` it. A password file anyone else on
+the machine can read is refused rather than used.
+
+**A database on this machine is not seen by Trino** — Trino reaches it as `host.docker.internal`
+through Docker's bridge; PostgreSQL must listen on `172.17.0.1` too and allow `172.17.0.0/16` in
+`pg_hba.conf` ([install.md](install.md#your-own-database)).
+
+**"Dagster already runs project X on its schedule"** — one Dagster serves one project. The
+installer leaves the scheduled one alone and prints the command that runs the new project once;
+to move the schedule, stop `lh-dagster` and run the installer for the other project.
+
+**The Lakehouse tab is missing** — the console was started by the public `ekos` binary, which has
+no Lakehouse pages. Start it with `ekos-lakehouse console start` (the installer does); a
+restricted reader (a read scope) never sees the tab.

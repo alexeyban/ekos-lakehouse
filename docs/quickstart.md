@@ -3,6 +3,10 @@
 From nothing to bronze and silver tables that load on a schedule, reconcile against your source
 on every run, and report their health. About 15 minutes, most of it image downloads.
 
+**The one-command install ([install.md](install.md)) does all of this for you.** This page does
+it by hand, step by step, from source — to learn what each piece is, or to fit it into a setup of
+your own.
+
 Every block marked here is run verbatim by `deploy/e2e/quickstart.sh`, so this page is tested.
 The example creates a small database called `shop`; for your own, skip step 2 and use your
 database's name and host in step 3.

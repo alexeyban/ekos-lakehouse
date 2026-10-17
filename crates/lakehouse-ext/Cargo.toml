@@ -35,5 +35,6 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 toml.workspace = true
 postgres = "0.19"

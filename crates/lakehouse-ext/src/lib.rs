@@ -5,9 +5,11 @@
 //! data and the orchestrator schedules it; nothing here ever moves a row.
 
 pub mod check;
+pub mod console;
 pub mod doctor;
 pub mod facts;
 pub mod gold_cmd;
+pub mod install;
 pub mod monitor;
 pub mod plan_cmd;
 pub mod reconcile;
@@ -204,6 +206,66 @@ impl EkosExtension for LakehouseExtension {
                         ),
                 )
                 .subcommand(
+                    clap::Command::new("install")
+                        .about(
+                            "Install the stack, a first project and the web console under the EKOS \
+                             home, in one command (RFC 0199). Without --source: a sample `shop` \
+                             database in the stack's own PostgreSQL",
+                        )
+                        .arg(clap::Arg::new("source").long("source").value_name("HOST:PORT/DATABASE")
+                            .help("Your PostgreSQL. The password comes from --source-password-env"))
+                        .arg(clap::Arg::new("source-user").long("source-user").default_value("ekos")
+                            .help("A role that can read the source (a read-only one is the guarantee)"))
+                        .arg(clap::Arg::new("source-password-env").long("source-password-env")
+                            .default_value("EKOS_LH_SOURCE_PASSWORD")
+                            .help("The variable holding the source password during the install"))
+                        .arg(clap::Arg::new("name").long("name")
+                            .help("The project's name (default: the database's)"))
+                        .arg(clap::Arg::new("schemas").long("schemas").value_delimiter(',')
+                            .help("Only these schemas (comma-separated; default: all)"))
+                        .arg(clap::Arg::new("no-console").long("no-console").action(clap::ArgAction::SetTrue)
+                            .help("Do not set up the web console"))
+                        .arg(clap::Arg::new("no-open").long("no-open").action(clap::ArgAction::SetTrue)
+                            .help("Do not open the browser"))
+                        .arg(clap::Arg::new("at-login").long("at-login").action(clap::ArgAction::SetTrue)
+                            .help("Start the console when you log in"))
+                        .arg(clap::Arg::new("no-first-run").long("no-first-run").action(clap::ArgAction::SetTrue)
+                            .help("Do not run the pipeline once after installing"))
+                        .arg(clap::Arg::new("console-port").long("console-port").default_value("8000")
+                            .value_parser(clap::value_parser!(u16)))
+                        .arg(clap::Arg::new("uninstall").long("uninstall").action(clap::ArgAction::SetTrue)
+                            .help("Stop and remove the stack (projects stay)"))
+                        .arg(clap::Arg::new("purge").long("purge").action(clap::ArgAction::SetTrue)
+                            .requires("uninstall")
+                            .help("With --uninstall: also delete the stack's data volumes")),
+                )
+                .subcommand(
+                    clap::Command::new("tables")
+                        .about(
+                            "The deployed plan: each table's load mode, watermark and columns not \
+                             landed exactly, the refused tables and where the stack is (RFC 0199)",
+                        )
+                        .arg(
+                            clap::Arg::new("json")
+                                .long("json")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Machine-readable output"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("proposals")
+                        .about(
+                            "Schema changes and gold marts waiting for a merge, from the pipeline \
+                             repository's branches (RFC 0199)",
+                        )
+                        .arg(
+                            clap::Arg::new("json")
+                                .long("json")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Machine-readable output"),
+                        ),
+                )
+                .subcommand(
                     clap::Command::new("alert")
                         .about("Post each health transition once to the alert webhook (RFC 0196)"),
                 )
@@ -308,6 +370,11 @@ impl EkosExtension for LakehouseExtension {
         ]
     }
 
+    /// RFC 0199: the Lakehouse tab of the web console (EKOS RFC 0198).
+    fn console_pages(&self) -> Vec<ekos::extension::ConsolePage> {
+        console::pages()
+    }
+
     fn command_classes(&self) -> Vec<(&'static str, Class, bool)> {
         // Reaches services outside the EKOS home (RFC 0186): the source database among them.
         vec![
@@ -319,6 +386,9 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse reconcile", Class::External, false),
             ("lakehouse run-report", Class::Write, false),
             ("lakehouse status", Class::Read, false),
+            ("lakehouse tables", Class::Read, false),
+            ("lakehouse install", Class::Local, false),
+            ("lakehouse proposals", Class::Read, false),
             // Reach a webhook / a collector outside the home.
             ("lakehouse alert", Class::External, false),
             ("lakehouse metrics", Class::External, false),
@@ -612,6 +682,65 @@ impl EkosExtension for LakehouseExtension {
                     println!("{}", serde_json::to_string(&h)?);
                 } else {
                     print!("{}", monitor::render(&h));
+                }
+                Ok(())
+            }
+            Some(("install", m)) => {
+                let home = ekos::home::resolve_home(
+                    None,
+                    std::env::var_os("EKOS_HOME").map(std::path::PathBuf::from),
+                    ekos::home::user_home_from_env(),
+                )?;
+                if m.get_flag("uninstall") {
+                    return off_runtime(|| install::uninstall(&home, m.get_flag("purge")));
+                }
+                let s = |k: &str| m.get_one::<String>(k).cloned();
+                let o = install::Options {
+                    home,
+                    source: s("source"),
+                    source_user: s("source-user").unwrap_or_default(),
+                    source_password_env: s("source-password-env").unwrap_or_default(),
+                    project: s("name"),
+                    schemas: m
+                        .get_many::<String>("schemas")
+                        .map(|v| v.cloned().collect())
+                        .unwrap_or_default(),
+                    console: !m.get_flag("no-console"),
+                    open: !m.get_flag("no-open"),
+                    at_login: m.get_flag("at-login"),
+                    first_run: !m.get_flag("no-first-run"),
+                    console_port: *m.get_one::<u16>("console-port").expect("default"),
+                };
+                off_runtime(|| install::install(&o))
+            }
+            Some(("tables", m)) => {
+                let settings = settings::load(ctx.config)?;
+                let v = console::tables(&settings, &pipeline_dir(&settings, ctx));
+                if m.get_flag("json") {
+                    println!("{}", serde_json::to_string(&v)?);
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                Ok(())
+            }
+            Some(("proposals", m)) => {
+                let settings = settings::load(ctx.config)?;
+                let v = console::proposals(&pipeline_dir(&settings, ctx));
+                if m.get_flag("json") {
+                    println!("{}", serde_json::to_string(&v)?);
+                } else {
+                    for p in v["proposals"].as_array().into_iter().flatten() {
+                        println!(
+                            "{:<14} {:<30} {}  ({})",
+                            p["kind"].as_str().unwrap_or(""),
+                            p["subject"].as_str().unwrap_or(""),
+                            p["summary"].as_str().unwrap_or(""),
+                            p["branch"].as_str().unwrap_or("")
+                        );
+                    }
+                    if v["proposals"].as_array().is_none_or(|a| a.is_empty()) {
+                        println!("nothing waiting for a merge");
+                    }
                 }
                 Ok(())
             }

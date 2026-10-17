@@ -142,6 +142,14 @@ services:
       CLIENT_ID: root
       CLIENT_SECRET: ${EKOS_LH_POLARIS_SECRET:-polaris-local-only}
       PG_PASSWORD: ${EKOS_LH_PG_PASSWORD:-ekos-local-only}
+    # RFC 0199: passwords of the sources `lakehouse install --source` added (one variable per
+    # catalog, owner-readable file); absent for the sandbox alone.
+    env_file:
+      - path: ./secrets.env
+        required: false
+    # A source on this machine (`--source localhost:5432/db`) is reached as host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:58080:8080"
     volumes:

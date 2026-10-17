@@ -24,13 +24,30 @@ nothing invented ([RFC 0195](https://github.com/alexeyban/EKOS/blob/main/ekos/do
 Health per table and layer, alerts, OpenTelemetry metrics and MCP tools for agents
 ([RFC 0196](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0196-lakehouse-monitoring.md)).
 
-**Start here: [docs/quickstart.md](docs/quickstart.md)** — your PostgreSQL database to monitored
-Iceberg tables. Then the [runbook](docs/runbook.md) and [troubleshooting](docs/troubleshooting.md).
+## Install
+
+On Linux x86_64 with Docker:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alexeyban/ekos-lakehouse/main/install.sh | sh
+```
+
+One command installs the program, starts the stack, creates a sample project, runs its pipeline
+once and opens the web console on its **Lakehouse** tab. For your own database add
+`-s -- --source host:5432/db --source-user reader` (password in `EKOS_LH_SOURCE_PASSWORD`).
+**[docs/install.md](docs/install.md)** says what it changes and how to remove it;
+**[docs/console.md](docs/console.md)** describes the tab.
+
+To do each step yourself instead: **[docs/quickstart.md](docs/quickstart.md)** — your PostgreSQL
+database to monitored Iceberg tables. Then the [runbook](docs/runbook.md) and
+[troubleshooting](docs/troubleshooting.md).
+
+![The Lakehouse tab of the EKOS console](docs/console.png)
 
 ## Build
 
-This repository builds against a sibling EKOS checkout while it needs EKOS changes that are not on
-EKOS `main` yet (see the `[patch]` block in `Cargo.toml`):
+From source (any platform Rust and Docker run on; a release package is Linux x86_64 only). The
+`[patch]` block in `Cargo.toml` builds against a sibling EKOS checkout when it is uncommented:
 
 ```bash
 git clone https://github.com/alexeyban/EKOS ../EKOS

@@ -10,6 +10,8 @@ Environment:
   EKOS_LH_TRINO_URL       Trino coordinator (default http://127.0.0.1:58080)
   EKOS_LAKEHOUSE_BIN      the ekos-lakehouse binary (default: on PATH)
   EKOS_LH_PROJECT         the EKOS project directory holding ekos.toml (default: ../..)
+  EKOS_LH_PROJECT_NAME    a project in the EKOS home (RFC 0178/0199): commands run with
+                          `--project <name>`, and EKOS_HOME says where the home is
 """
 
 import json
@@ -30,6 +32,9 @@ LOCK = json.loads((REPO / "lakehouse.lock.json").read_text())
 SETTINGS = LOCK["settings"]
 PROJECT = Path(os.environ.get("EKOS_LH_PROJECT", REPO.parent))
 BIN = os.environ.get("EKOS_LAKEHOUSE_BIN", "ekos-lakehouse")
+# A home project keeps its ekos.toml and ledger in the EKOS home, not beside the pipeline.
+PROJECT_NAME = os.environ.get("EKOS_LH_PROJECT_NAME", "")
+SELECT = ["--project", PROJECT_NAME] if PROJECT_NAME else []
 
 
 def _connect():
@@ -90,7 +95,7 @@ def _state(qualified):
 
 def _ekos(*args):
     return subprocess.run(
-        [BIN, *args], cwd=PROJECT, capture_output=True, text=True, check=False
+        [BIN, *SELECT, *args], cwd=PROJECT, capture_output=True, text=True, check=False
     )
 
 

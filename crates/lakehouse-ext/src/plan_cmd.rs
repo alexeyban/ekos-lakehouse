@@ -35,7 +35,12 @@ pub fn connect_source(s: &Settings, purpose: &str) -> anyhow::Result<ekos_pg_liv
         .ok_or_else(|| anyhow::anyhow!("set `source-database` in [extensions.lakehouse]"))?;
     let conn =
         ekos_migrate::connection::ConnectionRef::parse(&format!("postgres://{host}/{database}"))?
-            .with_secret_env(s.source_password_env.clone());
+            .with_secret_env(s.source_password_env.clone())
+            .with_secret_file(
+                s.source_password_file
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+            );
     Ok(ekos_pg_live::PgSource::connect(
         &conn,
         &host,

@@ -24,6 +24,10 @@ pub struct Settings {
     pub source_database: Option<String>,
     pub source_user: Option<String>,
     pub source_password_env: Option<String>,
+    /// RFC 0199: a file holding the source password (owner-readable only), relative to the
+    /// workspace — read when `source-password-env` is unset or not exported, as in a console job
+    /// or the orchestrator's container. The installer writes it; ekos.toml holds only the path.
+    pub source_password_file: Option<String>,
     /// The Trino catalog the source is read through (RFC 0192 §1 says which settings it needs).
     pub source_catalog: Option<String>,
     /// The Iceberg catalog in Trino that bronze is written to.
