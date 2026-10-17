@@ -45,9 +45,9 @@ the machine can read is refused rather than used.
 through Docker's bridge; PostgreSQL must listen on `172.17.0.1` too and allow `172.17.0.0/16` in
 `pg_hba.conf` ([install.md](install.md#your-own-database)).
 
-**"Dagster already runs project X on its schedule"** — one Dagster serves one project. The
-installer leaves the scheduled one alone and prints the command that runs the new project once;
-to move the schedule, stop `lh-dagster` and run the installer for the other project.
+**"warning: project X left out of Dagster"** — re-rendering that project's pipeline from its
+deployed plan failed (the message says why). The other projects run; fix the cause and run the
+installer again, or `ekos-lakehouse --project X lakehouse generate --from-lock`.
 
 **The Lakehouse tab is missing** — the console was started by the public `ekos` binary, which has
 no Lakehouse pages. Start it with `ekos-lakehouse console start` (the installer does); a

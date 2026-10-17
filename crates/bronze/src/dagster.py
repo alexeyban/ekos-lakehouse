@@ -12,6 +12,10 @@ Environment:
   EKOS_LH_PROJECT         the EKOS project directory holding ekos.toml (default: ../..)
   EKOS_LH_PROJECT_NAME    a project in the EKOS home (RFC 0178/0199): commands run with
                           `--project <name>`, and EKOS_HOME says where the home is
+
+A project the installer created has ../.lakehouse/project.json instead (RFC 0199): its name and
+directory come from there, and every asset key starts with the project's name, so several
+projects can share one Dagster (one code location each) without their keys colliding.
 """
 
 import json
@@ -23,17 +27,23 @@ from urllib.parse import urlparse
 
 import dagster as dg
 import trino
-from dagster_dbt import DbtCliResource, DbtProject, dbt_assets
+from dagster_dbt import DagsterDbtTranslator, DbtCliResource, DbtProject, dbt_assets
 import trino.exceptions
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 LOCK = json.loads((REPO / "lakehouse.lock.json").read_text())
 SETTINGS = LOCK["settings"]
-PROJECT = Path(os.environ.get("EKOS_LH_PROJECT", REPO.parent))
+# RFC 0199: an installed project names itself; nothing per project is needed in the environment.
+_META_FILE = REPO.parent / ".lakehouse" / "project.json"
+META = json.loads(_META_FILE.read_text()) if _META_FILE.is_file() else {}
+PROJECT = REPO.parent if META else Path(os.environ.get("EKOS_LH_PROJECT", REPO.parent))
 BIN = os.environ.get("EKOS_LAKEHOUSE_BIN", "ekos-lakehouse")
 # A home project keeps its ekos.toml and ledger in the EKOS home, not beside the pipeline.
-PROJECT_NAME = os.environ.get("EKOS_LH_PROJECT_NAME", "")
+PROJECT_NAME = META.get("name") or os.environ.get("EKOS_LH_PROJECT_NAME", "")
+# The asset-key prefix that keeps projects apart in one Dagster: only for installed projects, so
+# a pipeline run on its own keeps the keys it always had.
+PREFIX = [PROJECT_NAME] if META else []
 SELECT = ["--project", PROJECT_NAME] if PROJECT_NAME else []
 
 
@@ -123,7 +133,7 @@ def _source_lsn(cur):
         return ""
 
 
-@dg.asset(key=["lakehouse", "sync"], group_name="lakehouse")
+@dg.asset(key=[*PREFIX, "lakehouse", "sync"], group_name="lakehouse")
 def sync(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """Detect source schema changes before any load (RFC 0194): commit safe ones, propose the
     rest. A table added by a safe change gets its asset when the code location reloads."""
@@ -145,7 +155,7 @@ def _make_asset(table):
 
     @dg.asset(
         name=f"{schema}__{name}",
-        key_prefix=["bronze"],
+        key_prefix=[*PREFIX, "bronze"],
         group_name="bronze",
         deps=[sync],
         description=f"{qualified} → {table['namespace']}.{name} ({mode['mode']})",
@@ -237,7 +247,15 @@ if (DBT_DIR / "dbt_project.yml").exists():
     # must follow it, and a one-off `dagster job execute` has none otherwise.
     dbt_project.preparer.prepare(dbt_project)
 
-    @dbt_assets(manifest=dbt_project.manifest_path, project=dbt_project)
+    class _Keys(DagsterDbtTranslator):
+        """Models, and the bronze sources they read, under the project's prefix (RFC 0199)."""
+
+        def get_asset_key(self, dbt_resource_props):
+            key = super().get_asset_key(dbt_resource_props)
+            return key.with_prefix(PREFIX) if PREFIX else key
+
+    @dbt_assets(manifest=dbt_project.manifest_path, project=dbt_project,
+                dagster_dbt_translator=_Keys())
     def silver(context: dg.AssetExecutionContext, dbt: DbtCliResource):
         invocation = dbt.cli(["build"], context=context)
         try:
@@ -258,7 +276,7 @@ if (DBT_DIR / "dbt_project.yml").exists():
     resources["dbt"] = DbtCliResource(project_dir=dbt_project)
 
 
-@dg.asset(key=["lakehouse", "health"], group_name="lakehouse",
+@dg.asset(key=[*PREFIX, "lakehouse", "health"], group_name="lakehouse",
           deps=[a for a in assets if a is not sync])
 def health(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """After every load and build: alert on state transitions, push metrics (RFC 0196)."""

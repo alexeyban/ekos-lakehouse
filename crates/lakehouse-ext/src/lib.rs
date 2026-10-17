@@ -136,6 +136,15 @@ impl EkosExtension for LakehouseExtension {
                                 .long("out")
                                 .value_parser(clap::value_parser!(std::path::PathBuf))
                                 .help("The pipeline repository (default: `pipeline-dir`)"),
+                        )
+                        .arg(
+                            clap::Arg::new("from-lock")
+                                .long("from-lock")
+                                .action(clap::ArgAction::SetTrue)
+                                .help(
+                                    "Re-render from the deployed plan (lakehouse.lock.json) without \
+                                     reading the source: after an upgrade (RFC 0199)",
+                                ),
                         ),
                 )
                 .subcommand(
@@ -375,6 +384,11 @@ impl EkosExtension for LakehouseExtension {
         console::pages()
     }
 
+    /// RFC 0199: `ekos-lakehouse --version` names this binary, then the EKOS it is built on.
+    fn binary(&self) -> Option<(&'static str, &'static str)> {
+        Some(("ekos-lakehouse", env!("CARGO_PKG_VERSION")))
+    }
+
     fn command_classes(&self) -> Vec<(&'static str, Class, bool)> {
         // Reaches services outside the EKOS home (RFC 0186): the source database among them.
         vec![
@@ -439,7 +453,9 @@ impl EkosExtension for LakehouseExtension {
                     Some(o) => ctx.invoked_from.join(o),
                     None => pipeline_dir(&settings, ctx),
                 };
-                let plan = {
+                let plan = if m.get_flag("from-lock") {
+                    plan_cmd::read_lock(&out)?
+                } else {
                     let redaction = ctx.config.redaction_config();
                     off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?
                 };

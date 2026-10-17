@@ -76,9 +76,14 @@ Outside the home: Docker's images, containers and volumes (`ekos-lakehouse_*`); 
 
 ## Several projects
 
-The stack is shared. One Dagster runs one project on its schedule: the first project installed
-keeps it, and the installer prints the command that runs another project on demand. The console
-shows every project, each with its own Lakehouse tab.
+The stack and its Dagster are shared. Each project is its own code location in
+`~/.ekos/lakehouse/dagster/workspace.yaml`, with its own jobs and schedule, and every asset key
+starts with the project's name (`sales/bronze/public__invoices`), so two databases with the same
+table names never collide. Installing a project refreshes the others' pipelines from their
+deployed plans (no source connection) so that every pipeline matches the binary; a project that
+cannot be refreshed is reported and left out of Dagster until it can. The console shows every
+project — one added while it runs appears on the next look at the project list — each with its
+own Lakehouse tab.
 
 ## Offline, from a package
 

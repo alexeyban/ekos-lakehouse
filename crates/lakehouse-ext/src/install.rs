@@ -458,6 +458,12 @@ fn create_project(
 ) -> Result<PathBuf> {
     let dir = projects_dir(&o.home).join(name);
     std::fs::create_dir_all(&dir)?;
+    // The pipeline reads its project's name from here (one Dagster for every project, RFC 0199).
+    std::fs::create_dir_all(dir.join(".lakehouse"))?;
+    std::fs::write(
+        dir.join(".lakehouse").join("project.json"),
+        serde_json::to_string_pretty(&serde_json::json!({"name": name, "home": o.home}))? + "\n",
+    )?;
     write_private(
         &dir.join(".lakehouse").join("source-password"),
         &format!("{password}\n"),
@@ -523,11 +529,11 @@ fn create_project(
     Ok(dir)
 }
 
-fn orchestrator(o: &Options, name: &str, project_dir: &Path) -> Command {
+fn orchestrator(o: &Options) -> Command {
     let mut c = compose(&stack_dir(&o.home), true);
+    // Every project's pipeline is under the projects directory, and the home is mounted too.
     c.env("EKOS_HOME", &o.home)
-        .env("EKOS_LH_PROJECT", project_dir)
-        .env("EKOS_LH_PROJECT_NAME", name)
+        .env("EKOS_LH_PROJECT", projects_dir(&o.home))
         .env("EKOS_LAKEHOUSE_BIN", me().unwrap_or_default());
     #[cfg(unix)]
     {
@@ -550,19 +556,99 @@ fn ids() -> (String, String) {
     (id("-u"), id("-g"))
 }
 
-/// Build the orchestrator image, run the pipeline once, then leave Dagster running on its
-/// schedule.
-fn start_orchestrator(o: &Options, name: &str, project_dir: &Path) -> Result<()> {
+/// Dagster's workspace: one code location per project with a generated pipeline.
+pub fn workspace_yaml(home: &Path) -> Result<String> {
+    let mut out = String::from(
+        "# Written by `ekos-lakehouse lakehouse install` (RFC 0199): one code location per project.\nload_from:\n",
+    );
+    let mut any = false;
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(projects_dir(home))
+        .map(|r| r.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    dirs.sort();
+    for d in dirs {
+        let defs = d.join("pipeline/dagster/definitions.py");
+        let Some(name) = d.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !defs.is_file() || !d.join(".lakehouse/project.json").is_file() {
+            continue;
+        }
+        any = true;
+        out.push_str(&format!(
+            "  - python_file:\n      relative_path: {}\n      working_directory: {}\n      location_name: {name}\n",
+            defs.display(),
+            d.join("pipeline/dagster").display()
+        ));
+    }
+    if !any {
+        bail!(
+            "no project with a generated pipeline under {}",
+            projects_dir(home).display()
+        );
+    }
+    Ok(out)
+}
+
+/// Bring every other installed project's pipeline up to this binary's templates, from its
+/// deployed plan (no source connection), and give it its `project.json`. A project that fails is
+/// reported and left out of Dagster's workspace, never fatal to this install.
+fn refresh_projects(o: &Options, current: &str) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(projects_dir(&o.home)) else {
+        return Ok(());
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n != current)
+        .collect();
+    names.sort();
+    for name in names {
+        let dir = projects_dir(&o.home).join(&name);
+        let config = o
+            .home
+            .join("data")
+            .join("default")
+            .join(&name)
+            .join("ekos.toml");
+        let lock = dir.join("pipeline").join("lakehouse.lock.json");
+        if !config.is_file() || !lock.is_file() {
+            continue;
+        }
+        std::fs::create_dir_all(dir.join(".lakehouse"))?;
+        std::fs::write(
+            dir.join(".lakehouse").join("project.json"),
+            serde_json::to_string_pretty(&serde_json::json!({"name": name, "home": o.home}))?
+                + "\n",
+        )?;
+        let out = ekos(
+            &o.home,
+            &["--project", &name, "lakehouse", "generate", "--from-lock"],
+            "lakehouse generate --from-lock",
+        );
+        match out {
+            Ok(_) => say(&format!("project {name}: pipeline refreshed")),
+            Err(e) => {
+                println!("warning: project {name} left out of Dagster: {e}");
+                let _ = std::fs::remove_file(dir.join(".lakehouse").join("project.json"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build the orchestrator image, run the new project's pipeline once, then (re)start Dagster
+/// with every project of the home on its schedule.
+fn start_orchestrator(o: &Options, project_dir: &Path) -> Result<()> {
+    let dagster_home = o.home.join("lakehouse").join("dagster");
     // Dagster refuses a DAGSTER_HOME that does not exist, and Docker would create it as root.
-    std::fs::create_dir_all(project_dir.join(".dagster"))?;
+    std::fs::create_dir_all(&dagster_home)?;
+    std::fs::write(
+        dagster_home.join("workspace.yaml"),
+        workspace_yaml(&o.home)?,
+    )?;
     say("building the orchestrator image (Dagster, dbt)");
     run(
-        orchestrator(o, name, project_dir).args([
-            "--profile",
-            "orchestrator",
-            "build",
-            "lh-dagster",
-        ]),
+        orchestrator(o).args(["--profile", "orchestrator", "build", "lh-dagster"]),
         "building the Dagster image",
     )?;
     if o.first_run {
@@ -570,7 +656,7 @@ fn start_orchestrator(o: &Options, name: &str, project_dir: &Path) -> Result<()>
         let defs = project_dir.join("pipeline/dagster/definitions.py");
         let defs = defs.to_str().context("utf-8 path")?;
         run(
-            orchestrator(o, name, project_dir).args([
+            orchestrator(o).args([
                 "--profile",
                 "orchestrator",
                 "run",
@@ -587,54 +673,19 @@ fn start_orchestrator(o: &Options, name: &str, project_dir: &Path) -> Result<()>
             "the first pipeline run",
         )?;
     }
-    // One Dagster serves one project: never take the schedule away from another one.
-    if let Some(other) = scheduled_project().filter(|p| p != name) {
-        println!(
-            "Dagster already runs project {other} on its schedule and is left as it is. Project \
-             {name} runs on demand:\n  EKOS_HOME={} EKOS_LH_PROJECT={} EKOS_LH_PROJECT_NAME={name} \\\n    \
-             docker compose --project-directory {} -f …/docker-compose.lakehouse.yml -f …/docker-compose.home.yml \\\n    \
-             --profile orchestrator run --rm lh-dagster dagster job execute -f {}/pipeline/dagster/definitions.py -j bronze",
-            o.home.display(),
-            project_dir.display(),
-            stack_dir(&o.home).display(),
-            project_dir.display()
-        );
-        return Ok(());
-    }
-    say("starting Dagster on its schedule: http://127.0.0.1:53000");
+    say("starting Dagster with every project on its schedule: http://127.0.0.1:53000");
     run(
-        orchestrator(o, name, project_dir).args([
+        orchestrator(o).args([
             "--profile",
             "orchestrator",
             "up",
             "-d",
+            "--force-recreate",
             "lh-dagster",
         ]),
         "starting Dagster",
     )?;
     Ok(())
-}
-
-/// The project the running Dagster serves, if one runs.
-fn scheduled_project() -> Option<String> {
-    let out = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            // The state on a line of its own: the first variable must not share it.
-            "{{.State.Running}}\n{{range .Config.Env}}{{println .}}{{end}}",
-            "ekos-lakehouse-lh-dagster-1",
-        ])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    if !out.status.success() || !text.starts_with("true") {
-        return None;
-    }
-    text.lines()
-        .find_map(|l| l.trim().strip_prefix("EKOS_LH_PROJECT_NAME="))
-        .filter(|n| !n.is_empty())
-        .map(str::to_string)
 }
 
 /// The web console in local mode, through `setup` (a full package only).
@@ -736,7 +787,8 @@ pub fn install(o: &Options) -> Result<()> {
         restart_trino(&dir)?;
     }
     let project_dir = create_project(o, &name, &src, &catalog, &password)?;
-    start_orchestrator(o, &name, &project_dir)?;
+    refresh_projects(o, &name)?;
+    start_orchestrator(o, &project_dir)?;
     let console = if o.console { start_console(o)? } else { false };
 
     println!("\nEKOS Lakehouse is installed.");
@@ -784,6 +836,37 @@ pub fn uninstall(home: &Path, purge: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dagster_workspace_lists_every_installed_project() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(workspace_yaml(home.path()).is_err(), "no project yet");
+        for (name, generated, installed) in [
+            ("shop", true, true),
+            ("sales", true, true),
+            ("half", false, true),
+            ("byhand", true, false),
+        ] {
+            let d = projects_dir(home.path()).join(name);
+            if generated {
+                std::fs::create_dir_all(d.join("pipeline/dagster")).unwrap();
+                std::fs::write(d.join("pipeline/dagster/definitions.py"), "").unwrap();
+            }
+            if installed {
+                std::fs::create_dir_all(d.join(".lakehouse")).unwrap();
+                std::fs::write(d.join(".lakehouse/project.json"), "{}").unwrap();
+            }
+        }
+        let y = workspace_yaml(home.path()).unwrap();
+        let v: serde_yaml::Value = serde_yaml::from_str(&y).unwrap();
+        let names: Vec<&str> = v["load_from"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|l| l["python_file"]["location_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["sales", "shop"]);
+    }
 
     #[test]
     fn a_source_is_host_port_database_and_never_carries_credentials() {

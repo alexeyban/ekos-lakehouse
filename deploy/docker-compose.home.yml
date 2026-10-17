@@ -1,16 +1,24 @@
-# RFC 0199: the orchestrator for a project in the EKOS home, as `lakehouse install` sets it up.
+# RFC 0199: the orchestrator for the projects in the EKOS home, as `lakehouse install` sets it up.
 # Used on top of docker-compose.lakehouse.yml:
 #
-#   EKOS_HOME=... EKOS_LH_PROJECT=<sources dir> EKOS_LH_PROJECT_NAME=<project> \
+#   EKOS_HOME=... EKOS_LH_PROJECT=$EKOS_HOME/lakehouse/projects \
 #     docker compose -f docker-compose.lakehouse.yml -f docker-compose.home.yml \
 #       --profile orchestrator up -d lh-dagster
 #
-# The project's ekos.toml and ledger live in the home, so the home is mounted at the same path
-# and every `ekos-lakehouse` call the pipeline makes says `--project <name>`.
+# One Dagster serves every project: $EKOS_HOME/lakehouse/dagster/workspace.yaml lists each
+# project's pipeline as a code location (the installer writes it). Each project's ekos.toml and
+# ledger live in the home, so the home is mounted at the same path; a project's pipeline knows its
+# name from ../.lakehouse/project.json and calls `ekos-lakehouse --project <name>`.
 services:
   lh-dagster:
     environment:
       EKOS_HOME: ${EKOS_HOME:?set EKOS_HOME}
-      EKOS_LH_PROJECT_NAME: ${EKOS_LH_PROJECT_NAME:?set EKOS_LH_PROJECT_NAME}
+      DAGSTER_HOME: ${EKOS_HOME:?set EKOS_HOME}/lakehouse/dagster
     volumes:
       - ${EKOS_HOME:?set EKOS_HOME}:${EKOS_HOME:?set EKOS_HOME}
+    command:
+      - sh
+      - -c
+      - mkdir -p "$$DAGSTER_HOME" && exec dagster dev -h 127.0.0.1 -p 53000 -w "$$EKOS_HOME/lakehouse/dagster/workspace.yaml"
+    # One code server per project.
+    mem_limit: 3g
