@@ -8,6 +8,7 @@ members = [
     "crates/changes",
     "crates/gold",
     "crates/health",
+    "crates/kettle",
     "crates/silver",
     "crates/trino",
     "crates/lakehouse-ext",
@@ -44,11 +45,13 @@ ekos-lakehouse-silver = { path = "crates/silver" }
 ekos-lakehouse-changes = { path = "crates/changes" }
 ekos-lakehouse-gold    = { path = "crates/gold" }
 ekos-lakehouse-health  = { path = "crates/health" }
+ekos-lakehouse-kettle  = { path = "crates/kettle" }
 
 # ── Third party (versions match the EKOS workspace) ──
 anyhow      = "1"
 async-trait = "0.1"
 clap        = "4"
+roxmltree   = "0.20"
 reqwest     = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
@@ -63,58 +66,58 @@ uuid        = { version = "1", features = ["v5"] }
 # Local development against a sibling EKOS checkout (`../EKOS`): uncomment the block to build
 # against your working copy instead of EKOS `main`. Every EKOS crate is listed: patching only
 # some would mix two copies of the shared types.
-# [patch."https://github.com/alexeyban/EKOS"]
-# ekos-common                        = { path = "../EKOS/ekos/crates/common" }
-# ekos                               = { path = "../EKOS/ekos/crates/cli" }
-# ekos-artifact                      = { path = "../EKOS/ekos/crates/artifact" }
-# ekos-clickhouse-query              = { path = "../EKOS/ekos/crates/clickhouse-query" }
-# ekos-cluster                       = { path = "../EKOS/ekos/crates/cluster" }
-# ekos-compiler-core                 = { path = "../EKOS/ekos/crates/compiler-core" }
-# ekos-dbt-gen                       = { path = "../EKOS/ekos/crates/dbt-gen" }
-# ekos-distributed                   = { path = "../EKOS/ekos/crates/distributed" }
-# ekos-docs-gen                      = { path = "../EKOS/ekos/crates/docs-gen" }
-# ekos-ekl                           = { path = "../EKOS/ekos/crates/ekl" }
-# ekos-evals                         = { path = "../EKOS/ekos/crates/evals" }
-# ekos-identity                      = { path = "../EKOS/ekos/crates/identity" }
-# ekos-kir                           = { path = "../EKOS/ekos/crates/kir" }
-# ekos-ledger                        = { path = "../EKOS/ekos/crates/ledger" }
-# ekos-marketing                     = { path = "../EKOS/ekos/crates/marketing" }
-# ekos-observation-sdk               = { path = "../EKOS/ekos/crates/observation-sdk" }
-# ekos-plugin-clickhouse             = { path = "../EKOS/ekos/plugins/clickhouse" }
-# ekos-plugin-confluence             = { path = "../EKOS/ekos/plugins/confluence" }
-# ekos-plugin-crypto                 = { path = "../EKOS/ekos/plugins/crypto" }
-# ekos-plugin-elixir                 = { path = "../EKOS/ekos/plugins/elixir" }
-# ekos-plugin-file                   = { path = "../EKOS/ekos/plugins/file" }
-# ekos-plugin-git                    = { path = "../EKOS/ekos/plugins/git" }
-# ekos-plugin-github                 = { path = "../EKOS/ekos/plugins/github" }
-# ekos-plugin-governance             = { path = "../EKOS/ekos/plugins/governance" }
-# ekos-plugin-javascript             = { path = "../EKOS/ekos/plugins/javascript" }
-# ekos-plugin-localdocs              = { path = "../EKOS/ekos/plugins/localdocs" }
-# ekos-plugin-pentaho                = { path = "../EKOS/ekos/plugins/pentaho" }
-# ekos-plugin-perl                   = { path = "../EKOS/ekos/plugins/perl" }
-# ekos-plugin-python                 = { path = "../EKOS/ekos/plugins/python" }
-# ekos-plugin-rust                   = { path = "../EKOS/ekos/plugins/rust" }
-# ekos-plugin-sql-dialect-clickhouse = { path = "../EKOS/ekos/plugins/sql-dialect-clickhouse" }
-# ekos-plugin-sql-dialect-databricks = { path = "../EKOS/ekos/plugins/sql-dialect-databricks" }
-# ekos-plugin-sql-dialect-trino      = { path = "../EKOS/ekos/plugins/sql-dialect-trino" }
-# ekos-plugin-sql-dialect-mssql      = { path = "../EKOS/ekos/plugins/sql-dialect-mssql" }
-# ekos-plugin-sql-dialect-mysql      = { path = "../EKOS/ekos/plugins/sql-dialect-mysql" }
-# ekos-plugin-sql-dialect-postgres   = { path = "../EKOS/ekos/plugins/sql-dialect-postgres" }
-# ekos-plugin-sql-dialect-snowflake  = { path = "../EKOS/ekos/plugins/sql-dialect-snowflake" }
-# ekos-plugin-treasury               = { path = "../EKOS/ekos/plugins/treasury" }
-# ekos-recovery                      = { path = "../EKOS/ekos/crates/recovery" }
-# ekos-runtime                       = { path = "../EKOS/ekos/crates/runtime" }
-# ekos-segment-backend               = { path = "../EKOS/ekos/crates/segment-backend" }
-# ekos-semantic                      = { path = "../EKOS/ekos/crates/semantic" }
-# ekos-session                       = { path = "../EKOS/ekos/crates/session" }
-# ekos-migrate                       = { path = "../EKOS/ekos/crates/migrate" }
-# ekos-migrate-validate              = { path = "../EKOS/ekos/crates/migrate-validate" }
-# ekos-pg-live                       = { path = "../EKOS/ekos/crates/pg-live" }
-# ekos-migrate-dq                    = { path = "../EKOS/ekos/crates/migrate-dq" }
-# ekos-migrate-logic                 = { path = "../EKOS/ekos/crates/migrate-logic" }
-# ekos-migrate-target-clickhouse     = { path = "../EKOS/ekos/crates/migrate-target-clickhouse" }
-# ekos-migrate-approval              = { path = "../EKOS/ekos/crates/migrate-approval" }
-# ekos-migrate-report                = { path = "../EKOS/ekos/crates/migrate-report" }
-# ekos-plpgsql                       = { path = "../EKOS/ekos/crates/plpgsql" }
-# ekos-simulation                    = { path = "../EKOS/ekos/crates/simulation" }
-# ekos-sql-dialect-sdk               = { path = "../EKOS/ekos/crates/sql-dialect-sdk" }
+[patch."https://github.com/alexeyban/EKOS"]
+ekos-common                        = { path = "../EKOS/ekos/crates/common" }
+ekos                               = { path = "../EKOS/ekos/crates/cli" }
+ekos-artifact                      = { path = "../EKOS/ekos/crates/artifact" }
+ekos-clickhouse-query              = { path = "../EKOS/ekos/crates/clickhouse-query" }
+ekos-cluster                       = { path = "../EKOS/ekos/crates/cluster" }
+ekos-compiler-core                 = { path = "../EKOS/ekos/crates/compiler-core" }
+ekos-dbt-gen                       = { path = "../EKOS/ekos/crates/dbt-gen" }
+ekos-distributed                   = { path = "../EKOS/ekos/crates/distributed" }
+ekos-docs-gen                      = { path = "../EKOS/ekos/crates/docs-gen" }
+ekos-ekl                           = { path = "../EKOS/ekos/crates/ekl" }
+ekos-evals                         = { path = "../EKOS/ekos/crates/evals" }
+ekos-identity                      = { path = "../EKOS/ekos/crates/identity" }
+ekos-kir                           = { path = "../EKOS/ekos/crates/kir" }
+ekos-ledger                        = { path = "../EKOS/ekos/crates/ledger" }
+ekos-marketing                     = { path = "../EKOS/ekos/crates/marketing" }
+ekos-observation-sdk               = { path = "../EKOS/ekos/crates/observation-sdk" }
+ekos-plugin-clickhouse             = { path = "../EKOS/ekos/plugins/clickhouse" }
+ekos-plugin-confluence             = { path = "../EKOS/ekos/plugins/confluence" }
+ekos-plugin-crypto                 = { path = "../EKOS/ekos/plugins/crypto" }
+ekos-plugin-elixir                 = { path = "../EKOS/ekos/plugins/elixir" }
+ekos-plugin-file                   = { path = "../EKOS/ekos/plugins/file" }
+ekos-plugin-git                    = { path = "../EKOS/ekos/plugins/git" }
+ekos-plugin-github                 = { path = "../EKOS/ekos/plugins/github" }
+ekos-plugin-governance             = { path = "../EKOS/ekos/plugins/governance" }
+ekos-plugin-javascript             = { path = "../EKOS/ekos/plugins/javascript" }
+ekos-plugin-localdocs              = { path = "../EKOS/ekos/plugins/localdocs" }
+ekos-plugin-pentaho                = { path = "../EKOS/ekos/plugins/pentaho" }
+ekos-plugin-perl                   = { path = "../EKOS/ekos/plugins/perl" }
+ekos-plugin-python                 = { path = "../EKOS/ekos/plugins/python" }
+ekos-plugin-rust                   = { path = "../EKOS/ekos/plugins/rust" }
+ekos-plugin-sql-dialect-clickhouse = { path = "../EKOS/ekos/plugins/sql-dialect-clickhouse" }
+ekos-plugin-sql-dialect-databricks = { path = "../EKOS/ekos/plugins/sql-dialect-databricks" }
+ekos-plugin-sql-dialect-trino      = { path = "../EKOS/ekos/plugins/sql-dialect-trino" }
+ekos-plugin-sql-dialect-mssql      = { path = "../EKOS/ekos/plugins/sql-dialect-mssql" }
+ekos-plugin-sql-dialect-mysql      = { path = "../EKOS/ekos/plugins/sql-dialect-mysql" }
+ekos-plugin-sql-dialect-postgres   = { path = "../EKOS/ekos/plugins/sql-dialect-postgres" }
+ekos-plugin-sql-dialect-snowflake  = { path = "../EKOS/ekos/plugins/sql-dialect-snowflake" }
+ekos-plugin-treasury               = { path = "../EKOS/ekos/plugins/treasury" }
+ekos-recovery                      = { path = "../EKOS/ekos/crates/recovery" }
+ekos-runtime                       = { path = "../EKOS/ekos/crates/runtime" }
+ekos-segment-backend               = { path = "../EKOS/ekos/crates/segment-backend" }
+ekos-semantic                      = { path = "../EKOS/ekos/crates/semantic" }
+ekos-session                       = { path = "../EKOS/ekos/crates/session" }
+ekos-migrate                       = { path = "../EKOS/ekos/crates/migrate" }
+ekos-migrate-validate              = { path = "../EKOS/ekos/crates/migrate-validate" }
+ekos-pg-live                       = { path = "../EKOS/ekos/crates/pg-live" }
+ekos-migrate-dq                    = { path = "../EKOS/ekos/crates/migrate-dq" }
+ekos-migrate-logic                 = { path = "../EKOS/ekos/crates/migrate-logic" }
+ekos-migrate-target-clickhouse     = { path = "../EKOS/ekos/crates/migrate-target-clickhouse" }
+ekos-migrate-approval              = { path = "../EKOS/ekos/crates/migrate-approval" }
+ekos-migrate-report                = { path = "../EKOS/ekos/crates/migrate-report" }
+ekos-plpgsql                       = { path = "../EKOS/ekos/crates/plpgsql" }
+ekos-simulation                    = { path = "../EKOS/ekos/crates/simulation" }
+ekos-sql-dialect-sdk               = { path = "../EKOS/ekos/crates/sql-dialect-sdk" }

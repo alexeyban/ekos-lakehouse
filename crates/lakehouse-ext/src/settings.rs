@@ -63,6 +63,9 @@ pub struct Settings {
     pub alert_webhook_env: Option<String>,
     /// An OTLP/HTTP endpoint (a collector), e.g. `http://127.0.0.1:54318`.
     pub otlp_endpoint: Option<String>,
+    /// Pentaho packages to translate, `name = "path"` relative to the workspace (RFC 0200).
+    /// Empty: every observed directory that holds a `.ktr` or `.kjb`.
+    pub pentaho_packages: std::collections::BTreeMap<String, String>,
 }
 
 impl Settings {

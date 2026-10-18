@@ -11,6 +11,7 @@ pub mod facts;
 pub mod gold_cmd;
 pub mod install;
 pub mod monitor;
+pub mod pentaho_cmd;
 pub mod plan_cmd;
 pub mod reconcile;
 pub mod settings;
@@ -199,6 +200,24 @@ impl EkosExtension for LakehouseExtension {
                                         .required(true)
                                         .value_parser(clap::value_parser!(std::path::PathBuf))
                                         .help("marts/<name>.md"),
+                                ),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("pentaho")
+                        .about("Pentaho packages into silver and gold dbt models (RFC 0200)")
+                        .subcommand_required(true)
+                        .subcommand(
+                            clap::Command::new("scan")
+                                .about(
+                                    "Read every Pentaho package: transformations, jobs, steps by \
+                                     category, links between files and what could not be read",
+                                )
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output"),
                                 ),
                         ),
                 )
@@ -412,6 +431,8 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse gold draft", Class::External, true),
             // Reads the repository and the ledger; writes metric facts.
             ("lakehouse check", Class::Write, false),
+            // Reads the project's own source files (redacted), nothing else.
+            ("lakehouse pentaho scan", Class::Read, false),
         ]
     }
 
@@ -687,6 +708,13 @@ impl EkosExtension for LakehouseExtension {
                         outcome.questions.len(),
                         questions_path.display()
                     )
+                }
+            }
+            Some(("pentaho", p)) => {
+                let settings = settings::load(ctx.config)?;
+                match p.subcommand() {
+                    Some(("scan", m)) => pentaho_cmd::scan(&settings, ctx, m.get_flag("json")),
+                    other => anyhow::bail!("unknown pentaho command {other:?}"),
                 }
             }
             Some(("status", m)) => {
