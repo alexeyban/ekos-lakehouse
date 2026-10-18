@@ -268,7 +268,8 @@ impl EkosExtension for LakehouseExtension {
                         .subcommand(
                             clap::Command::new("report")
                                 .about("The latest translation of each package: models, steps, fidelity, gaps (RFC 0204)")
-                                .arg(clap::Arg::new("package").long("package").help("Only this package"))
+                                .arg(clap::Arg::new("package").long("package").help("One package: its models, steps, graph and proposal"))
+                                .arg(clap::Arg::new("step").long("step").requires("package").help("With --package: one step's original text and SQL (its id, transformation:step)"))
                                 .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
                         )
                         .subcommand(
@@ -799,6 +800,7 @@ impl EkosExtension for LakehouseExtension {
                         ctx,
                         &pipeline_dir(&settings, ctx),
                         m.get_one::<String>("package").map(String::as_str),
+                        m.get_one::<String>("step").map(String::as_str),
                         m.get_flag("json"),
                     ),
                     other => anyhow::bail!("unknown pentaho command {other:?}"),

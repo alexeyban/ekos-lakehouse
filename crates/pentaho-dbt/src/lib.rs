@@ -44,8 +44,14 @@ pub enum Layer {
 /// One step of the package as a reviewer sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepReport {
+    /// `<transformation path>:<step>`: unique across the package (step names repeat).
+    #[serde(default)]
+    pub id: String,
     pub transformation: String,
     pub step: String,
+    /// Ids of the steps feeding this one (for the console's graph).
+    #[serde(default)]
+    pub inputs: Vec<String>,
     pub step_type: String,
     pub category: String,
     pub branch: Option<String>,
@@ -963,6 +969,8 @@ fn translate_one(
         });
         for note in notes {
             report.steps.push(StepReport {
+                id: format!("{}:{} (model {name})", t.path, n.step),
+                inputs: vec![format!("{}:{}", t.path, n.step)],
                 transformation: t.path.clone(),
                 step: n.step.clone(),
                 step_type: "(model)".into(),
@@ -1008,7 +1016,25 @@ fn translate_one(
             Some(Layer::Gold)
         };
         let gap = blocked.get(&n.id).cloned();
+        // A synthetic union of several hops stands for its inputs.
+        let mut inputs = Vec::new();
+        for i in &n.inputs {
+            let up = ir.node(*i);
+            let ids: Vec<NodeId> = if up.step.ends_with(" (inputs)") {
+                up.inputs.clone()
+            } else {
+                vec![*i]
+            };
+            for id in ids {
+                let s = format!("{}:{}", t.path, ir.node(id).step);
+                if !inputs.contains(&s) && ir.node(id).step != n.step {
+                    inputs.push(s);
+                }
+            }
+        }
         report.steps.push(StepReport {
+            id: format!("{}:{}", t.path, n.step),
+            inputs,
             transformation: t.path.clone(),
             step: n.step.clone(),
             step_type: n.step_type.clone(),

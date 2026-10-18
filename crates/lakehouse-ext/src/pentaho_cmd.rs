@@ -156,6 +156,8 @@ pub fn summary(name: &str, path: &Path, package: &Package) -> Value {
         "entries": c.entries,
         "categories": categories,
         "unknown_types": unknown,
+        "unknown_count": unknown.len(),
+        "diagnostic_count": package.diagnostics.len(),
         "links": c.links,
         "unresolved_links": c.unresolved_links,
         "plugins": package.plugins.len(),
@@ -166,9 +168,23 @@ pub fn summary(name: &str, path: &Path, package: &Package) -> Value {
 /// `lakehouse pentaho scan`.
 pub fn scan(settings: &Settings, ctx: &CommandContext<'_>, as_json: bool) -> anyhow::Result<()> {
     let redaction = ctx.config.redaction_config();
+    let repo = ctx
+        .cwd
+        .join(settings.pipeline_dir.as_deref().unwrap_or("pipeline"));
     let rows: Vec<Value> = packages(settings, ctx)
         .iter()
-        .map(|p| summary(&p.name, &p.path, &read_dir(&p.path, &redaction)))
+        .map(|p| {
+            let mut row = summary(&p.name, &p.path, &read_dir(&p.path, &redaction));
+            let pkg = ekos_lakehouse_pentaho_dbt::slug(&p.name);
+            match load_report(&repo, &pkg) {
+                Some((r, state)) => {
+                    row["translation"] = json!(state);
+                    row["translated"] = counts_json(&r);
+                }
+                None => row["translation"] = json!("not translated"),
+            }
+            row
+        })
         .collect();
     if as_json {
         println!("{}", serde_json::to_string(&json!({ "packages": rows }))?);
@@ -603,56 +619,167 @@ pub fn load_report(repo: &Path, pkg: &str) -> Option<(ekos_lakehouse_pentaho_dbt
     Some((serde_json::from_str(&text).ok()?, "merged".into()))
 }
 
-/// `lakehouse pentaho report`: packages, models and steps of the latest translations.
+/// The graph the console draws for one translation: steps grouped by transformation, coloured
+/// by fidelity, with an edge per hop (RFC 0207).
+pub fn graph(r: &ekos_lakehouse_pentaho_dbt::Report) -> Value {
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut edges = std::collections::BTreeSet::new();
+    for s in r.steps.iter().filter(|s| s.category != "model") {
+        if seen.insert(s.id.clone()) {
+            nodes.push(json!({
+                "id": s.id,
+                "label": s.step,
+                "group": s.transformation,
+                "fidelity": s.fidelity.as_str(),
+            }));
+        } else if let Some(n) = nodes.iter_mut().find(|n| n["id"] == s.id.as_str()) {
+            // Several nodes of one step (routed outputs): the weakest label shows.
+            let have = n["fidelity"].as_str().unwrap_or("exact").to_string();
+            let rank = |f: &str| {
+                ["exact", "rewritten", "llm-drafted", "gap"]
+                    .iter()
+                    .position(|x| *x == f)
+                    .unwrap_or(0)
+            };
+            if rank(s.fidelity.as_str()) > rank(&have) {
+                n["fidelity"] = json!(s.fidelity.as_str());
+            }
+        }
+        for i in &s.inputs {
+            edges.insert((i.clone(), s.id.clone()));
+        }
+    }
+    let edges: Vec<Value> = edges
+        .into_iter()
+        .map(|(f, t)| json!({"from": f, "to": t}))
+        .collect();
+    json!({ "nodes": nodes, "edges": edges })
+}
+
+fn counts_json(r: &ekos_lakehouse_pentaho_dbt::Report) -> Value {
+    let c = r.counts();
+    let n = |f: ekos_lakehouse_kettle_expr::Fidelity| c.get(&f).copied().unwrap_or(0);
+    use ekos_lakehouse_kettle_expr::Fidelity as F;
+    json!({
+        "exact": n(F::Exact),
+        "rewritten": n(F::Rewritten),
+        "llm_drafted": n(F::LlmDrafted),
+        "gap": n(F::Gap),
+        "models": r.models.len(),
+        "enabled": r.models.iter().filter(|m| m.enabled).count(),
+        "questions": r.questions.len(),
+    })
+}
+
+/// `lakehouse pentaho report`: without `--package`, one row per package; with it, that
+/// translation's models, steps, questions, graph and proposal; with `--step` too, that step's
+/// original text and SQL (the console's Pentaho tab, RFC 0207).
 pub fn report(
     settings: &Settings,
     ctx: &CommandContext<'_>,
     repo: &Path,
     package: Option<&str>,
+    step: Option<&str>,
     as_json: bool,
 ) -> anyhow::Result<()> {
-    let names: Vec<String> = match package {
-        Some(p) => vec![p.to_string()],
-        None => packages(settings, ctx)
+    let Some(name) = package else {
+        let rows: Vec<Value> = packages(settings, ctx)
             .into_iter()
-            .map(|p| p.name)
-            .collect(),
-    };
-    let mut out = Vec::new();
-    for n in names {
-        let pkg = ekos_lakehouse_pentaho_dbt::slug(&n);
-        match load_report(repo, &pkg) {
-            Some((r, state)) => out.push(json!({"package": n, "state": state, "counts": r.counts().iter().map(|(k, v)| (k.as_str(), v)).collect::<std::collections::BTreeMap<_, _>>(), "report": r})),
-            None => out.push(json!({"package": n, "state": "not translated", "counts": {}, "report": null})),
+            .map(|p| {
+                let pkg = ekos_lakehouse_pentaho_dbt::slug(&p.name);
+                match load_report(repo, &pkg) {
+                    Some((r, state)) => {
+                        json!({"package": p.name, "state": state, "summary": counts_json(&r)})
+                    }
+                    None => json!({"package": p.name, "state": "not translated", "summary": {}}),
+                }
+            })
+            .collect();
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({ "translations": rows }))?
+            );
+        } else {
+            for r in &rows {
+                println!(
+                    "{}: {} {}",
+                    r["package"].as_str().unwrap_or(""),
+                    r["state"].as_str().unwrap_or(""),
+                    r["summary"]
+                );
+            }
         }
+        return Ok(());
+    };
+    let pkg = ekos_lakehouse_pentaho_dbt::slug(name);
+    let Some((r, state)) = load_report(repo, &pkg) else {
+        let out = json!({"package": name, "state": "not translated", "models": [], "steps": [], "questions": []});
+        if as_json {
+            println!("{}", serde_json::to_string(&out)?);
+        } else {
+            println!("{name}: not translated (run `lakehouse pentaho translate {name}`)");
+        }
+        return Ok(());
+    };
+    let selected = step.map(|id| r.steps.iter().find(|s| s.id == id || s.step == id).cloned());
+    if let Some(None) = selected {
+        anyhow::bail!(
+            "no step `{}` in the translation of {name}",
+            step.unwrap_or_default()
+        );
+    }
+    let lean: Vec<Value> = r
+        .steps
+        .iter()
+        .filter(|s| s.category != "model")
+        .map(|s| {
+            let mut v = serde_json::to_value(s).unwrap_or_default();
+            if let Some(o) = v.as_object_mut() {
+                o.remove("original");
+                o.remove("sql");
+                o.insert("notes_text".into(), json!(s.notes.join("; ")));
+                o.insert("models_text".into(), json!(s.models.join(", ")));
+            }
+            v
+        })
+        .collect();
+    let mut out = json!({
+        "package": name,
+        "state": state,
+        "summary": counts_json(&r),
+        "models": r.models,
+        "steps": lean,
+        "questions": r.questions,
+        "graph": graph(&r),
+        "proposal": ekos_lakehouse_pentaho_dbt::proposal::markdown(&r),
+    });
+    if let Some(Some(s)) = selected {
+        out["step"] = serde_json::to_value(&s)?;
+        out["step"]["notes_text"] = json!(s.notes.join("\n"));
     }
     if as_json {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({ "translations": out }))?
-        );
+        println!("{}", serde_json::to_string(&out)?);
         return Ok(());
     }
-    for t in &out {
+    println!("{name}: {state} {}", out["summary"]);
+    for m in &r.models {
         println!(
-            "{}: {} {}",
-            t["package"].as_str().unwrap_or(""),
-            t["state"].as_str().unwrap_or(""),
-            t["counts"]
+            "  {:<60} {:<6} {:<12} {}",
+            m.name,
+            format!("{:?}", m.layer).to_lowercase(),
+            m.fidelity.as_str(),
+            if m.enabled { "" } else { "DISABLED" }
         );
-        for m in t["report"]["models"].as_array().into_iter().flatten() {
-            println!(
-                "  {:<60} {:<6} {:<12} {}",
-                m["name"].as_str().unwrap_or(""),
-                m["layer"].as_str().unwrap_or(""),
-                m["fidelity"].as_str().unwrap_or(""),
-                if m["enabled"].as_bool() == Some(true) {
-                    ""
-                } else {
-                    "DISABLED"
-                }
-            );
-        }
+    }
+    if let Some(s) = out.get("step") {
+        println!(
+            "\n{}\n--- original ---\n{}\n--- SQL ---\n{}",
+            s["id"].as_str().unwrap_or(""),
+            s["original"].as_str().unwrap_or(""),
+            s["sql"].as_str().unwrap_or("(not translated)")
+        );
     }
     Ok(())
 }

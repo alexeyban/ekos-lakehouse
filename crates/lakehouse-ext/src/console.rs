@@ -7,7 +7,7 @@
 use crate::plan_cmd::read_lock;
 use crate::settings::Settings;
 use crate::sync::git;
-use ekos::extension::{Action, Column, ConsolePage, Panel, View};
+use ekos::extension::{Action, Column, ConsolePage, PageParam, Panel, View};
 use ekos_lakehouse_bronze::mode::LoadMode;
 use ekos_lakehouse_bronze::typemap::Lossiness;
 use serde_json::{Value, json};
@@ -15,117 +15,327 @@ use std::path::Path;
 
 /// The console page (RFC 0198).
 pub fn pages() -> Vec<ConsolePage> {
-    vec![ConsolePage {
-        id: "lakehouse",
-        title: "Lakehouse",
-        description: "PostgreSQL to Iceberg, bronze to gold: the state of every table, how each one \
+    vec![
+        ConsolePage {
+            id: "lakehouse",
+            title: "Lakehouse",
+            description: "PostgreSQL to Iceberg, bronze to gold: the state of every table, how each one \
                       loads, and the schema changes and marts waiting for a merge. Buttons run as \
                       jobs; their output is in the run's log.",
+            panels: vec![
+                Panel {
+                    id: "health",
+                    title: "Health per table and layer",
+                    command: vec!["lakehouse", "status", "--json"],
+                    view: View::Table {
+                        rows: "",
+                        columns: vec![
+                            Column::new("/table", "Table"),
+                            Column::new("/layer", "Layer"),
+                            Column::badge("/state", "State"),
+                            Column::new("/evidence/0", "Why"),
+                            Column::new("/cause", "Probable cause"),
+                        ],
+                    },
+                    empty: "No runs recorded yet. Generate the pipeline and run it once \
+                        (the Dagster job `bronze`).",
+                    ..Default::default()
+                },
+                Panel {
+                    id: "proposals",
+                    title: "Waiting for a merge",
+                    command: vec!["lakehouse", "proposals", "--json"],
+                    view: View::Table {
+                        rows: "/proposals",
+                        columns: vec![
+                            Column::badge("/kind", "Kind"),
+                            Column::new("/subject", "Table or mart"),
+                            Column::new("/summary", "What changes"),
+                            Column::new("/branch", "Branch"),
+                            Column::new("/at", "Proposed"),
+                        ],
+                    },
+                    empty: "Nothing waiting: every source change was safe, and no mart is proposed.",
+                    ..Default::default()
+                },
+                Panel {
+                    id: "tables",
+                    title: "Tables and how they load",
+                    command: vec!["lakehouse", "tables", "--json"],
+                    view: View::Table {
+                        rows: "/tables",
+                        columns: vec![
+                            Column::new("/table", "Table"),
+                            Column::badge("/mode", "Load mode"),
+                            Column::new("/watermark", "Watermark"),
+                            Column::new("/primary_key", "Key"),
+                            Column::new("/not_exact", "Columns not landed exactly"),
+                        ],
+                    },
+                    empty: "No pipeline yet: run `lakehouse plan`, then `lakehouse generate`.",
+                    ..Default::default()
+                },
+                Panel {
+                    id: "refused",
+                    title: "Tables not loaded",
+                    command: vec!["lakehouse", "tables", "--json"],
+                    view: View::Table {
+                        rows: "/refused",
+                        columns: vec![
+                            Column::new("/table", "Table"),
+                            Column::new("/reasons", "Why"),
+                        ],
+                    },
+                    empty: "Every table of the source is loaded.",
+                    ..Default::default()
+                },
+                Panel {
+                    id: "stack",
+                    title: "Stack",
+                    command: vec!["lakehouse", "tables", "--json"],
+                    view: View::Fields {
+                        fields: vec![
+                            Column::new("/settings/trino", "Trino"),
+                            Column::new("/settings/dagster", "Dagster"),
+                            Column::new("/settings/polaris", "Polaris health"),
+                            Column::new("/settings/storage", "Storage"),
+                            Column::new("/settings/source", "Source"),
+                            Column::new("/settings/target_catalog", "Iceberg catalog"),
+                            Column::new("/settings/bronze_schedule", "Bronze schedule"),
+                            Column::new("/settings/pipeline", "Pipeline repository"),
+                        ],
+                    },
+                    empty: "No `[extensions.lakehouse]` settings in this project's ekos.toml.",
+                    ..Default::default()
+                },
+            ],
+            actions: vec![
+                Action {
+                    label: "Doctor",
+                    command: vec!["lakehouse", "doctor"],
+                    ..Default::default()
+                },
+                Action {
+                    label: "Sync source changes",
+                    command: vec!["lakehouse", "sync"],
+                    ..Default::default()
+                },
+                Action {
+                    label: "Check the pipeline",
+                    command: vec!["lakehouse", "check"],
+                    ..Default::default()
+                },
+                Action {
+                    label: "Plan",
+                    command: vec!["lakehouse", "plan"],
+                    ..Default::default()
+                },
+                Action {
+                    label: "Generate",
+                    command: vec!["lakehouse", "generate"],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+        pentaho_page(),
+    ]
+}
+
+/// RFC 0207: the Pentaho tab — packages, then one translation's graph, models, steps, a step's
+/// original text next to its SQL, questions and the proposal; buttons to scan and translate.
+/// No approve or merge: merging the proposal branch is the approval (RFC 0190).
+fn pentaho_page() -> ConsolePage {
+    let report = || vec!["lakehouse", "pentaho", "report", "--json"];
+    ConsolePage {
+        id: "pentaho",
+        title: "Pentaho → dbt",
+        description: "Kettle packages translated into silver and gold dbt models (RFC 0200). Pick a \
+                      package, then a step. Every step says how faithfully it was carried over: \
+                      exact, rewritten (a rule a reviewer should read), llm-drafted, or gap (not \
+                      translated, and the models that need it are disabled). Translating proposes \
+                      a branch; merging it is the approval.",
+        params: vec![
+            PageParam {
+                name: "package",
+                label: "Package",
+                source: "packages",
+                rows: "/packages",
+                key: "/package",
+            },
+            PageParam {
+                name: "step",
+                label: "Step",
+                source: "steps",
+                rows: "/steps",
+                key: "/id",
+            },
+        ],
         panels: vec![
             Panel {
-                id: "health",
-                title: "Health per table and layer",
-                command: vec!["lakehouse", "status", "--json"],
+                id: "packages",
+                title: "Packages",
+                command: vec!["lakehouse", "pentaho", "scan", "--json"],
                 view: View::Table {
-                    rows: "",
+                    rows: "/packages",
                     columns: vec![
-                        Column::new("/table", "Table"),
-                        Column::new("/layer", "Layer"),
-                        Column::badge("/state", "State"),
-                        Column::new("/evidence/0", "Why"),
-                        Column::new("/cause", "Probable cause"),
+                        Column::new("/package", "Package"),
+                        Column::new("/transformations", "Transformations"),
+                        Column::new("/jobs", "Jobs"),
+                        Column::new("/steps", "Steps"),
+                        Column::new("/unknown_count", "Unknown step types"),
+                        Column::new("/unresolved_links", "Unresolved links"),
+                        Column::badge("/translation", "Translation"),
+                        Column::new("/translated/gap", "Gaps"),
                     ],
                 },
-                empty: "No runs recorded yet. Generate the pipeline and run it once \
-                        (the Dagster job `bronze`).",
+                empty: "No Pentaho package: no observed directory holds a .ktr or .kjb (set \
+                        [extensions.lakehouse] pentaho-packages in ekos.toml).",
+                ..Default::default()
             },
             Panel {
-                id: "proposals",
-                title: "Waiting for a merge",
-                command: vec!["lakehouse", "proposals", "--json"],
-                view: View::Table {
-                    rows: "/proposals",
-                    columns: vec![
-                        Column::badge("/kind", "Kind"),
-                        Column::new("/subject", "Table or mart"),
-                        Column::new("/summary", "What changes"),
-                        Column::new("/branch", "Branch"),
-                        Column::new("/at", "Proposed"),
-                    ],
-                },
-                empty: "Nothing waiting: every source change was safe, and no mart is proposed.",
-            },
-            Panel {
-                id: "tables",
-                title: "Tables and how they load",
-                command: vec!["lakehouse", "tables", "--json"],
-                view: View::Table {
-                    rows: "/tables",
-                    columns: vec![
-                        Column::new("/table", "Table"),
-                        Column::badge("/mode", "Load mode"),
-                        Column::new("/watermark", "Watermark"),
-                        Column::new("/primary_key", "Key"),
-                        Column::new("/not_exact", "Columns not landed exactly"),
-                    ],
-                },
-                empty: "No pipeline yet: run `lakehouse plan`, then `lakehouse generate`.",
-            },
-            Panel {
-                id: "refused",
-                title: "Tables not loaded",
-                command: vec!["lakehouse", "tables", "--json"],
-                view: View::Table {
-                    rows: "/refused",
-                    columns: vec![
-                        Column::new("/table", "Table"),
-                        Column::new("/reasons", "Why"),
-                    ],
-                },
-                empty: "Every table of the source is loaded.",
-            },
-            Panel {
-                id: "stack",
-                title: "Stack",
-                command: vec!["lakehouse", "tables", "--json"],
+                id: "summary",
+                title: "Translation",
+                command: report(),
+                params: vec!["package"],
                 view: View::Fields {
                     fields: vec![
-                        Column::new("/settings/trino", "Trino"),
-                        Column::new("/settings/dagster", "Dagster"),
-                        Column::new("/settings/polaris", "Polaris health"),
-                        Column::new("/settings/storage", "Storage"),
-                        Column::new("/settings/source", "Source"),
-                        Column::new("/settings/target_catalog", "Iceberg catalog"),
-                        Column::new("/settings/bronze_schedule", "Bronze schedule"),
-                        Column::new("/settings/pipeline", "Pipeline repository"),
+                        Column::badge("/state", "State"),
+                        Column::new("/summary/exact", "Exact"),
+                        Column::new("/summary/rewritten", "Rewritten"),
+                        Column::new("/summary/llm_drafted", "LLM-drafted"),
+                        Column::new("/summary/gap", "Gap"),
+                        Column::new("/summary/models", "Models"),
+                        Column::new("/summary/enabled", "Enabled"),
+                        Column::new("/summary/questions", "Questions"),
                     ],
                 },
-                empty: "No `[extensions.lakehouse]` settings in this project's ekos.toml.",
+                empty: "Not translated yet: run Translate.",
+            },
+            Panel {
+                id: "graph",
+                title: "Transformations",
+                command: report(),
+                params: vec!["package"],
+                view: View::Graph {
+                    nodes: "/graph/nodes",
+                    edges: "/graph/edges",
+                    id: "/id",
+                    label: "/label",
+                    group: "/group",
+                    badge: "/fidelity",
+                    from: "/from",
+                    to: "/to",
+                },
+                empty: "Not translated yet.",
+            },
+            Panel {
+                id: "models",
+                title: "Models",
+                command: report(),
+                params: vec!["package"],
+                view: View::Table {
+                    rows: "/models",
+                    columns: vec![
+                        Column::new("/name", "Model"),
+                        Column::new("/layer", "Layer"),
+                        Column::new("/transformation", "From"),
+                        Column::new("/materialization", "Materialization"),
+                        Column::badge("/fidelity", "Fidelity"),
+                        Column::badge("/enabled", "Enabled"),
+                        Column::new("/gaps/0", "Why disabled"),
+                    ],
+                },
+                empty: "No models.",
+            },
+            Panel {
+                id: "steps",
+                title: "Steps (click one)",
+                command: report(),
+                params: vec!["package"],
+                view: View::Table {
+                    rows: "/steps",
+                    columns: vec![
+                        Column::new("/transformation", "Transformation"),
+                        Column::new("/step", "Step"),
+                        Column::new("/step_type", "Type"),
+                        Column::new("/layer", "Layer"),
+                        Column::badge("/fidelity", "Fidelity"),
+                        Column::new("/gap", "Gap"),
+                        Column::new("/notes_text", "Notes"),
+                    ],
+                },
+                empty: "No steps.",
+            },
+            Panel {
+                id: "step",
+                title: "Step: original ↔ SQL",
+                command: report(),
+                params: vec!["package", "step"],
+                view: View::Code {
+                    left: "/step/original",
+                    right: "/step/sql",
+                    left_label: "Kettle (original)",
+                    right_label: "Trino SQL",
+                },
+                empty: "This step has no text.",
+            },
+            Panel {
+                id: "step-notes",
+                title: "Step: fidelity and notes",
+                command: report(),
+                params: vec!["package", "step"],
+                view: View::Fields {
+                    fields: vec![
+                        Column::badge("/step/fidelity", "Fidelity"),
+                        Column::new("/step/gap", "Gap"),
+                        Column::new("/step/notes_text", "Notes"),
+                        Column::new("/step/models", "Models"),
+                        Column::new("/step/line", "Line"),
+                    ],
+                },
+                empty: "",
+            },
+            Panel {
+                id: "questions",
+                title: "Questions",
+                command: report(),
+                params: vec!["package"],
+                view: View::Table {
+                    rows: "/questions",
+                    columns: vec![
+                        Column::new("/transformation", "Transformation"),
+                        Column::new("/step", "Step"),
+                        Column::new("/question", "Question"),
+                    ],
+                },
+                empty: "No questions: every table resolved.",
+            },
+            Panel {
+                id: "proposal",
+                title: "Proposal",
+                command: report(),
+                params: vec!["package"],
+                view: View::Markdown {
+                    pointer: "/proposal",
+                },
+                empty: "Not translated yet.",
             },
         ],
         actions: vec![
             Action {
-                label: "Doctor",
-                command: vec!["lakehouse", "doctor"],
+                label: "Scan packages",
+                command: vec!["lakehouse", "pentaho", "scan"],
+                ..Default::default()
             },
             Action {
-                label: "Sync source changes",
-                command: vec!["lakehouse", "sync"],
-            },
-            Action {
-                label: "Check the pipeline",
-                command: vec!["lakehouse", "check"],
-            },
-            Action {
-                label: "Plan",
-                command: vec!["lakehouse", "plan"],
-            },
-            Action {
-                label: "Generate",
-                command: vec!["lakehouse", "generate"],
+                label: "Translate",
+                command: vec!["lakehouse", "pentaho", "translate"],
+                binds: vec![("package", "package")],
+                ..Default::default()
             },
         ],
-    }]
+    }
 }
 
 fn mode_name(m: &LoadMode) -> (&'static str, Option<String>) {
@@ -227,6 +437,25 @@ pub fn proposals(repo: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 0207: both pages pass EKOS's own checker against this binary's real catalogue
+    /// (the check `ekos extensions --json` runs before the console serves a page).
+    #[test]
+    fn every_page_passes_the_console_checker() {
+        let ext =
+            ekos::extension::Extensions::new(vec![std::sync::Arc::new(crate::LakehouseExtension)]);
+        let mut root = ext.extend_cli(ekos::app::cli_command()).unwrap();
+        root.build();
+        let cat = ekos::commands::catalogue::catalogue_with(&root, &ext.command_classes());
+        let out = ekos::commands::extension_pages::describe(&ext, &cat).unwrap();
+        let ids: Vec<&str> = out["extensions"][0]["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["lakehouse", "pentaho"]);
+    }
 
     #[test]
     fn panels_only_read_and_name_the_new_commands() {
