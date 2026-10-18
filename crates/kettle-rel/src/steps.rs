@@ -890,6 +890,13 @@ impl Builder<'_> {
                 if !declared.iter().any(|d| &d.0 == name) {
                     if schema.iter().any(|f| &f.name == name) {
                         declared.push((name.clone(), name.clone(), t.ktype(), -1, -1, true));
+                    } else if plugin.is_some() {
+                        // A compiled plugin declares its fields in its Meta class's code, not in
+                        // the step XML: the field the code sets is the output.
+                        acc.note(format!(
+                            "`{name}` is a field the plugin's code adds (typed from the code)"
+                        ));
+                        declared.push((name.clone(), name.clone(), t.ktype(), -1, -1, false));
                     } else {
                         return Err(Gap::new(format!(
                             "the code sets `{name}`, which the step does not declare"

@@ -107,6 +107,10 @@ fn not(e: Expr) -> Expr {
         Expr::Lit {
             value: crate::expr::Lit::Bool(b),
         } => Expr::bool(!b),
+        Expr::IsNull { arg, negated } => Expr::IsNull {
+            arg,
+            negated: !negated,
+        },
         e => Expr::negate(e),
     }
 }
@@ -127,6 +131,9 @@ fn pick(c: &Expr, a: Expr, b: Expr) -> Expr {
         Expr::case(vec![(c.clone(), a)], Some(b))
     }
 }
+
+/// A `get(Fields.In, "f")` read, kept apart from a local that has the field's name.
+const FIELD: &str = "\u{1}field:";
 
 const LOGGING: &[&str] = &[
     "writeToLog",
@@ -200,12 +207,18 @@ impl<'a> Executor<'a> {
         let vars = st.vars.clone();
         let ft = self.field_type;
         let nt = |n: &str| -> Option<JType> {
+            if let Some(f) = n.strip_prefix(FIELD) {
+                return ft(f).map(JType::of_field);
+            }
             vars.get(n)
                 .map(|(_, t)| *t)
                 .or_else(|| ft(n).map(JType::of_field))
         };
         let vars2 = st.vars.clone();
         let ne = |n: &str| -> Expr {
+            if let Some(f) = n.strip_prefix(FIELD) {
+                return Expr::col(f);
+            }
             vars2
                 .get(n)
                 .map(|(e, _)| e.clone())
@@ -257,7 +270,7 @@ impl<'a> Executor<'a> {
                     }
                     _ => {}
                 }
-                JExpr::Name(field)
+                JExpr::Name(format!("{FIELD}{field}"))
             }
             JExpr::Call(None, name, args) if name == "getParameter" => match args.as_slice() {
                 [JExpr::Str(p)] => match self.params.get(p) {
@@ -363,6 +376,13 @@ impl<'a> Executor<'a> {
             Stmt::If(c, then, otherwise) => {
                 // Java's `if (r == null) { setOutputDone(); return false; }` guard.
                 if self.lang == Lang::Java && is_row_null_check(c, st.row_var.as_deref()) {
+                    return Ok(());
+                }
+                // The same guard inverted, as javac lays it out: `if (r != null) { …row… }
+                // setOutputDone(); return false;` — the row's path is the `then` block.
+                if self.lang == Lang::Java && is_row_present_check(c, st.row_var.as_deref()) {
+                    self.block(st, then)?;
+                    st.alive = Expr::bool(false);
                     return Ok(());
                 }
                 let cond = self.condition(st, c)?;
@@ -477,6 +497,13 @@ impl<'a> Executor<'a> {
                             "trans_Status set to stop or fail the transformation",
                         )),
                     };
+                }
+                // `r = getRow();` (a decompiled body declares its locals first).
+                if self.lang == Lang::Java
+                    && matches!(value.as_ref(), JExpr::Call(None, f, a) if f == "getRow" && a.is_empty())
+                {
+                    st.row_var = Some(name.clone());
+                    return Ok(());
                 }
                 if self.lang == Lang::Java && Some(name) == st.row_var.as_ref() {
                     // `r = createOutputRow(r, …)`: the row grows; nothing to translate.
@@ -601,6 +628,10 @@ fn field_get(e: &JExpr) -> Option<(String, String)> {
     }
 }
 
+fn is_row_present_check(c: &JExpr, row: Option<&str>) -> bool {
+    matches!(c, JExpr::Binary("!=", l, r) if matches!((l.as_ref(), r.as_ref()), (JExpr::Name(n), JExpr::Null) if Some(n.as_str()) == row))
+}
+
 fn is_row_null_check(c: &JExpr, row: Option<&str>) -> bool {
     matches!(c, JExpr::Binary("==", l, r) if matches!((l.as_ref(), r.as_ref()), (JExpr::Name(n), JExpr::Null) if Some(n.as_str()) == row))
 }
@@ -709,5 +740,42 @@ mod tests {
         let src = "public boolean processRow(StepMetaInterface smi, StepDataInterface sdi) { Object[] r = getRow(); counter++; putRow(data.outputRowMeta, r); putRow(data.outputRowMeta, r); return true; }";
         let b = parse_class_body(src).unwrap();
         assert!(Executor::new(Lang::Java, &ft).run(&b.methods[0].1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod decompiled {
+    use super::*;
+    use crate::stmt::parse_class_body;
+
+    /// RFC 0206: `processRow` exactly as the private JVM decompiler renders a compiled plugin
+    /// (golden fixture `AcmeDoubler`): locals declared first, the row guard inverted, autoboxing
+    /// spelled out.
+    #[test]
+    fn a_decompiled_plugin_process_row_executes() {
+        let src = "public boolean processRow(StepMetaInterface smi, StepDataInterface sdi) {\n\
+            Object[] r;\nLong qty;\nString status;\nr = getRow();\nif ((r != null)) {\n\
+            r = createOutputRow(r, 4);\nqty = get(Fields.In, \"qty\").getInteger(r);\n\
+            status = get(Fields.In, \"status\").getString(r);\nif ((qty != null)) {\n\
+            get(Fields.Out, \"doubled\").setValue(r, Long.valueOf((qty.longValue() * 2)));\n\
+            get(Fields.Out, \"label\").setValue(r, ((\"\" + status.toUpperCase()) + \"#\") + qty);\n\
+            putRow(null, r);\nreturn true;\n}\nreturn true;\n}\nsetOutputDone();\nreturn false;\n}";
+        let ft = |n: &str| match n {
+            "qty" => Some(KType::Integer),
+            "status" => Some(KType::String),
+            _ => None,
+        };
+        let b = parse_class_body(src).unwrap();
+        let o = Executor::new(Lang::Java, &ft).run(&b.methods[0].1).unwrap();
+        assert_eq!(
+            o.outputs["doubled"].0.sql(),
+            "CASE WHEN (\"qty\" IS NOT NULL) THEN (\"qty\" * 2) ELSE NULL END"
+        );
+        let label = o.outputs["label"].0.sql();
+        assert!(
+            label.contains("concat('', coalesce(upper(\"status\"), 'null'))"),
+            "{label}"
+        );
+        assert_eq!(o.drop_when.unwrap().sql(), "(\"qty\" IS NULL)");
     }
 }

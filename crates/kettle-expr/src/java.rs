@@ -770,7 +770,11 @@ impl<'a> Lowerer<'a> {
         Ok(match op {
             "+" if lt == JType::Str || rt == JType::Str => {
                 self.out.note(NOTE_JAVA_CONCAT);
-                let part = |e: Expr, t: JType| {
+                let part = |src: &JExpr, e: Expr, t: JType| {
+                    // `"" + x`: the empty literal is text here, not Kettle's empty-is-null.
+                    if matches!(src, JExpr::Str(s) if s.is_empty()) {
+                        return Expr::str("");
+                    }
                     let s = if t == JType::Str {
                         e
                     } else {
@@ -779,7 +783,7 @@ impl<'a> Lowerer<'a> {
                     Expr::call(Func::Coalesce, vec![s, Expr::str("null")])
                 };
                 (
-                    Expr::call(Func::Concat, vec![part(le, lt), part(re, rt)]),
+                    Expr::call(Func::Concat, vec![part(l, le, lt), part(r, re, rt)]),
                     JType::Str,
                 )
             }
@@ -901,6 +905,17 @@ impl<'a> Lowerer<'a> {
                         Expr::call(Func::Coalesce, vec![s, Expr::str("null")]),
                         JType::Str,
                     )
+                }
+                // Boxing a number (`Long.valueOf(qty * 2)`, as javac writes autoboxing): the value.
+                ("Integer" | "Long" | "Double", "valueOf")
+                    if a.first().is_some_and(|x| x.1.numeric()) =>
+                {
+                    let (e, t) = a[0].clone();
+                    let boxed = match t {
+                        JType::Double { .. } => JType::Double { boxed: true },
+                        _ => JType::Long { boxed: true },
+                    };
+                    (e, boxed)
                 }
                 ("Integer" | "Long", "parseInt" | "parseLong" | "valueOf") => {
                     self.out.note("a value that is not a number would stop the Kettle step; the SQL CAST fails the query the same way");
