@@ -307,13 +307,16 @@ pub fn translate(package: &Package, plan: &Plan, s: &Settings) -> Translation {
     Translation { files, report }
 }
 
+/// Tables the package writes: key → (gold model, fields).
+type Written = BTreeMap<TableKey, (String, Vec<Field>)>;
+
 /// Tables the package writes become refs to their gold models: build until that stops changing.
 fn resolve_fixpoint(
     package: &Package,
     plan: &Plan,
     s: &Settings,
     targets: &[&Transformation],
-) -> (Vec<Ir>, BTreeMap<TableKey, (String, Vec<Field>)>) {
+) -> (Vec<Ir>, Written) {
     let mut written: BTreeMap<TableKey, (String, Vec<Field>)> = BTreeMap::new();
     let mut irs: Vec<Ir> = Vec::new();
     for _ in 0..5 {
