@@ -44,6 +44,14 @@ impl EkosExtension for LakehouseExtension {
                 }}
             }),
             serde_json::json!({
+                "name": "ekos_pentaho_translation",
+                "description": "EKOS Lakehouse: the latest translation of each Pentaho package into silver and gold dbt models — per model its layer, materialization, fidelity (exact, rewritten, llm-drafted, gap) and whether it is enabled; per step its notes, gap reason, original Kettle text and generated SQL; the open questions. Read-only: it cannot translate, merge or approve.",
+                "inputSchema": {"type": "object", "properties": {
+                    "package": {"type": "string", "description": "Only this package"},
+                    "step": {"type": "string", "description": "Only steps with this name (with original text and SQL)"}
+                }}
+            }),
+            serde_json::json!({
                 "name": "ekos_table_health",
                 "description": "EKOS Lakehouse: one table's health per layer with its evidence, recent runs, reconciliations (tiers, divergences, planted control) and schema changes. Read-only.",
                 "inputSchema": {"type": "object", "required": ["table"], "properties": {
@@ -55,8 +63,11 @@ impl EkosExtension for LakehouseExtension {
     }
 
     fn mcp_tool_is_scoped(&self, name: &str) -> bool {
-        // Both read only through the store they are handed (RFC 0191).
-        matches!(name, "ekos_pipeline_status" | "ekos_table_health")
+        // All read only through the store they are handed (RFC 0191).
+        matches!(
+            name,
+            "ekos_pipeline_status" | "ekos_table_health" | "ekos_pentaho_translation"
+        )
     }
 
     fn call_mcp_tool(
@@ -77,6 +88,32 @@ impl EkosExtension for LakehouseExtension {
                 Ok(
                     serde_json::json!({"tables": shown, "summary": monitor::render(&h).lines().last()}),
                 )
+            })()),
+            "ekos_pentaho_translation" => Some((|| {
+                let package = args["package"].as_str();
+                let step = args["step"].as_str();
+                let mut out = Vec::new();
+                for mut t in facts::translations(ledger)? {
+                    if package.is_some_and(|p| t["package"].as_str() != Some(p)) {
+                        continue;
+                    }
+                    if let Some(steps) = t["report"]["steps"].as_array_mut() {
+                        match step {
+                            Some(name) => steps.retain(|s| s["step"].as_str() == Some(name)),
+                            // Without a step: no code and SQL, to keep the answer short.
+                            None => {
+                                for s in steps.iter_mut() {
+                                    if let Some(o) = s.as_object_mut() {
+                                        o.remove("original");
+                                        o.remove("sql");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    out.push(t);
+                }
+                Ok(serde_json::json!({ "translations": out }))
             })()),
             "ekos_table_health" => Some((|| {
                 let table = args["table"]
@@ -207,6 +244,33 @@ impl EkosExtension for LakehouseExtension {
                     clap::Command::new("pentaho")
                         .about("Pentaho packages into silver and gold dbt models (RFC 0200)")
                         .subcommand_required(true)
+                        .subcommand(
+                            clap::Command::new("translate")
+                                .about(
+                                    "Translate a package into silver and gold dbt models and propose \
+                                     them on a branch (RFC 0204); Trino plans every model first",
+                                )
+                                .arg(clap::Arg::new("package").required(true).help("The package's name (see `pentaho scan`)"))
+                                .arg(
+                                    clap::Arg::new("out")
+                                        .long("out")
+                                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                                        .help("Write into this directory instead of proposing a branch"),
+                                )
+                                .arg(
+                                    clap::Arg::new("no-explain")
+                                        .long("no-explain")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Do not plan the models on Trino"),
+                                )
+                                .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
+                        )
+                        .subcommand(
+                            clap::Command::new("report")
+                                .about("The latest translation of each package: models, steps, fidelity, gaps (RFC 0204)")
+                                .arg(clap::Arg::new("package").long("package").help("Only this package"))
+                                .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
+                        )
                         .subcommand(
                             clap::Command::new("scan")
                                 .about(
@@ -433,6 +497,10 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse check", Class::Write, false),
             // Reads the project's own source files (redacted), nothing else.
             ("lakehouse pentaho scan", Class::Read, false),
+            // Reads the source files and the deployed plan, plans on Trino, branches the repository.
+            ("lakehouse pentaho translate", Class::External, false),
+            // Reads translation reports from the pipeline repository (files and branches).
+            ("lakehouse pentaho report", Class::Read, false),
         ]
     }
 
@@ -714,6 +782,25 @@ impl EkosExtension for LakehouseExtension {
                 let settings = settings::load(ctx.config)?;
                 match p.subcommand() {
                     Some(("scan", m)) => pentaho_cmd::scan(&settings, ctx, m.get_flag("json")),
+                    Some(("translate", m)) => {
+                        let o = pentaho_cmd::TranslateOptions {
+                            package: m.get_one::<String>("package").expect("required").clone(),
+                            out: m
+                                .get_one::<std::path::PathBuf>("out")
+                                .map(|o| ctx.invoked_from.join(o)),
+                            explain: !m.get_flag("no-explain"),
+                            json: m.get_flag("json"),
+                        };
+                        let repo = pipeline_dir(&settings, ctx);
+                        pentaho_cmd::translate(&settings, ctx, &o, &repo).await
+                    }
+                    Some(("report", m)) => pentaho_cmd::report(
+                        &settings,
+                        ctx,
+                        &pipeline_dir(&settings, ctx),
+                        m.get_one::<String>("package").map(String::as_str),
+                        m.get_flag("json"),
+                    ),
                     other => anyhow::bail!("unknown pentaho command {other:?}"),
                 }
             }

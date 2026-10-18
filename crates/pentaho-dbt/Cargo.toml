@@ -1,0 +1,21 @@
+[package]
+name = "ekos-lakehouse-pentaho-dbt"
+description = "Pentaho packages into silver and gold dbt-trino models, with a per-step report (RFC 0204). Pure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ekos-lakehouse-bronze.workspace = true
+ekos-lakehouse-silver.workspace = true
+ekos-lakehouse-kettle.workspace = true
+ekos-lakehouse-kettle-expr.workspace = true
+ekos-lakehouse-kettle-rel.workspace = true
+ekos-plugin-sql-dialect-trino = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-sql-dialect-sdk = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlparser = { workspace = true, features = ["visitor"] }

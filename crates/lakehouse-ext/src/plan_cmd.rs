@@ -190,7 +190,7 @@ pub fn write(
     let mut removed = Vec::new();
     let stale: Vec<String> = manifest
         .keys()
-        .filter(|p| !files.contains_key(*p))
+        .filter(|p| !files.contains_key(*p) && !crate::pentaho_cmd::is_pentaho_path(p))
         .cloned()
         .collect();
     for path in stale {

@@ -14,6 +14,7 @@ pub const RUN_KIND: &str = "LakehouseRun";
 pub const METRIC_KIND: &str = "LakehouseMetric";
 pub const CHANGE_KIND: &str = "LakehouseChange";
 pub const MART_KIND: &str = "LakehouseMart";
+pub const TRANSLATION_KIND: &str = "PentahoTranslation";
 
 fn det_id(seed: &str) -> KirId {
     KirId(Uuid::new_v5(&Uuid::NAMESPACE_URL, seed.as_bytes()))
@@ -248,4 +249,93 @@ pub fn record_schema_state(
         store.append_object(&obj)?;
         Ok(obj.id)
     })
+}
+
+/// RFC 0204: one `PentahoTranslation` per model of a translation, keyed by package, model and the
+/// translation's content (a new translation is a new fact; the old ones stay, append-only).
+pub fn record_translation(
+    store: &dyn KnowledgeStore,
+    r: &ekos_lakehouse_pentaho_dbt::Report,
+) -> anyhow::Result<usize> {
+    let run = {
+        use sha2::{Digest, Sha256};
+        let text = serde_json::to_string(r)?;
+        format!("{:x}", Sha256::digest(text.as_bytes()))[..12].to_string()
+    };
+    with_context(store, &run, "pentaho-translate", || {
+        let mut n = 0;
+        for m in &r.models {
+            let mut obj = KirObject::new(
+                format!(
+                    "{} → {} ({})",
+                    m.transformation,
+                    m.name,
+                    m.fidelity.as_str()
+                ),
+                ObjectKind::Custom(TRANSLATION_KIND.into()),
+            );
+            obj.id = det_id(&format!(
+                "pentaho-translation:{}:{}:{run}",
+                r.package, m.name
+            ));
+            let serde_json::Value::Object(map) = serde_json::to_value(m)? else {
+                unreachable!("a struct serializes to an object")
+            };
+            obj.properties.extend(map);
+            obj.properties.insert("package".into(), json!(r.package));
+            obj.properties.insert("translation".into(), json!(run));
+            store.append_object(&obj)?;
+            n += 1;
+        }
+        // The whole package in one fact: what `ekos_pentaho_translation` serves.
+        let mut obj = KirObject::new(
+            format!("Pentaho package {} translation", r.package),
+            ObjectKind::Custom(TRANSLATION_KIND.into()),
+        );
+        obj.id = det_id(&format!("pentaho-translation:{}:{run}", r.package));
+        obj.properties.insert("record".into(), json!("package"));
+        obj.properties.insert("package".into(), json!(r.package));
+        obj.properties.insert("translation".into(), json!(run));
+        obj.properties.insert(
+            "counts".into(),
+            json!(
+                r.counts()
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), *v))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            ),
+        );
+        obj.properties
+            .insert("report".into(), serde_json::to_value(r)?);
+        store.append_object(&obj)?;
+        Ok(n + 1)
+    })
+}
+
+/// The latest translation report of each package in the ledger (RFC 0204), newest first.
+pub fn translations(store: &dyn KnowledgeStore) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut latest: std::collections::BTreeMap<String, (i64, serde_json::Value)> =
+        Default::default();
+    for o in store.all_objects()? {
+        if o.kind != ObjectKind::Custom(TRANSLATION_KIND.into()) {
+            continue;
+        }
+        if o.properties.get("record").and_then(|v| v.as_str()) != Some("package") {
+            continue;
+        }
+        let pkg = o
+            .properties
+            .get("package")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let at = o.created_at.timestamp();
+        let value = serde_json::to_value(&o.properties)?;
+        if latest.get(&pkg).is_none_or(|(t, _)| at >= *t) {
+            latest.insert(pkg, (at, value));
+        }
+    }
+    let mut out: Vec<_> = latest.into_values().collect();
+    out.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    Ok(out.into_iter().map(|(_, v)| v).collect())
 }

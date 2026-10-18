@@ -66,6 +66,9 @@ pub struct Settings {
     /// Pentaho packages to translate, `name = "path"` relative to the workspace (RFC 0200).
     /// Empty: every observed directory that holds a `.ktr` or `.kjb`.
     pub pentaho_packages: std::collections::BTreeMap<String, String>,
+    /// Kettle reads `''` as null; silver models apply `nullif(c, '')` to text (RFC 0202).
+    /// Default true; false for a Kettle run with `KETTLE_EMPTY_STRING_DIFFERS_FROM_NULL=Y`.
+    pub pentaho_empty_string_is_null: Option<bool>,
 }
 
 impl Settings {

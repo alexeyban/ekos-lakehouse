@@ -1106,6 +1106,8 @@ dependencies = [
  "ekos-lakehouse-gold",
  "ekos-lakehouse-health",
  "ekos-lakehouse-kettle",
+ "ekos-lakehouse-kettle-expr",
+ "ekos-lakehouse-pentaho-dbt",
  "ekos-lakehouse-silver",
  "ekos-lakehouse-trino",
  "ekos-ledger",
@@ -1177,6 +1179,23 @@ dependencies = [
  "ekos-lakehouse-kettle-expr",
  "serde",
  "serde_json",
+ "sqlparser",
+]
+
+[[package]]
+name = "ekos-lakehouse-pentaho-dbt"
+version = "0.1.1"
+dependencies = [
+ "ekos-lakehouse-bronze",
+ "ekos-lakehouse-kettle",
+ "ekos-lakehouse-kettle-expr",
+ "ekos-lakehouse-kettle-rel",
+ "ekos-lakehouse-silver",
+ "ekos-plugin-sql-dialect-trino",
+ "ekos-sql-dialect-sdk",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "sqlparser",
 ]
 
