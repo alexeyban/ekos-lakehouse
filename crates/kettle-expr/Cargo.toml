@@ -1,0 +1,16 @@
+[package]
+name = "ekos-lakehouse-kettle-expr"
+description = "Typed Kettle expressions: condition trees, Calculator, Formula, Java expressions → Trino SQL (RFC 0202). Pure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ekos-lakehouse-kettle.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+roxmltree.workspace = true

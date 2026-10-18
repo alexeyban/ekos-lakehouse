@@ -1,0 +1,15 @@
+[package]
+name = "ekos-lakehouse-kettle-rel"
+description = "The relational IR of a Kettle transformation: one typed node per step, with fidelity (RFC 0202). Pure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ekos-lakehouse-kettle.workspace = true
+ekos-lakehouse-kettle-expr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlparser = { workspace = true, features = ["visitor"] }

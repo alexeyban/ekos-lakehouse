@@ -9,6 +9,8 @@ members = [
     "crates/gold",
     "crates/health",
     "crates/kettle",
+    "crates/kettle-expr",
+    "crates/kettle-rel",
     "crates/silver",
     "crates/trino",
     "crates/lakehouse-ext",
@@ -46,6 +48,8 @@ ekos-lakehouse-changes = { path = "crates/changes" }
 ekos-lakehouse-gold    = { path = "crates/gold" }
 ekos-lakehouse-health  = { path = "crates/health" }
 ekos-lakehouse-kettle  = { path = "crates/kettle" }
+ekos-lakehouse-kettle-expr = { path = "crates/kettle-expr" }
+ekos-lakehouse-kettle-rel  = { path = "crates/kettle-rel" }
 
 # ── Third party (versions match the EKOS workspace) ──
 anyhow      = "1"

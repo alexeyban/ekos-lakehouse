@@ -1160,6 +1160,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekos-lakehouse-kettle-expr"
+version = "0.1.1"
+dependencies = [
+ "ekos-lakehouse-kettle",
+ "roxmltree",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ekos-lakehouse-kettle-rel"
+version = "0.1.1"
+dependencies = [
+ "ekos-lakehouse-kettle",
+ "ekos-lakehouse-kettle-expr",
+ "serde",
+ "serde_json",
+ "sqlparser",
+]
+
+[[package]]
 name = "ekos-lakehouse-silver"
 version = "0.1.1"
 dependencies = [
