@@ -732,6 +732,25 @@ impl<'a> Lowerer<'a> {
         let (le, lt) = self.lower(l)?;
         let (re, rt) = self.lower(r)?;
         let b = JType::Bool { boxed: false };
+        // JavaScript turns a null into 0 in arithmetic and ordering (`null + 42` is 42,
+        // `null < 5` is true): a numeric field that may be null reads as coalesce(x, 0).
+        let numeric_op = matches!(op, "+" | "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=");
+        let (le, re) = if self.js && numeric_op && lt.numeric() && rt.numeric() {
+            let zero = |e: Expr, t: JType| {
+                if t.boxed() {
+                    Expr::call(Func::Coalesce, vec![e, Expr::int(0)])
+                } else {
+                    e
+                }
+            };
+            if lt.boxed() || rt.boxed() {
+                self.out
+                    .note("JavaScript reads a null number as 0 in arithmetic and comparisons");
+            }
+            (zero(le, lt), zero(re, rt))
+        } else {
+            (le, re)
+        };
         if self.js {
             match op {
                 "==" | "===" | "!=" | "!==" => {
@@ -759,11 +778,7 @@ impl<'a> Lowerer<'a> {
                     let e = Expr::bin(BinOp::Div, Expr::cast(le, KType::Number), re);
                     return Ok((e, JType::Double { boxed: false }));
                 }
-                "<" | "<=" | ">" | ">=" if lt.boxed() || rt.boxed() => {
-                    self.out.note(
-                        "JavaScript compares a null as 0; here a comparison with a null is false",
-                    );
-                }
+
                 _ => {}
             }
         }
@@ -952,8 +967,12 @@ impl<'a> Lowerer<'a> {
                 .map(|x| x.0.clone())
                 .ok_or_else(|| Gap::new(format!(".{name}(): missing argument")))
         };
-        if rt.boxed() && !self.js {
-            self.out.note(NOTE_NPE);
+        if rt.boxed() {
+            self.out.note(if self.js {
+                "a method called on a null value stops the Kettle step (TypeError); the SQL yields null"
+            } else {
+                NOTE_NPE
+            });
         }
         Ok(match (rt, name, a.len()) {
             (JType::Str, "equals", 1) => (Expr::two_valued(Expr::bin(BinOp::Eq, recv, arg(0)?)), b),

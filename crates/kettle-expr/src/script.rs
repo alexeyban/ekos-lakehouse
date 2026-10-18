@@ -682,13 +682,16 @@ mod tests {
         let o = Executor::new(Lang::Js, &ft).run(&s).unwrap();
         assert_eq!(
             o.vars["tier"].0.sql(),
-            "CASE WHEN coalesce((\"amount\" > 1000), FALSE) THEN 'high' ELSE CASE WHEN coalesce((\"amount\" > 100), FALSE) THEN 'mid' ELSE 'low' END END"
+            "CASE WHEN coalesce((coalesce(\"amount\", 0) > 1000), FALSE) THEN 'high' ELSE CASE WHEN coalesce((coalesce(\"amount\", 0) > 100), FALSE) THEN 'mid' ELSE 'low' END END"
         );
         assert_eq!(
             o.drop_when.unwrap().sql(),
             "(\"status\" IS NOT DISTINCT FROM 'void')"
         );
-        assert_eq!(o.vars["half"].0.sql(), "(CAST(\"qty\" AS double) / 2)");
+        assert_eq!(
+            o.vars["half"].0.sql(),
+            "(CAST(coalesce(\"qty\", 0) AS double) / 2)"
+        );
         assert!(
             o.vars["full"]
                 .0
