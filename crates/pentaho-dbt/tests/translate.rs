@@ -148,6 +148,7 @@ fn a_package_becomes_silver_gold_snapshot_and_test_files() {
             package: "shop etl".into(),
             source_database: Some("shop".into()),
             empty_string_is_null: true,
+            ..Default::default()
         },
     );
     let names: Vec<&str> = t.files.keys().map(String::as_str).collect();
@@ -248,6 +249,7 @@ fn translation_is_deterministic() {
         package: "shop".into(),
         source_database: Some("shop".into()),
         empty_string_is_null: true,
+        ..Default::default()
     };
     let a = translate(&p, &shop(), &s).files;
     let b = translate(&p, &shop(), &s).files;
@@ -265,6 +267,7 @@ fn show_generated_files() {
             package: "shop".into(),
             source_database: Some("shop".into()),
             empty_string_is_null: true,
+            ..Default::default()
         },
     );
     for (path, body) in &t.files {
@@ -285,6 +288,7 @@ fn every_enabled_model_has_plannable_sql_over_silver_tables_only() {
             package: "shop".into(),
             source_database: Some("shop".into()),
             empty_string_is_null: true,
+            ..Default::default()
         },
     );
     for m in t.report.models.iter().filter(|m| m.enabled) {

@@ -184,3 +184,175 @@ async fn translate_proposes_a_branch_and_generate_keeps_the_files() {
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+struct FakeDecompiler;
+
+impl ekos::extension::JavaDecompiler for FakeDecompiler {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+
+    fn decompile(
+        &self,
+        archive: &[u8],
+        class: &str,
+    ) -> anyhow::Result<ekos::extension::DecompiledClass> {
+        anyhow::ensure!(archive == b"PK-fake-jar", "not the plugin's jar");
+        anyhow::ensure!(class == "com/acme/Doubler", "no class {class}");
+        Ok(ekos::extension::DecompiledClass {
+            class: class.into(),
+            super_class: Some("org/pentaho/di/trans/step/BaseStep".into()),
+            interfaces: vec![],
+            methods: vec![ekos::extension::DecompiledMethod {
+                name: "processRow".into(),
+                descriptor: "(Lorg/pentaho/di/trans/step/StepMetaInterface;Lorg/pentaho/di/trans/step/StepDataInterface;)Z".into(),
+                fidelity: ekos::extension::DecompiledFidelity::Statements,
+                source: "Object[] r = getRow();\nif (r == null) { setOutputDone(); return false; }\nLong qty = get(Fields.In, \"qty\").getInteger(r);\nget(Fields.Out, \"qty\").setValue(r, qty * 2);\nputRow(data.outputRowMeta, r);\nreturn true;".into(),
+                gaps: vec![],
+            }],
+            diagnostics: vec![],
+        })
+    }
+}
+
+struct Decompiles;
+
+#[async_trait::async_trait(?Send)]
+impl ekos::extension::EkosExtension for Decompiles {
+    fn name(&self) -> &'static str {
+        "fake-binary"
+    }
+
+    fn java_decompiler(&self) -> Option<Arc<dyn ekos::extension::JavaDecompiler>> {
+        Some(Arc::new(FakeDecompiler))
+    }
+}
+
+/// RFC 0203: a compiled plugin step is decompiled through the seam when the binary has a
+/// decompiler, and stays a gap that says why when it does not.
+#[tokio::test(flavor = "current_thread")]
+async fn plugin_steps_go_through_the_java_decompiler_seam() {
+    let root = std::env::temp_dir().join(format!("ekos-lh-pentaho-plugin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("etl/plugins/doubler")).unwrap();
+    std::fs::write(
+        root.join("etl/plugins/doubler/plugin.xml"),
+        r#"<plugin id="AcmeDoubler" classname="com.acme.DoublerMeta"/>"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("etl/plugins/doubler/doubler.jar"), b"PK-fake-jar").unwrap();
+    let ktr = KTR
+        .replace("<type>Calculator</type><calculation><field_name>amount</field_name><calc_type>MULTIPLY</calc_type><field_a>qty</field_a><field_b>price</field_b><value_type>BigNumber</value_type></calculation>", "<type>AcmeDoubler</type>");
+    std::fs::write(root.join("etl/orders.ktr"), ktr).unwrap();
+    std::fs::write(
+        root.join("ekos.toml"),
+        "[workspace]\nname = \"t\"\n\n[[sources]]\nname = \"etl\"\npath = \"etl\"\n\n[extensions.lakehouse]\nsource-database = \"shop\"\n",
+    )
+    .unwrap();
+    let p = plan(
+        &[SourceTable {
+            schema: "public".into(),
+            oid: 0,
+            name: "orders".into(),
+            columns: vec![
+                col("id", "integer", "integer"),
+                col("qty", "integer", "integer"),
+                col("price", "numeric(10,2)", "decimal(10,2)"),
+            ],
+            primary_key: vec!["id".into()],
+            row_estimate: 1,
+            update_triggers: vec![],
+            foreign_keys: vec![],
+            comment: None,
+        }],
+        &PlanSettings::default(),
+    );
+    let repo = root.join("pipeline");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(
+        repo.join("lakehouse.lock.json"),
+        serde_json::to_string_pretty(&p).unwrap(),
+    )
+    .unwrap();
+    let config = ekos_compiler_core::EkosConfig::from_file(&root.join("ekos.toml")).unwrap();
+    let settings = ekos_lakehouse_ext::settings::load(&config).unwrap();
+    let step = |out: &Path| -> serde_json::Value {
+        let r: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(out.join("pentaho/etl/translation.json")).unwrap(),
+        )
+        .unwrap();
+        r["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["step"] == "calc")
+            .unwrap()
+            .clone()
+    };
+    // Public build: no decompiler.
+    let public = root.join("out-public");
+    translate_into(
+        &config,
+        &settings,
+        &root,
+        &repo,
+        &Extensions::new(vec![Arc::new(LakehouseExtension)]),
+        &public,
+    )
+    .await;
+    let s = step(&public);
+    assert_eq!(s["fidelity"], "gap");
+    assert!(
+        s["gap"]
+            .as_str()
+            .unwrap()
+            .contains("needs the ekos-binary build"),
+        "{s}"
+    );
+    // With a decompiler.
+    let private = root.join("out-private");
+    translate_into(
+        &config,
+        &settings,
+        &root,
+        &repo,
+        &Extensions::new(vec![Arc::new(LakehouseExtension), Arc::new(Decompiles)]),
+        &private,
+    )
+    .await;
+    let s = step(&private);
+    assert_eq!(s["fidelity"], "rewritten", "{s}");
+    assert!(
+        s["original"].as_str().unwrap().starts_with("// decompiled"),
+        "{s}"
+    );
+    assert!(s["sql"].as_str().unwrap().contains("(\"qty\" * 2)"), "{s}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+async fn translate_into(
+    config: &ekos_compiler_core::EkosConfig,
+    settings: &ekos_lakehouse_ext::settings::Settings,
+    root: &Path,
+    repo: &Path,
+    ext: &Extensions,
+    out: &Path,
+) {
+    let config_path = root.join("ekos.toml");
+    let ctx = ekos::extension::CommandContext {
+        config,
+        cwd: root,
+        config_path: &config_path,
+        invoked_from: root,
+        extensions: ext,
+    };
+    let o = ekos_lakehouse_ext::pentaho_cmd::TranslateOptions {
+        package: "etl".into(),
+        out: Some(out.to_path_buf()),
+        explain: false,
+        json: false,
+    };
+    ekos_lakehouse_ext::pentaho_cmd::translate(settings, &ctx, &o, repo)
+        .await
+        .unwrap();
+}

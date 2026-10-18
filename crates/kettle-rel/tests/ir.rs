@@ -288,3 +288,56 @@ fn switch_case_routes_and_lookups_join() {
     );
     assert!(!node(&ir, "other").is_gap());
 }
+
+#[test]
+fn javascript_and_java_class_steps_become_projections_and_filters() {
+    let body = r#"
+      <step><name>orders</name><type>TableInput</type><connection>src</connection><sql>select id, status, qty, price from orders</sql></step>
+      <step><name>js</name><type>ScriptValueMod</type><compatible>N</compatible>
+        <jsScripts><jsScript><jsScript_type>0</jsScript_type><jsScript_name>main</jsScript_name>
+          <jsScript_script>// tier and skip void
+var tier = 'small';
+if (qty * price > 100) { tier = 'big'; }
+if (status == 'void') { trans_Status = SKIP_TRANSFORMATION; }
+var code = upper(status) + '-' + id;</jsScript_script></jsScript></jsScripts>
+        <fields><field><name>tier</name><rename>tier</rename><type>String</type><replace>N</replace></field>
+                <field><name>code</name><rename>order_code</rename><type>String</type><replace>N</replace></field></fields></step>
+      <step><name>java</name><type>UserDefinedJavaClass</type>
+        <definitions><definition><class_type>TRANSFORM_CLASS</class_type><class_name>Processor</class_name><class_source>
+public boolean processRow(StepMetaInterface smi, StepDataInterface sdi) throws KettleException {
+  Object[] r = getRow();
+  if (r == null) { setOutputDone(); return false; }
+  r = createOutputRow(r, data.outputRowMeta.size());
+  String tier = get(Fields.In, "tier").getString(r);
+  get(Fields.Out, "priority").setValue(r, tier.equals("big") ? Long.valueOf(1) : Long.valueOf(2));
+  putRow(data.outputRowMeta, r);
+  return true;
+}</class_source></definition></definitions>
+        <fields><field><field_name>priority</field_name><field_type>Integer</field_type></field></fields></step>"#;
+    let ir = ir_of(
+        &[("t.ktr", ktr(body, &[("orders", "js"), ("js", "java")]))],
+        "t.ktr",
+    );
+    let js: Vec<_> = ir.nodes.iter().filter(|n| n.step == "js").collect();
+    assert_eq!(
+        js.len(),
+        2,
+        "a Project, then the Filter for the skipped rows: {:?}",
+        js.iter().map(|n| &n.op).collect::<Vec<_>>()
+    );
+    let Op::Filter { predicate } = &js[1].op else {
+        panic!("{:?}", js[1].op)
+    };
+    assert_eq!(
+        predicate.sql(),
+        "NOT ((\"status\" IS NOT DISTINCT FROM 'void'))"
+    );
+    assert!(js[1].schema.iter().any(|f| f.name == "order_code"));
+    let java = node(&ir, "java");
+    assert!(!java.is_gap(), "{:?}", java.op);
+    let Op::Project { items } = &java.op else {
+        panic!()
+    };
+    let priority = &items.iter().find(|(n, _)| n == "priority").unwrap().1;
+    assert!(priority.sql().contains("'big'"), "{}", priority.sql());
+}

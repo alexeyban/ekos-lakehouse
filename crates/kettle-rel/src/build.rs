@@ -48,10 +48,22 @@ pub(crate) struct Builder<'a> {
     pub catalog: &'a dyn Catalog,
     pub ir: Ir,
     pub depth: usize,
+    /// Decompiled `processRow` source per plugin step type (RFC 0203).
+    pub plugin_code: &'a BTreeMap<String, String>,
 }
 
 /// Builds the IR of `t`.
 pub fn build(package: &Package, t: &Transformation, catalog: &dyn Catalog) -> Ir {
+    build_with(package, t, catalog, &BTreeMap::new())
+}
+
+/// Builds the IR of `t`, with decompiled `processRow` source per plugin step type (RFC 0203).
+pub fn build_with(
+    package: &Package,
+    t: &Transformation,
+    catalog: &dyn Catalog,
+    plugin_code: &BTreeMap<String, String>,
+) -> Ir {
     let mut b = Builder {
         package,
         catalog,
@@ -60,6 +72,7 @@ pub fn build(package: &Package, t: &Transformation, catalog: &dyn Catalog) -> Ir
             nodes: Vec::new(),
         },
         depth: 0,
+        plugin_code,
     };
     b.walk(t, "", &BTreeMap::new());
     b.ir
@@ -372,9 +385,9 @@ impl Builder<'_> {
             Category::SubTransformation => {
                 format!("{what} runs another transformation per row or row group")
             }
-            Category::Code => format!("{what}: code steps are translated by RFC 0203"),
+            Category::Code => format!("{what} is not translated"),
             Category::Unknown => format!(
-                "`{}` is a plugin step or a type EKOS does not know; with ekos-binary present its jar can be decompiled (RFC 0203)",
+                "compiled plugin step `{}`: decompiling it needs the ekos-binary build (RFC 0203)",
                 step.type_id
             ),
             _ => format!("{what} is not translated yet"),

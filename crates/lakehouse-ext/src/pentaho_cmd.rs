@@ -341,6 +341,7 @@ pub async fn translate(
             package: o.package.clone(),
             source_database: settings.source_database.clone(),
             empty_string_is_null: settings.pentaho_empty_string_is_null.unwrap_or(true),
+            plugin_code: plugin_code(&dir.path, &package, ctx),
         },
     );
     let pkg = ekos_lakehouse_pentaho_dbt::slug(&o.package);
@@ -451,6 +452,47 @@ pub async fn translate(
         }
     }
     Ok(())
+}
+
+/// Decompiled `processRow` source for every plugin step type of `package`, when this binary
+/// has a `JavaDecompiler` (the private ekos-binary build, RFC 0200/0203). The public build has
+/// none: plugin steps stay gaps that say so.
+fn plugin_code(
+    root: &Path,
+    package: &Package,
+    ctx: &CommandContext<'_>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(decompiler) = ctx.extensions.java_decompiler() else {
+        return out;
+    };
+    for plugin in &package.plugins {
+        let base = plugin.class.trim_end_matches("Meta").to_string();
+        let candidates = [base.clone(), format!("{base}Step"), plugin.class.clone()];
+        'jars: for jar in &plugin.jars {
+            let Ok(bytes) = std::fs::read(root.join(jar)) else {
+                continue;
+            };
+            if bytes.len() as u64 > MAX_FILE_BYTES * 8 {
+                continue;
+            }
+            for class in &candidates {
+                let binary_name = class.replace('.', "/");
+                let Ok(c) = decompiler.decompile(&bytes, &binary_name) else {
+                    continue;
+                };
+                if let Some(m) = c.methods.iter().find(|m| m.name == "processRow") {
+                    let source = format!(
+                        "public boolean processRow(StepMetaInterface smi, StepDataInterface sdi) {{\n{}\n}}",
+                        m.source
+                    );
+                    out.insert(plugin.id.clone(), source);
+                    break 'jars;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Writes the translation on branch `ekos/pentaho/<pkg>/<id>` (a worktree, as RFC 0194/0195).

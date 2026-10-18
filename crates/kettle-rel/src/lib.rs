@@ -8,7 +8,7 @@ pub mod model;
 pub mod source;
 mod steps;
 
-pub use build::build;
+pub use build::{build, build_with};
 pub use model::*;
 pub use steps::convert;
 

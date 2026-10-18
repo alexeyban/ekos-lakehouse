@@ -7,7 +7,9 @@ pub mod condition;
 pub mod expr;
 pub mod formula;
 pub mod java;
+pub mod script;
 pub mod semantics;
+pub mod stmt;
 pub mod types;
 
 pub use expr::{BinOp, Expr, Func, Lit, UnOp, Unit, infer, quote_ident, quote_str};

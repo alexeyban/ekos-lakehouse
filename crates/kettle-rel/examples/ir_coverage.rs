@@ -74,7 +74,12 @@ fn main() {
     }
     let mut r: Vec<_> = reasons.into_iter().collect();
     r.sort_by_key(|x| std::cmp::Reverse(x.1));
-    for (reason, n) in r.iter().take(25) {
+    let limit = if std::env::var("ROOT_CAUSES").is_ok() {
+        usize::MAX
+    } else {
+        25
+    };
+    for (reason, n) in r.iter().take(limit) {
         println!("  {n:>4}  {reason}");
     }
 }

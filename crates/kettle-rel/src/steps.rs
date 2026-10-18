@@ -289,6 +289,17 @@ impl Builder<'_> {
                 let input = self.single_input(step, prefix, inputs)?;
                 self.db_lookup(t, x, input)
             }
+            "ScriptValueMod" | "UserDefinedJavaClass" => {
+                let input = self.single_input(step, prefix, inputs)?;
+                self.code_step(step, prefix, input, None)
+            }
+            _ if step.category == ekos_lakehouse_kettle::Category::Unknown
+                && self.plugin_code.contains_key(&step.type_id) =>
+            {
+                let input = self.single_input(step, prefix, inputs)?;
+                let src = self.plugin_code[&step.type_id].clone();
+                self.code_step(step, prefix, input, Some(src))
+            }
             "TableOutput" | "InsertUpdate" | "Update" | "Delete" => {
                 let input = self.single_input(step, prefix, inputs)?;
                 self.sink(t, step, input)
@@ -681,6 +692,252 @@ impl Builder<'_> {
             }
             _ => Err(Builder::category_gap(step)),
         }
+    }
+
+    /// Modified JavaScript Value, User Defined Java Class, or a compiled plugin's decompiled
+    /// `processRow` (`plugin`): symbolic execution into a Project, plus a Filter when the code
+    /// drops rows (RFC 0203).
+    fn code_step(
+        &mut self,
+        step: &Step,
+        prefix: &str,
+        input: NodeId,
+        plugin: Option<String>,
+    ) -> Result<Lowering, Gap> {
+        use ekos_lakehouse_kettle_expr::script::{Executor, Lang};
+        use ekos_lakehouse_kettle_expr::stmt::{parse_class_body, parse_script};
+        let x = &step.xml;
+        let schema = self.ir.nodes[input].schema.clone();
+        let ft = |n: &str| schema.iter().find(|f| f.name == n).map(|f| f.ty);
+        let mut acc = Acc::new();
+        // (output name, variable or field the value comes from, type, length, precision, replaces)
+        let mut declared: Vec<(String, String, KType, i32, i32, bool)> = Vec::new();
+        let outcome = if step.type_id == "ScriptValueMod" {
+            if x.flag_at("compatible", false) {
+                return Err(Gap::new(
+                    "JavaScript in compatibility mode (the Kettle 2 API)",
+                ));
+            }
+            let scripts: Vec<(i32, String)> = x
+                .at("jsScripts")
+                .map(|s| {
+                    s.children_named("jsScript")
+                        .map(|j| {
+                            (
+                                int_at(j, "jsScript_type", 0),
+                                j.raw_at("jsScript_script").unwrap_or_default().to_string(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let meaningful = |src: &str| {
+                src.lines()
+                    .map(|l| l.split("//").next().unwrap_or("").trim())
+                    .any(|l| !l.is_empty())
+            };
+            let transforms: Vec<&String> = scripts
+                .iter()
+                .filter(|(t, s)| *t == 0 && meaningful(s))
+                .map(|(_, s)| s)
+                .collect();
+            if transforms.len() > 1 {
+                return Err(Gap::new(
+                    "several transform scripts (one calls functions of another)",
+                ));
+            }
+            if scripts.iter().any(|(t, s)| *t == 1 && meaningful(s)) {
+                return Err(Gap::new(
+                    "a start script runs once and keeps values across rows",
+                ));
+            }
+            if scripts.iter().any(|(t, s)| *t == 2 && meaningful(s)) {
+                acc.note("the end script (run once after the last row) is not translated");
+            }
+            let src = transforms.first().map(|s| s.as_str()).unwrap_or("");
+            let stmts = parse_script(src, true)?;
+            for f in x
+                .child("fields")
+                .map(|f| f.children_named("field").collect::<Vec<_>>())
+                .unwrap_or_default()
+            {
+                let var = f.text_at("name").unwrap_or_default().to_string();
+                let out = f.text_at("rename").unwrap_or(&var).to_string();
+                let ty = f.text_at("type").map(KType::parse).unwrap_or(KType::String);
+                declared.push((
+                    out,
+                    var,
+                    ty,
+                    int_at(f, "length", -1),
+                    int_at(f, "precision", -1),
+                    f.flag_at("replace", false),
+                ));
+            }
+            Executor::new(Lang::Js, &ft).run(&stmts)?
+        } else {
+            let src = match &plugin {
+                Some(src) => src.clone(),
+                None => {
+                    if x.child("info_steps")
+                        .is_some_and(|i| !i.children.is_empty())
+                        || x.child("target_steps")
+                            .is_some_and(|t| !t.children.is_empty())
+                    {
+                        return Err(Gap::new(
+                            "the class reads info steps or writes target steps (several streams)",
+                        ));
+                    }
+                    x.at("definitions")
+                        .and_then(|d| {
+                            d.children_named("definition")
+                                .find(|d| d.text_at("class_type") == Some("TRANSFORM_CLASS"))
+                        })
+                        .and_then(|d| d.raw_at("class_source"))
+                        .ok_or_else(|| Gap::new("no transform class"))?
+                        .to_string()
+                }
+            };
+            let body = parse_class_body(&src)?;
+            let Some((_, stmts)) = body.methods.iter().find(|(n, _)| n == "processRow") else {
+                return Err(Gap::new("the class has no processRow method"));
+            };
+            for f in x
+                .child("fields")
+                .map(|f| f.children_named("field").collect::<Vec<_>>())
+                .unwrap_or_default()
+            {
+                let name = f.text_at("field_name").unwrap_or_default().to_string();
+                let ty = f
+                    .text_at("field_type")
+                    .map(KType::parse)
+                    .unwrap_or(KType::String);
+                declared.push((
+                    name.clone(),
+                    name,
+                    ty,
+                    int_at(f, "field_length", -1),
+                    int_at(f, "field_precision", -1),
+                    false,
+                ));
+            }
+            let mut ex = Executor::new(Lang::Java, &ft);
+            if let Some(ps) = x.child("parameters") {
+                for p in ps.children_named("parameter") {
+                    if let Some(tag) = p.text_at("parameter_tag") {
+                        ex.params.insert(
+                            tag.to_string(),
+                            p.at("parameter_value")
+                                .map(|v| v.text.clone())
+                                .unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+            let o = ex.run(stmts)?;
+            // Fields the code sets that the step does not declare: existing fields it overwrites.
+            for (name, (_, t)) in &o.outputs {
+                if !declared.iter().any(|d| &d.0 == name) {
+                    if schema.iter().any(|f| &f.name == name) {
+                        declared.push((name.clone(), name.clone(), t.ktype(), -1, -1, true));
+                    } else {
+                        return Err(Gap::new(format!(
+                            "the code sets `{name}`, which the step does not declare"
+                        )));
+                    }
+                }
+            }
+            o
+        };
+        acc.absorb(&outcome.lowered);
+        if plugin.is_some() {
+            acc.note("translated from decompiled code: a reconstruction of the compiled plugin, not its source");
+        }
+        let mut p = Projection::over(&schema);
+        for (out, var, ty, len, prec, replace) in &declared {
+            let value = outcome
+                .outputs
+                .get(var)
+                .or_else(|| outcome.vars.get(var))
+                .map(|(e, _)| e.clone());
+            let value = match value {
+                Some(v) => v,
+                None if schema.iter().any(|f| &f.name == var) => Expr::col(var),
+                None => {
+                    acc.note(format!("`{var}` is never assigned: it is null"));
+                    Expr::null()
+                }
+            };
+            let inferred = outcome
+                .outputs
+                .get(var)
+                .or_else(|| outcome.vars.get(var))
+                .map(|(_, t)| t.ktype())
+                .unwrap_or(KType::Unknown);
+            let e = if *ty != KType::Unknown && inferred != *ty {
+                Expr::Cast {
+                    arg: Box::new(value),
+                    to: *ty,
+                    length: *len,
+                    precision: *prec,
+                }
+            } else {
+                value
+            };
+            if *replace && !schema.iter().any(|f| &f.name == out) {
+                return Err(Gap::new(format!(
+                    "`{out}` replaces a field that is not in the input"
+                )));
+            }
+            if !*replace
+                && schema.iter().any(|f| &f.name == out)
+                && step.type_id == "ScriptValueMod"
+            {
+                return Err(Gap::new(format!(
+                    "`{out}` is added but the input already has it (set Replace)"
+                )));
+            }
+            p.set(
+                out,
+                e,
+                Field {
+                    name: out.clone(),
+                    ty: *ty,
+                    length: *len,
+                    precision: *prec,
+                },
+            );
+        }
+        let Some(drop) = outcome.drop_when else {
+            return Ok(Lowering::Node(
+                Op::Project { items: p.items },
+                vec![input],
+                p.schema,
+                acc.fidelity,
+                acc.notes,
+            ));
+        };
+        // The values first, then the rows the code keeps. The filter reads input fields only, so
+        // it can follow the projection (which keeps them).
+        let project = self.push(
+            step,
+            prefix,
+            None,
+            Op::Project { items: p.items },
+            vec![input],
+            p.schema.clone(),
+            acc.fidelity,
+            acc.notes.clone(),
+        );
+        let keep = drop.map_columns(&|c| Expr::col(c));
+        Ok(Lowering::Node(
+            Op::Filter {
+                predicate: Expr::negate(keep),
+            },
+            vec![project],
+            p.schema,
+            acc.fidelity,
+            acc.notes,
+        ))
     }
 
     /// The sort keys of the nearest Sort rows upstream through row-preserving nodes.

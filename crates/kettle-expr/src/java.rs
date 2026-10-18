@@ -23,13 +23,20 @@ pub enum Tok {
 }
 
 const PUNCT: &[&str] = &[
-    ">>>=", "<<=", ">>=", ">>>", "...", "==", "!=", "<=", ">=", "&&", "||", "++", "--", "+=", "-=",
-    "*=", "/=", "%=", "&=", "|=", "^=", "<<", ">>", "->", "::", "+", "-", "*", "/", "%", "=", "<",
-    ">", "!", "~", "?", ":", ".", ",", ";", "(", ")", "[", "]", "{", "}", "&", "|", "^", "@",
+    "===", "!==", ">>>=", "<<=", ">>=", ">>>", "...", "==", "!=", "<=", ">=", "&&", "||", "++",
+    "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<", ">>", "->", "::", "+", "-", "*",
+    "/", "%", "=", "<", ">", "!", "~", "?", ":", ".", ",", ";", "(", ")", "[", "]", "{", "}", "&",
+    "|", "^", "@",
 ];
 
 /// Splits Java source into tokens; comments are dropped.
 pub fn lex(src: &str) -> Result<Vec<Tok>, Gap> {
+    lex_with(src, false)
+}
+
+/// Splits Java (`js = false`) or JavaScript source into tokens. JavaScript single quotes are
+/// strings, not characters.
+pub fn lex_with(src: &str, js: bool) -> Result<Vec<Tok>, Gap> {
     let cs: Vec<char> = src.chars().collect();
     let mut i = 0;
     let mut out = Vec::new();
@@ -113,7 +120,7 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, Gap> {
                     }
                 }
             }
-            if q == '"' {
+            if q == '"' || js {
                 out.push(Tok::Str(s));
             } else {
                 out.push(Tok::Char(s.chars().next().unwrap_or('\0')));
@@ -189,7 +196,7 @@ fn binary_power(op: &str) -> Option<u8> {
         "|" => 5,
         "^" => 6,
         "&" => 7,
-        "==" | "!=" => 8,
+        "==" | "!=" | "===" | "!==" => 8,
         "<" | ">" | "<=" | ">=" => 9,
         "<<" | ">>" | ">>>" => 10,
         "+" | "-" => 11,
@@ -202,6 +209,14 @@ impl Parser {
     pub fn new(src: &str) -> Result<Parser, Gap> {
         Ok(Parser {
             toks: lex(src)?,
+            pos: 0,
+        })
+    }
+
+    /// A parser over JavaScript (`js = true`) or Java source.
+    pub fn new_with(src: &str, js: bool) -> Result<Parser, Gap> {
+        Ok(Parser {
+            toks: lex_with(src, js)?,
             pos: 0,
         })
     }
@@ -554,6 +569,8 @@ pub struct Lowerer<'a> {
     /// The SQL a name stands for (a field reads its column; a local, its assigned expression).
     pub name_expr: &'a dyn Fn(&str) -> Expr,
     pub out: Lowered,
+    /// JavaScript (Rhino) semantics instead of Java's (RFC 0203).
+    pub js: bool,
 }
 
 impl<'a> Lowerer<'a> {
@@ -566,6 +583,7 @@ impl<'a> Lowerer<'a> {
             name_type,
             name_expr,
             out: Lowered::exact(Expr::null()),
+            js: false,
         }
     }
 
@@ -573,6 +591,15 @@ impl<'a> Lowerer<'a> {
     pub fn lower(&mut self, e: &JExpr) -> Result<(Expr, JType), Gap> {
         Ok(match e {
             JExpr::Name(n) => match (self.name_type)(n) {
+                Some(JType::BigDecimal) if self.js => {
+                    self.out.note(format!(
+                        "`{n}` (BigNumber) is a JavaScript number: arithmetic in double precision"
+                    ));
+                    (
+                        Expr::cast((self.name_expr)(n), KType::Number),
+                        JType::Double { boxed: true },
+                    )
+                }
                 Some(t) => ((self.name_expr)(n), t),
                 None => return Err(Gap::new(format!("`{n}` is not a field or local variable"))),
             },
@@ -660,6 +687,16 @@ impl<'a> Lowerer<'a> {
     }
 
     fn static_field(&mut self, target: &JExpr, name: &str) -> Result<(Expr, JType), Gap> {
+        let is_class = matches!(target, JExpr::Name(n) if (self.name_type)(n).is_none());
+        if name == "length" && !is_class {
+            let (e, t) = self.lower(target)?;
+            if t == JType::Str {
+                return Ok((
+                    Expr::call(Func::Length, vec![e]),
+                    JType::Long { boxed: false },
+                ));
+            }
+        }
         match (target, name) {
             (JExpr::Name(c), "TRUE") if c == "Boolean" => {
                 Ok((Expr::bool(true), JType::Bool { boxed: true }))
@@ -695,6 +732,41 @@ impl<'a> Lowerer<'a> {
         let (le, lt) = self.lower(l)?;
         let (re, rt) = self.lower(r)?;
         let b = JType::Bool { boxed: false };
+        if self.js {
+            match op {
+                "==" | "===" | "!=" | "!==" => {
+                    let same = lt == rt
+                        || (lt.numeric() && rt.numeric())
+                        || matches!((lt, rt), (JType::Bool { .. }, JType::Bool { .. }));
+                    let known = !matches!(lt, JType::Unknown | JType::Null)
+                        && !matches!(rt, JType::Unknown | JType::Null);
+                    if !same && op.len() == 2 && known {
+                        return Err(Gap::new(format!(
+                            "loose `{op}` between {lt:?} and {rt:?} (JavaScript coerces the types)"
+                        )));
+                    }
+                    let eq = Expr::bin(BinOp::NotDistinct, le, re);
+                    return Ok((
+                        if op.starts_with('!') {
+                            Expr::negate(eq)
+                        } else {
+                            eq
+                        },
+                        b,
+                    ));
+                }
+                "/" if lt.numeric() && rt.numeric() => {
+                    let e = Expr::bin(BinOp::Div, Expr::cast(le, KType::Number), re);
+                    return Ok((e, JType::Double { boxed: false }));
+                }
+                "<" | "<=" | ">" | ">=" if lt.boxed() || rt.boxed() => {
+                    self.out.note(
+                        "JavaScript compares a null as 0; here a comparison with a null is false",
+                    );
+                }
+                _ => {}
+            }
+        }
         Ok(match op {
             "+" if lt == JType::Str || rt == JType::Str => {
                 self.out.note(NOTE_JAVA_CONCAT);
@@ -715,7 +787,7 @@ impl<'a> Lowerer<'a> {
                 if !(lt.numeric() && rt.numeric()) {
                     return Err(Gap::new(format!("`{op}` on {lt:?} and {rt:?}")));
                 }
-                if lt.boxed() || rt.boxed() {
+                if (lt.boxed() || rt.boxed()) && !self.js {
                     self.out.note(NOTE_NPE);
                 }
                 let t = if matches!(lt, JType::Double { .. }) || matches!(rt, JType::Double { .. })
@@ -735,7 +807,7 @@ impl<'a> Lowerer<'a> {
             }
             "==" | "!=" | "<" | "<=" | ">" | ">=" => {
                 let both_objects = lt.boxed() && rt.boxed();
-                if matches!(op, "==" | "!=") && both_objects {
+                if matches!(op, "==" | "!=") && both_objects && !self.js {
                     return Err(Gap::new(
                         "`==` between two objects compares identity in Java, not value; \
                          its result depends on the JVM",
@@ -746,7 +818,7 @@ impl<'a> Lowerer<'a> {
                 {
                     return Err(Gap::new(format!("`{op}` on {lt:?} and {rt:?}")));
                 }
-                if lt.boxed() || rt.boxed() {
+                if (lt.boxed() || rt.boxed()) && !self.js {
                     self.out.note(NOTE_NPE);
                 }
                 let bop = match op {
@@ -850,6 +922,9 @@ impl<'a> Lowerer<'a> {
             });
         }
         let Some(target) = target else {
+            if self.js {
+                return self.js_function(name, args);
+            }
             return Err(Gap::new(format!("call to `{name}(…)`")));
         };
         let (recv, rt) = self.lower(target)?;
@@ -862,7 +937,7 @@ impl<'a> Lowerer<'a> {
                 .map(|x| x.0.clone())
                 .ok_or_else(|| Gap::new(format!(".{name}(): missing argument")))
         };
-        if rt.boxed() {
+        if rt.boxed() && !self.js {
             self.out.note(NOTE_NPE);
         }
         Ok(match (rt, name, a.len()) {
@@ -936,6 +1011,35 @@ impl<'a> Lowerer<'a> {
                 ),
                 long,
             ),
+            (JType::Str, "replace", 2) if self.js => {
+                // JavaScript replaces the first occurrence only (for a string pattern).
+                let (
+                    Expr::Lit {
+                        value: crate::expr::Lit::Str(from),
+                    },
+                    Expr::Lit {
+                        value: crate::expr::Lit::Str(to),
+                    },
+                ) = (&a[0].0, &a[1].0)
+                else {
+                    return Err(Gap::new("String.replace with computed arguments"));
+                };
+                let mut pat = String::from("(?s)^(.*?)");
+                for c in from.chars() {
+                    if "\\.^$|?*+()[]{}".contains(c) {
+                        pat.push('\\');
+                    }
+                    pat.push(c);
+                }
+                let by = format!("$1{}", to.replace('$', "\\$"));
+                (
+                    Expr::call(
+                        Func::RegexpReplace,
+                        vec![recv, Expr::str(&pat), Expr::str(&by)],
+                    ),
+                    JType::Str,
+                )
+            }
             (JType::Str, "replace", 2) => (
                 Expr::call(Func::Replace, vec![recv, arg(0)?, arg(1)?]),
                 JType::Str,
@@ -963,6 +1067,108 @@ impl<'a> Lowerer<'a> {
             (JType::Bool { .. }, "booleanValue", 0) => (recv, b),
             (_, "toString", 0) => (Expr::cast(recv, KType::String), JType::Str),
             (t, m, n) => return Err(Gap::new(format!("method {m}/{n} on {t:?}"))),
+        })
+    }
+}
+
+impl Lowerer<'_> {
+    /// Kettle's JavaScript built-ins and the global JavaScript functions (RFC 0203).
+    fn js_function(&mut self, name: &str, args: &[JExpr]) -> Result<(Expr, JType), Gap> {
+        let mut a = Vec::new();
+        for x in args {
+            a.push(self.lower(x)?);
+        }
+        let arg = |i: usize| {
+            a.get(i)
+                .map(|x| x.0.clone())
+                .ok_or_else(|| Gap::new(format!("{name}(): missing argument")))
+        };
+        let s = JType::Str;
+        let long = JType::Long { boxed: false };
+        let dbl = JType::Double { boxed: false };
+        Ok(match (name, a.len()) {
+            ("upper", 1) => (Expr::call(Func::Upper, vec![arg(0)?]), s),
+            ("lower", 1) => (Expr::call(Func::Lower, vec![arg(0)?]), s),
+            ("trim", 1) => (Expr::call(Func::Trim, vec![arg(0)?]), s),
+            ("ltrim", 1) => (Expr::call(Func::LTrim, vec![arg(0)?]), s),
+            ("rtrim", 1) => (Expr::call(Func::RTrim, vec![arg(0)?]), s),
+            ("isNull", 1) => (Expr::is_null(arg(0)?), JType::Bool { boxed: false }),
+            ("replace", 3) => (
+                Expr::call(Func::Replace, vec![arg(0)?, arg(1)?, arg(2)?]),
+                s,
+            ),
+            ("indexOf", 2) => (
+                Expr::bin(
+                    BinOp::Sub,
+                    Expr::call(Func::Strpos, vec![arg(0)?, arg(1)?]),
+                    Expr::int(1),
+                ),
+                long,
+            ),
+            ("getDigitsOnly", 1) => (
+                Expr::call(
+                    Func::RegexpReplace,
+                    vec![arg(0)?, Expr::str("[^0-9]"), Expr::str("")],
+                ),
+                s,
+            ),
+            ("removeDigits", 1) => (
+                Expr::call(
+                    Func::RegexpReplace,
+                    vec![arg(0)?, Expr::str("[0-9]"), Expr::str("")],
+                ),
+                s,
+            ),
+            ("abs", 1) => (Expr::call(Func::Abs, vec![arg(0)?]), dbl),
+            ("ceil", 1) => (
+                Expr::cast(Expr::call(Func::Ceil, vec![arg(0)?]), KType::Number),
+                dbl,
+            ),
+            ("floor", 1) => (
+                Expr::cast(Expr::call(Func::Floor, vec![arg(0)?]), KType::Number),
+                dbl,
+            ),
+            ("round", 1) => (
+                Expr::cast(
+                    Expr::call(
+                        Func::Floor,
+                        vec![Expr::bin(BinOp::Add, arg(0)?, Expr::num("0.5"))],
+                    ),
+                    KType::Number,
+                ),
+                dbl,
+            ),
+            ("str2num", 1) | ("Number", 1) | ("parseFloat", 1) => {
+                if name == "parseFloat" {
+                    self.out.note("parseFloat reads a leading number (\"12abc\" is 12); the SQL CAST fails on trailing text");
+                }
+                (
+                    Expr::cast(Expr::call(Func::Trim, vec![arg(0)?]), KType::Number),
+                    dbl,
+                )
+            }
+            ("parseInt", 1) => {
+                self.out.note("parseInt reads a leading integer (\"12abc\" is 12); the SQL CAST fails on trailing text");
+                (
+                    Expr::cast(Expr::call(Func::Trim, vec![arg(0)?]), KType::Integer),
+                    long,
+                )
+            }
+            ("num2str", 1) | ("String", 1) => {
+                let (e, t) = a[0].clone();
+                let e = if t == JType::Str {
+                    e
+                } else {
+                    Expr::cast(e, KType::String)
+                };
+                (Expr::call(Func::Coalesce, vec![e, Expr::str("null")]), s)
+            }
+            ("str2date", 2) => (
+                Expr::call(Func::ParseDatetime, vec![arg(0)?, arg(1)?]),
+                JType::Date,
+            ),
+            ("date2str", 2) => (Expr::call(Func::FormatDatetime, vec![arg(0)?, arg(1)?]), s),
+            (other, n) => return Err(Gap::new(format!("JavaScript function {other}/{n}"))),
         })
     }
 }
