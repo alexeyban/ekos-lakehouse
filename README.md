@@ -23,6 +23,10 @@ Gold marts are drafted from written descriptions, with every term resolved or as
 nothing invented ([RFC 0195](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0195-lakehouse-gold.md)).
 Health per table and layer, alerts, OpenTelemetry metrics and MCP tools for agents
 ([RFC 0196](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0196-lakehouse-monitoring.md)).
+Pentaho (Kettle) packages are translated into silver and gold dbt models, every step labelled
+exact, rewritten, llm-drafted or gap, JavaScript and Java steps included, proposed on a branch
+([RFC 0200](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0200-pentaho-to-lakehouse-dbt.md);
+[docs/pentaho.md](docs/pentaho.md)).
 
 ## Install
 
@@ -90,6 +94,9 @@ ekos-lakehouse lakehouse reconcile       # V1–V3 with a planted control, recor
 ekos-lakehouse lakehouse check --lint    # lineage, test/doc coverage, drift, sqlfluff
 ekos-lakehouse lakehouse sync            # source changes: safe ones committed, the rest proposed
 ekos-lakehouse lakehouse gold draft marts/revenue.md   # a mart from a description, or questions
+ekos-lakehouse lakehouse pentaho scan    # Kettle packages: transformations, jobs, steps, links
+ekos-lakehouse lakehouse pentaho translate etl   # silver + gold dbt models on a proposal branch
+ekos-lakehouse lakehouse pentaho report --package etl   # per model and step: fidelity, gaps, SQL
 ```
 
 A gold mart starts as a committed description:
