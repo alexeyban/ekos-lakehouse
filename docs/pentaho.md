@@ -96,6 +96,11 @@ ekos-lakehouse lakehouse pentaho translate etl --allow-metered    # any paid rou
 Compiled plugin steps (`plugins/*.jar`) are decompiled only by the private EKOS binary build;
 the public build reports them as gaps.
 
+## Verify it against Pentaho
+
+[pentaho-verify.md](pentaho-verify.md): run the original in PDI and the dbt model on the same
+data and compare them in Trino — and tell us what you find.
+
 ## What is not translated
 
 File and FTP inputs and outputs, web services, executors that run a transformation per row,
