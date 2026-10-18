@@ -334,6 +334,18 @@ fn pentaho_page() -> ConsolePage {
                 binds: vec![("package", "package")],
                 ..Default::default()
             },
+            Action {
+                label: "Translate, a model drafting the code steps",
+                command: vec!["lakehouse", "pentaho", "translate"],
+                binds: vec![("package", "package")],
+                flags: vec!["allow-metered"],
+                confirm: Some(
+                    "A model drafts the JavaScript and Java steps the translator cannot follow (RFC \
+                     0205). Through a paid route each call is billed and logged; the tenant must \
+                     allow metered calls. Drafts are checked, labelled llm-drafted, and proposed \
+                     for review like everything else.",
+                ),
+            },
         ],
     }
 }

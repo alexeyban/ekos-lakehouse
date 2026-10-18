@@ -50,19 +50,21 @@ pub(crate) struct Builder<'a> {
     pub depth: usize,
     /// Decompiled `processRow` source per plugin step type (RFC 0203).
     pub plugin_code: &'a BTreeMap<String, String>,
+    /// Model drafts for code steps (RFC 0205).
+    pub drafts: &'a BTreeMap<(String, String), crate::model::Draft>,
 }
 
 /// Builds the IR of `t`.
 pub fn build(package: &Package, t: &Transformation, catalog: &dyn Catalog) -> Ir {
-    build_with(package, t, catalog, &BTreeMap::new())
+    build_with(package, t, catalog, &crate::model::BuildOptions::default())
 }
 
-/// Builds the IR of `t`, with decompiled `processRow` source per plugin step type (RFC 0203).
+/// Builds the IR of `t`, with decompiled plugin code (RFC 0203) and model drafts (RFC 0205).
 pub fn build_with(
     package: &Package,
     t: &Transformation,
     catalog: &dyn Catalog,
-    plugin_code: &BTreeMap<String, String>,
+    opts: &crate::model::BuildOptions,
 ) -> Ir {
     let mut b = Builder {
         package,
@@ -72,7 +74,8 @@ pub fn build_with(
             nodes: Vec::new(),
         },
         depth: 0,
-        plugin_code,
+        plugin_code: &opts.plugin_code,
+        drafts: &opts.drafts,
     };
     b.walk(t, "", &BTreeMap::new());
     b.ir
@@ -323,11 +326,88 @@ impl Builder<'_> {
             }
             Ok(Lowering::Inlined(id)) => out.main = Some(id),
             Err(gap) => {
-                let ids = inputs.iter().map(|i| i.node).collect();
-                out.main = Some(self.gap(step, prefix, ids, gap.reason));
+                let key = (t.path.clone(), step.name.clone());
+                match (self.drafts.get(&key), inputs.as_slice()) {
+                    (Some(d), [input]) if prefix.is_empty() => {
+                        out.main = Some(self.apply_draft(step, input.node, d, &gap));
+                    }
+                    _ => {
+                        let ids = inputs.iter().map(|i| i.node).collect();
+                        out.main = Some(self.gap(step, prefix, ids, gap.reason));
+                    }
+                }
             }
         }
         out
+    }
+
+    /// A step a model drafted (RFC 0205): the input's fields with the drafted ones set, then
+    /// the rows kept.
+    fn apply_draft(
+        &mut self,
+        step: &Step,
+        input: NodeId,
+        d: &crate::model::Draft,
+        gap: &Gap,
+    ) -> NodeId {
+        let schema = self.ir.nodes[input].schema.clone();
+        let mut items: Vec<(String, Expr)> = schema
+            .iter()
+            .map(|f| (f.name.clone(), Expr::col(&f.name)))
+            .collect();
+        let mut out = schema.clone();
+        let declared = crate::steps::declared_outputs(step);
+        for (name, sql) in &d.columns {
+            let ty = declared
+                .iter()
+                .find(|f| &f.name == name)
+                .map(|f| f.ty)
+                .or_else(|| schema.iter().find(|f| &f.name == name).map(|f| f.ty))
+                .unwrap_or(ekos_lakehouse_kettle_expr::KType::Unknown);
+            let e = Expr::Sql {
+                text: sql.clone(),
+                ty,
+            };
+            match items.iter().position(|(n, _)| n == name) {
+                Some(i) => items[i].1 = e,
+                None => {
+                    items.push((name.clone(), e));
+                    out.push(Field::new(name, ty));
+                }
+            }
+        }
+        let notes = vec![
+            format!("drafted by {} (the translator could not follow it: {})", d.model, gap.reason),
+            "checked: parses as Trino, reads only the step's input fields, functions on the list, literals from the step's code".into(),
+        ];
+        let project = self.push(
+            step,
+            "",
+            None,
+            Op::Project { items },
+            vec![input],
+            out.clone(),
+            Fidelity::LlmDrafted,
+            notes.clone(),
+        );
+        match &d.keep_when {
+            Some(p) => self.push(
+                step,
+                "",
+                None,
+                Op::Filter {
+                    predicate: Expr::Sql {
+                        text: p.clone(),
+                        ty: ekos_lakehouse_kettle_expr::KType::Boolean,
+                    },
+                },
+                vec![project],
+                out,
+                Fidelity::LlmDrafted,
+                notes,
+            ),
+            None => project,
+        }
     }
 
     /// The single input of a one-input step; several inputs become a union first (Kettle

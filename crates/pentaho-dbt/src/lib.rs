@@ -2,6 +2,7 @@
 //! deployed plan and the settings in; files and a per-step report out.
 
 pub mod catalog;
+pub mod draft;
 pub mod pgsql;
 pub mod proposal;
 pub mod render;
@@ -31,6 +32,8 @@ pub struct Settings {
     /// Decompiled `processRow` source per plugin step type, from a `JavaDecompiler`
     /// (RFC 0203); empty in the public build.
     pub plugin_code: BTreeMap<String, String>,
+    /// Model drafts for code steps, keyed by `(transformation path, step)` (RFC 0205).
+    pub drafts: BTreeMap<(String, String), ekos_lakehouse_kettle_rel::Draft>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -119,6 +122,13 @@ pub struct Translation {
     /// Path in the pipeline repository → content.
     pub files: BTreeMap<String, String>,
     pub report: Report,
+}
+
+fn build_options(s: &Settings) -> ekos_lakehouse_kettle_rel::BuildOptions {
+    ekos_lakehouse_kettle_rel::BuildOptions {
+        plugin_code: s.plugin_code.clone(),
+        drafts: s.drafts.clone(),
+    }
 }
 
 /// A dbt-safe slug.
@@ -220,25 +230,8 @@ pub fn translate(package: &Package, plan: &Plan, s: &Settings) -> Translation {
         .filter(|t| !inlined.contains(&t.path))
         .collect();
 
-    // Tables the package writes become refs to their gold models: iterate to a fixpoint.
-    let mut written: BTreeMap<TableKey, (String, Vec<Field>)> = BTreeMap::new();
-    let mut irs: Vec<Ir> = Vec::new();
-    for _ in 0..5 {
-        let resolver = Resolver {
-            plan,
-            source_database: s.source_database.clone(),
-            written: written.clone(),
-        };
-        irs = targets
-            .iter()
-            .map(|t| build_with(package, t, &resolver, &s.plugin_code))
-            .collect();
-        let next = sink_tables(&irs);
-        if next == written {
-            break;
-        }
-        written = next;
-    }
+    let (irs, written) = resolve_fixpoint(package, plan, s, &targets);
+    let mut irs = irs;
     let resolver = Resolver {
         plan,
         source_database: s.source_database.clone(),
@@ -312,6 +305,50 @@ pub fn translate(package: &Package, plan: &Plan, s: &Settings) -> Translation {
         proposal::markdown(&report),
     );
     Translation { files, report }
+}
+
+/// Tables the package writes become refs to their gold models: build until that stops changing.
+fn resolve_fixpoint(
+    package: &Package,
+    plan: &Plan,
+    s: &Settings,
+    targets: &[&Transformation],
+) -> (Vec<Ir>, BTreeMap<TableKey, (String, Vec<Field>)>) {
+    let mut written: BTreeMap<TableKey, (String, Vec<Field>)> = BTreeMap::new();
+    let mut irs: Vec<Ir> = Vec::new();
+    for _ in 0..5 {
+        let resolver = Resolver {
+            plan,
+            source_database: s.source_database.clone(),
+            written: written.clone(),
+        };
+        irs = targets
+            .iter()
+            .map(|t| build_with(package, t, &resolver, &build_options(s)))
+            .collect();
+        let next = sink_tables(&irs);
+        if next == written {
+            break;
+        }
+        written = next;
+    }
+    (irs, written)
+}
+
+/// The IR of every transformation translated on its own (not the Mapping-only ones), resolved
+/// as `translate` resolves it.
+pub fn build_irs<'p>(
+    package: &'p Package,
+    plan: &Plan,
+    s: &Settings,
+) -> Vec<(&'p Transformation, Ir)> {
+    let targets: Vec<&Transformation> = package
+        .transformations
+        .iter()
+        .filter(|t| !t.steps.iter().any(|st| st.type_id == "MappingInput"))
+        .collect();
+    let (irs, _) = resolve_fixpoint(package, plan, s, &targets);
+    targets.into_iter().zip(irs).collect()
 }
 
 /// Every sink's target table → its gold model and output fields.

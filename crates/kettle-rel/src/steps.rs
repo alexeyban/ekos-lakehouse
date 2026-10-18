@@ -141,6 +141,57 @@ impl Projection {
     }
 }
 
+/// The output fields a code step declares (RFC 0205 asks a model for exactly these).
+pub fn declared_outputs(step: &Step) -> Vec<Field> {
+    let x = &step.xml;
+    let fields = x
+        .child("fields")
+        .map(|f| f.children_named("field").collect::<Vec<_>>())
+        .unwrap_or_default();
+    match step.type_id.as_str() {
+        "ScriptValueMod" => fields
+            .iter()
+            .map(|f| {
+                let name = f
+                    .text_at("rename")
+                    .or(f.text_at("name"))
+                    .unwrap_or_default();
+                Field::new(
+                    name,
+                    f.text_at("type").map(KType::parse).unwrap_or(KType::String),
+                )
+            })
+            .collect(),
+        "UserDefinedJavaClass" => fields
+            .iter()
+            .map(|f| {
+                Field::new(
+                    f.text_at("field_name").unwrap_or_default(),
+                    f.text_at("field_type")
+                        .map(KType::parse)
+                        .unwrap_or(KType::String),
+                )
+            })
+            .collect(),
+        "Janino" | "Formula" => x
+            .children_named("formula")
+            .map(|f| {
+                let name = f
+                    .text_at("replace_field")
+                    .or(f.text_at("field_name"))
+                    .unwrap_or_default();
+                Field::new(
+                    name,
+                    f.text_at("value_type")
+                        .map(KType::parse)
+                        .unwrap_or(KType::String),
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Kettle's value conversion from `from` to `to` (Select values' meta tab, retyping).
 pub fn convert(e: Expr, from: KType, to: KType, mask: Option<&str>) -> Result<Lowered, Gap> {
     use KType::*;

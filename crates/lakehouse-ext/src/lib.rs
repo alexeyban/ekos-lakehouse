@@ -258,6 +258,12 @@ impl EkosExtension for LakehouseExtension {
                                         .help("Write into this directory instead of proposing a branch"),
                                 )
                                 .arg(
+                                    clap::Arg::new("allow-metered")
+                                        .long("allow-metered")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Let a paid model draft the code steps the translator cannot follow (RFC 0205); an Ollama route needs no flag"),
+                                )
+                                .arg(
                                     clap::Arg::new("no-explain")
                                         .long("no-explain")
                                         .action(clap::ArgAction::SetTrue)
@@ -499,7 +505,7 @@ impl EkosExtension for LakehouseExtension {
             // Reads the project's own source files (redacted), nothing else.
             ("lakehouse pentaho scan", Class::Read, false),
             // Reads the source files and the deployed plan, plans on Trino, branches the repository.
-            ("lakehouse pentaho translate", Class::External, false),
+            ("lakehouse pentaho translate", Class::External, true),
             // Reads translation reports from the pipeline repository (files and branches).
             ("lakehouse pentaho report", Class::Read, false),
         ]
@@ -791,6 +797,7 @@ impl EkosExtension for LakehouseExtension {
                                 .map(|o| ctx.invoked_from.join(o)),
                             explain: !m.get_flag("no-explain"),
                             json: m.get_flag("json"),
+                            allow_metered: m.get_flag("allow-metered"),
                         };
                         let repo = pipeline_dir(&settings, ctx);
                         pentaho_cmd::translate(&settings, ctx, &o, &repo).await

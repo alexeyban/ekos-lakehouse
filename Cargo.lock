@@ -1107,6 +1107,7 @@ dependencies = [
  "ekos-lakehouse-health",
  "ekos-lakehouse-kettle",
  "ekos-lakehouse-kettle-expr",
+ "ekos-lakehouse-kettle-rel",
  "ekos-lakehouse-pentaho-dbt",
  "ekos-lakehouse-silver",
  "ekos-lakehouse-trino",

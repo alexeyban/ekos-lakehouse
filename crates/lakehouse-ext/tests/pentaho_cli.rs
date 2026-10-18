@@ -155,6 +155,7 @@ async fn translate_proposes_a_branch_and_generate_keeps_the_files() {
         out,
         explain: false,
         json: false,
+        allow_metered: false,
     };
     // Running it again proposes nothing new.
     ekos_lakehouse_ext::pentaho_cmd::translate(&settings, &ctx, &run(None), &repo)
@@ -351,8 +352,116 @@ async fn translate_into(
         out: Some(out.to_path_buf()),
         explain: false,
         json: false,
+        allow_metered: false,
     };
     ekos_lakehouse_ext::pentaho_cmd::translate(settings, &ctx, &o, repo)
         .await
         .unwrap();
+}
+
+/// Answers in turn from a script, recording each prompt.
+struct Scripted {
+    answers: std::sync::Mutex<Vec<String>>,
+    prompts: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl ekos_recovery::LlmProvider for Scripted {
+    fn model_name(&self) -> &str {
+        "scripted"
+    }
+
+    async fn complete(
+        &self,
+        req: &ekos_recovery::LlmRequest<'_>,
+    ) -> Result<ekos_recovery::LlmResponse, ekos_recovery::LlmError> {
+        self.prompts.lock().unwrap().push(req.user.to_string());
+        let content = self.answers.lock().unwrap().remove(0);
+        Ok(ekos_recovery::LlmResponse {
+            content,
+            model: "scripted".into(),
+            ..Default::default()
+        })
+    }
+}
+
+/// RFC 0205: a gap code step is drafted, refused answers are fed back, and the survivor is
+/// llm-drafted in the translation.
+#[tokio::test(flavor = "current_thread")]
+async fn a_model_drafts_a_gap_code_step_and_only_checked_sql_survives() {
+    let ktr = KTR.replace(
+        "<type>Calculator</type><calculation><field_name>amount</field_name><calc_type>MULTIPLY</calc_type><field_a>qty</field_a><field_b>price</field_b><value_type>BigNumber</value_type></calculation>",
+        "<type>ScriptValueMod</type><jsScripts><jsScript><jsScript_type>0</jsScript_type><jsScript_name>m</jsScript_name><jsScript_script>var amount = 0;\nfor (var i = 0; i &lt; qty; i++) { amount += price; }</jsScript_script></jsScript></jsScripts><fields><field><name>amount</name><rename>amount</rename><type>Number</type><replace>N</replace></field></fields>",
+    );
+    let p = ekos_lakehouse_kettle::read_package(
+        &[ekos_lakehouse_kettle::SourceFile {
+            path: "orders.ktr".into(),
+            text: ktr,
+        }],
+        &[],
+    );
+    let plan = plan(
+        &[SourceTable {
+            schema: "public".into(),
+            oid: 0,
+            name: "orders".into(),
+            columns: vec![
+                col("id", "integer", "integer"),
+                col("qty", "integer", "integer"),
+                col("price", "numeric(10,2)", "decimal(10,2)"),
+            ],
+            primary_key: vec!["id".into()],
+            row_estimate: 1,
+            update_triggers: vec![],
+            foreign_keys: vec![],
+            comment: None,
+        }],
+        &PlanSettings::default(),
+    );
+    let mut s = ekos_lakehouse_pentaho_dbt::Settings {
+        package: "etl".into(),
+        source_database: Some("shop".into()),
+        empty_string_is_null: true,
+        ..Default::default()
+    };
+    let requests = ekos_lakehouse_pentaho_dbt::draft::requests(&p, &plan, &s);
+    assert_eq!(requests.len(), 1, "{requests:#?}");
+    assert!(requests[0].reason.contains("`for`"));
+    let provider = Scripted {
+        answers: std::sync::Mutex::new(vec![
+            r#"{"columns": {"amount": "\"qty\" * \"price\" * \"discount\""}, "keep_when": null, "cannot": null}"#.into(),
+            r#"{"columns": {"amount": "CAST(\"qty\" AS double) * CAST(\"price\" AS double)"}, "keep_when": null, "cannot": null}"#.into(),
+        ]),
+        prompts: Default::default(),
+    };
+    let (drafts, outcomes) =
+        ekos_lakehouse_ext::pentaho_cmd::draft_all(&requests, &provider, 3).await;
+    assert_eq!(outcomes[0].attempts, 2);
+    assert!(
+        provider.prompts.lock().unwrap()[1].contains("`discount` is not an input field"),
+        "the findings go back"
+    );
+    s.drafts = drafts;
+    let t = ekos_lakehouse_pentaho_dbt::translate(&p, &plan, &s);
+    let step = t.report.steps.iter().find(|x| x.step == "calc").unwrap();
+    assert_eq!(
+        step.fidelity,
+        ekos_lakehouse_kettle_expr::Fidelity::LlmDrafted,
+        "{step:#?}"
+    );
+    assert!(step.notes.iter().any(|n| n.contains("drafted by scripted")));
+    // A drafted step is row-local: it joins the silver model.
+    let silver = &t.files["dbt/models/silver/pentaho/etl/pentaho__etl__orders__in.sql"];
+    assert!(
+        silver.contains("(CAST(\"qty\" AS double) * CAST(\"price\" AS double))"),
+        "{silver}"
+    );
+    assert!(!silver.contains("enabled=false"), "{silver}");
+    let m = t
+        .report
+        .models
+        .iter()
+        .find(|m| m.name == "pentaho__etl__orders__in")
+        .unwrap();
+    assert_eq!(m.fidelity, ekos_lakehouse_kettle_expr::Fidelity::LlmDrafted);
 }

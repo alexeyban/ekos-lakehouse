@@ -10,7 +10,7 @@ mod steps;
 
 pub use build::{build, build_with};
 pub use model::*;
-pub use steps::convert;
+pub use steps::{convert, declared_outputs};
 
 /// Column types of the tables a transformation reads and writes. The translator's catalog is
 /// the lakehouse lock file (silver models); tests use a fixed one.

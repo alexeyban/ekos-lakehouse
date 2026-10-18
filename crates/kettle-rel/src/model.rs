@@ -307,3 +307,22 @@ impl Ir {
         m
     }
 }
+
+/// RFC 0205: SQL a model drafted for a code step and the translator checked.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Draft {
+    /// `(output field, Trino expression over the step's input fields)`.
+    pub columns: Vec<(String, String)>,
+    /// Rows kept, when the step drops some.
+    pub keep_when: Option<String>,
+    /// The model that drafted it.
+    pub model: String,
+}
+
+/// What a build may use beyond the package: decompiled plugin code (RFC 0203) and drafts
+/// (RFC 0205), the latter keyed by `(transformation path, step name)`.
+#[derive(Debug, Clone, Default)]
+pub struct BuildOptions {
+    pub plugin_code: std::collections::BTreeMap<String, String>,
+    pub drafts: std::collections::BTreeMap<(String, String), Draft>,
+}

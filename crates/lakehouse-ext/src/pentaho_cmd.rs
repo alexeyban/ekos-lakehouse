@@ -303,6 +303,83 @@ pub struct TranslateOptions {
     /// Plan every enabled model on Trino (when a Trino URL is configured).
     pub explain: bool,
     pub json: bool,
+    /// Let a metered model draft code steps (RFC 0205); an Ollama route needs no permission.
+    pub allow_metered: bool,
+}
+
+/// What drafting did for one step (RFC 0205).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DraftOutcome {
+    pub transformation: String,
+    pub step: String,
+    pub drafted: bool,
+    pub attempts: u32,
+    /// The last findings, when every attempt was refused.
+    pub findings: Vec<String>,
+}
+
+/// Asks `provider` to draft each request, checking every answer and feeding the findings back,
+/// up to `attempts` times (RFC 0205).
+pub async fn draft_all(
+    requests: &[ekos_lakehouse_pentaho_dbt::draft::DraftRequest],
+    provider: &dyn ekos_recovery::LlmProvider,
+    attempts: u32,
+) -> (
+    std::collections::BTreeMap<(String, String), ekos_lakehouse_kettle_rel::Draft>,
+    Vec<DraftOutcome>,
+) {
+    use ekos_lakehouse_pentaho_dbt::draft;
+    let mut drafts = std::collections::BTreeMap::new();
+    let mut outcomes = Vec::new();
+    for r in requests {
+        let mut feedback: Vec<String> = Vec::new();
+        let mut outcome = DraftOutcome {
+            transformation: r.transformation.clone(),
+            step: r.step.clone(),
+            drafted: false,
+            attempts: 0,
+            findings: vec![],
+        };
+        for _ in 0..attempts {
+            outcome.attempts += 1;
+            let (system, user) = draft::prompt(r, &feedback);
+            let req = ekos_recovery::LlmRequest {
+                system: &system,
+                user: &user,
+                prompt_version: draft::PROMPT_VERSION,
+                max_tokens: 2048,
+                history: &[],
+            };
+            let answer = match provider.complete(&req).await {
+                Ok(a) => a,
+                Err(e) => {
+                    feedback = vec![format!("the model call failed: {e}")];
+                    break;
+                }
+            };
+            let checked = draft::parse_answer(&answer.content)
+                .map_err(|e| vec![e])
+                .and_then(|a| draft::check(r, &a, &answer.model));
+            match checked {
+                Ok(d) => {
+                    drafts.insert(r.key(), d);
+                    outcome.drafted = true;
+                    feedback.clear();
+                    break;
+                }
+                Err(f) => {
+                    let cannot = f.iter().any(|x| x.starts_with("the model says it cannot"));
+                    feedback = f;
+                    if cannot {
+                        break;
+                    }
+                }
+            }
+        }
+        outcome.findings = feedback;
+        outcomes.push(outcome);
+    }
+    (drafts, outcomes)
 }
 
 /// Disables model `name` in `t` with `reason` (a model Trino refused).
@@ -350,17 +427,44 @@ pub async fn translate(
     let plan = read_lock(repo).map_err(|e| anyhow::anyhow!("{e}: run `lakehouse generate` first — Pentaho tables resolve to the deployed silver models"))?;
     let redaction = ctx.config.redaction_config();
     let package = read_dir(&dir.path, &redaction);
-    let mut t = ekos_lakehouse_pentaho_dbt::translate(
-        &package,
-        &plan,
-        &ekos_lakehouse_pentaho_dbt::Settings {
-            package: o.package.clone(),
-            source_database: settings.source_database.clone(),
-            empty_string_is_null: settings.pentaho_empty_string_is_null.unwrap_or(true),
-            plugin_code: plugin_code(&dir.path, &package, ctx),
-        },
-    );
+    let mut tr_settings = ekos_lakehouse_pentaho_dbt::Settings {
+        package: o.package.clone(),
+        source_database: settings.source_database.clone(),
+        empty_string_is_null: settings.pentaho_empty_string_is_null.unwrap_or(true),
+        plugin_code: plugin_code(&dir.path, &package, ctx),
+        drafts: Default::default(),
+    };
+    let mut t = ekos_lakehouse_pentaho_dbt::translate(&package, &plan, &tr_settings);
     let pkg = ekos_lakehouse_pentaho_dbt::slug(&o.package);
+    // RFC 0205: code steps the translator could not follow, drafted by the configured model.
+    let mut draft_outcomes = Vec::new();
+    let requests = ekos_lakehouse_pentaho_dbt::draft::requests(&package, &plan, &tr_settings);
+    if !requests.is_empty() {
+        let router = ekos_recovery::LlmRouter::new(&ctx.config.llm, &ctx.config.ekos_dir(ctx.cwd));
+        let route = router.route(ekos_recovery::Task::Translate);
+        if route.provider != "ollama" && !o.allow_metered {
+            println!(
+                "{} code steps could be drafted by {} ({}, metered): rerun with --allow-metered",
+                requests.len(),
+                route.models.join(" → "),
+                route.provider
+            );
+        } else {
+            let provider = router
+                .provider(ekos_recovery::Task::Translate)
+                .map_err(|e| anyhow::anyhow!("the translate model: {e}"))?;
+            let (drafts, outcomes) = draft_all(&requests, provider.as_ref(), 3).await;
+            println!(
+                "{} of {} code steps drafted by {}",
+                drafts.len(),
+                requests.len(),
+                provider.model_name()
+            );
+            tr_settings.drafts = drafts;
+            draft_outcomes = outcomes;
+            t = ekos_lakehouse_pentaho_dbt::translate(&package, &plan, &tr_settings);
+        }
+    }
     // Trino plans every enabled model; one it refuses is disabled with its message.
     let mut explained = 0usize;
     if o.explain && settings.trino_url.is_some() {
@@ -443,6 +547,7 @@ pub async fn translate(
                 "enabled": t.report.models.iter().filter(|m| m.enabled).count(),
                 "questions": t.report.questions.len(),
                 "explained": explained,
+                "drafts": draft_outcomes,
                 "write": outcome,
             }))?
         );

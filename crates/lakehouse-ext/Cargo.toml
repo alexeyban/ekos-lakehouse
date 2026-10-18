@@ -18,6 +18,7 @@ ekos-lakehouse-gold.workspace = true
 ekos-lakehouse-health.workspace = true
 ekos-lakehouse-kettle.workspace = true
 ekos-lakehouse-kettle-expr.workspace = true
+ekos-lakehouse-kettle-rel.workspace = true
 ekos-lakehouse-pentaho-dbt.workspace = true
 ekos-recovery.workspace = true
 ekos-lakehouse-trino.workspace = true

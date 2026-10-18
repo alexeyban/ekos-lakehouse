@@ -234,6 +234,12 @@ pub enum Expr {
         arg: Box<Expr>,
         pattern: Box<Expr>,
     },
+    /// RFC 0205: a Trino expression drafted by a model and checked (it parses, and reads only
+    /// the step's inputs and literals). Opaque to the translator; never produced by a parser.
+    Sql {
+        text: String,
+        ty: KType,
+    },
 }
 
 impl Expr {
@@ -343,7 +349,7 @@ impl Expr {
     pub fn walk(&self, f: &mut dyn FnMut(&Expr)) {
         f(self);
         match self {
-            Expr::Col { .. } | Expr::Lit { .. } => {}
+            Expr::Col { .. } | Expr::Lit { .. } | Expr::Sql { .. } => {}
             Expr::Unary { arg, .. } | Expr::Cast { arg, .. } | Expr::IsNull { arg, .. } => {
                 arg.walk(f)
             }
@@ -378,7 +384,7 @@ impl Expr {
         let m = |e: &Expr| Box::new(e.map_columns(f));
         match self {
             Expr::Col { name } => f(name),
-            Expr::Lit { .. } => self.clone(),
+            Expr::Lit { .. } | Expr::Sql { .. } => self.clone(),
             Expr::Unary { op, arg } => Expr::Unary {
                 op: *op,
                 arg: m(arg),
@@ -497,6 +503,7 @@ fn render(e: &Expr) -> String {
             list.iter().map(render).collect::<Vec<_>>().join(", ")
         ),
         Expr::Like { arg, pattern } => format!("({} LIKE {})", render(arg), render(pattern)),
+        Expr::Sql { text, .. } => format!("({text})"),
     }
 }
 
@@ -669,6 +676,7 @@ pub fn infer(e: &Expr, col_type: &dyn Fn(&str) -> KType) -> KType {
             .find(|t| *t != KType::Unknown)
             .unwrap_or(KType::Unknown),
         Expr::Cast { to, .. } => *to,
+        Expr::Sql { ty, .. } => *ty,
     }
 }
 
