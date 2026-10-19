@@ -33,8 +33,10 @@ the correct answer there. Haiku's A count moved 8 → 6 between runs: read it as
 
 Run 1's ground-truth comparison disagreed with *all three* models on the same rows. The models
 were right: in Kettle's Rhino, a null Number field in arithmetic or a comparison is 0. The
-symbolic executor kept SQL `NULL`. Fixed in `kettle-expr` (`script.rs`), with tests; run 2 is
-after the fix.
+symbolic executor kept SQL `NULL`. Fixed in `kettle-expr` (`java.rs`, which lowers JavaScript
+too; existing assertions updated); run 2 is after the fix. The fix shipped without a test of the
+reported case — added here: `a_null_number_is_zero_in_javascript_arithmetic_only` (JS coalesces,
+Java does not), checked to fail with the fix reverted.
 
 ---
 
@@ -51,6 +53,7 @@ after the fix.
 
 | File | Change |
 |---|---|
-| `crates/kettle-expr/src/script.rs` (084bc75) | null Number → 0 in JS arithmetic and comparisons |
+| `crates/kettle-expr/src/java.rs` (084bc75) | null Number → 0 in JS arithmetic and comparisons |
+| `crates/kettle-expr/src/script.rs` | regression test for it |
 | `crates/lakehouse-ext/examples/bench-results/2026-10-18.md` | both runs' result tables |
 | `devlogs/devlog_12.md` | this record |

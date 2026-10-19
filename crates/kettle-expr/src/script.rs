@@ -728,6 +728,36 @@ mod tests {
         assert!(o.lowered.notes.iter().any(|n| n.contains("logging")));
     }
 
+    /// RFC 0205 bench, run 1: Rhino reads a null number as 0 in arithmetic, so
+    /// `parseInt('42') + qty` with `qty` null is 42; Java has no such rule.
+    #[test]
+    fn a_null_number_is_zero_in_javascript_arithmetic_only() {
+        let s = parse_script("var total = parseInt('42') + qty;", true).unwrap();
+        let o = Executor::new(Lang::Js, &ft).run(&s).unwrap();
+        let sql = o.vars["total"].0.sql();
+        assert!(sql.contains("coalesce(\"qty\", 0)"), "{sql}");
+        assert!(
+            o.lowered
+                .notes
+                .iter()
+                .any(|n| n.contains("null number as 0"))
+        );
+
+        let src = r#"public boolean processRow(StepMetaInterface smi, StepDataInterface sdi) throws KettleException {
+            Object[] r = getRow();
+            if (r == null) { setOutputDone(); return false; }
+            r = createOutputRow(r, data.outputRowMeta.size());
+            Long qty = get(Fields.In, "qty").getInteger(r);
+            get(Fields.Out, "total").setValue(r, qty + 1);
+            putRow(data.outputRowMeta, r);
+            return true;
+        }"#;
+        let b = parse_class_body(src).unwrap();
+        let o = Executor::new(Lang::Java, &ft).run(&b.methods[0].1).unwrap();
+        let sql = o.outputs["total"].0.sql();
+        assert!(!sql.contains("coalesce(\"qty\", 0)"), "{sql}");
+    }
+
     #[test]
     fn what_the_executor_cannot_follow_is_named() {
         let s = parse_script("for (var i = 0; i < 3; i++) {}", true).unwrap();
