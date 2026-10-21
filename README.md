@@ -120,7 +120,10 @@ What each customer was invoiced per month.
 
 Every term must resolve to a silver column, or it comes back as a question. Prose terms are
 drafted by a local model (`gold-model`, Ollama) and must state nothing the description does not
-and run on Trino. The mart is proposed on a branch with grain and reconciliation tests.
+and run on Trino; a prose term names at least one column of the tables the mart reads (else it
+is asked back), and its draft is one expression over the columns it names. A table the mart can
+reach along more than one foreign-key path is asked about: name the column on the path you mean.
+The mart is proposed on a branch with grain and reconciliation tests.
 
 `sync` commits a new table, a new nullable column and a widened type on the pipeline
 repository's branch; a rename, a drop, a narrowed type, a new required column, a key change or

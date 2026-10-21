@@ -159,6 +159,13 @@ pub async fn draft(
                 .map_err(|e| anyhow::anyhow!("drafting `{}` with {model}: {e}", r.term))?;
             let expr = clean(&resp.content);
             outcome.drafts.insert(r.term.clone(), attempt);
+            if let Err(why) = gold::check_draft(r.resolution.as_ref().expect("prose"), &expr) {
+                feedback = format!(
+                    "\nYour last answer `{expr}` was rejected: {why}. Answer again with one SQL \
+                     expression over the columns this term names."
+                );
+                continue;
+            }
             let mut trial = drafted.clone();
             trial.insert(r.term.clone(), expr.clone());
             let c = gold::compile(&spec, &plan, &resolved, &trial)

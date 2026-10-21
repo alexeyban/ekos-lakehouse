@@ -7,7 +7,7 @@
 use ekos_lakehouse_bronze::plan::{Plan, TablePlan};
 use ekos_lakehouse_bronze::typemap::ident;
 use ekos_lakehouse_silver::model_name;
-use ekos_migrate_logic::invention::{InventionReport, check_candidate_with, sql_atoms};
+use ekos_migrate_logic::invention::{AtomKind, InventionReport, check_candidate_with, sql_atoms};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -480,7 +480,79 @@ pub fn resolve(spec: &MartSpec, plan: &Plan) -> Vec<Resolved> {
             }
         }
     }
+    // A prose term that names none of them gives a model nothing of the description's to write
+    // it from: whatever it drafted (`count(*)` for "customer lifetime value") would be a meaning
+    // the author never stated. It is asked back instead.
+    for r in &mut out {
+        let unanchored =
+            matches!(&r.resolution, Ok(Term::Prose { mentions, .. }) if mentions.is_empty());
+        if unanchored {
+            r.resolution = Err(q(
+                format!(
+                    "`{}` names no column of the tables this mart reads ({}): write it as \
+                     `sum|count|… of table.column`, or name the columns it is computed from",
+                    r.written,
+                    tables.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+                vec![],
+            ));
+            r.how = String::new();
+        }
+    }
     out
+}
+
+/// RFC 0195: what a model drafted for one prose term, judged before it joins the mart. It must
+/// be one SQL expression — a comma would splice another column into the SELECT, and still plan
+/// — and use only the columns its own term names: the description's other columns belong to
+/// its other terms, and borrowing them states a meaning this term does not have.
+pub fn check_draft(term: &Term, expr: &str) -> Result<(), String> {
+    use ekos_sql_dialect_sdk::SqlDialectParser;
+    let Term::Prose { mentions, .. } = term else {
+        return Ok(());
+    };
+    let trino = ekos_plugin_sql_dialect_trino::TrinoDialectParser;
+    let sql = trino.preprocess(&format!("select {expr}"));
+    let statements = sqlparser::parser::Parser::parse_sql(&*trino.sqlparser_dialect(), &sql)
+        .map_err(|e| format!("unparseable SQL ({e})"))?;
+    let single = match statements.as_slice() {
+        [sqlparser::ast::Statement::Query(q)] => match q.body.as_ref() {
+            sqlparser::ast::SetExpr::Select(s) => {
+                s.projection.len() == 1 && s.from.is_empty() && s.selection.is_none()
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if !single {
+        return Err(
+            "not one SQL expression (one expression only: no list of columns, no SELECT or FROM)"
+                .into(),
+        );
+    }
+    let allowed: BTreeSet<String> = mentions.iter().map(|m| m.column.to_lowercase()).collect();
+    let foreign: Vec<String> = sql_atoms(&sql)
+        .map_err(|e| format!("unparseable SQL ({e})"))?
+        .into_iter()
+        .filter(|a| a.kind == AtomKind::Column && !allowed.contains(&a.text))
+        .map(|a| format!("`{}`", a.text))
+        .collect();
+    if !foreign.is_empty() {
+        return Err(format!(
+            "columns this term does not name ({}; it names {})",
+            foreign.join(", "),
+            if allowed.is_empty() {
+                "none".to_string()
+            } else {
+                allowed
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ));
+    }
+    Ok(())
 }
 
 fn term_tables(t: &Term) -> Vec<String> {
@@ -542,6 +614,34 @@ fn joins(
         if t == base {
             continue;
         }
+        // More than one foreign-key path to a table is more than one meaning (the customer's
+        // store, the rented copy's store, the clerk's store): the author picks, by naming a
+        // column on the path they mean.
+        let paths = paths_to(&edges, base, t, 8);
+        if paths.len() > 1 {
+            let show = |p: &Vec<(String, String, String, String)>| {
+                p.iter()
+                    .map(|(c, cc, parent, _)| format!("{c}.{cc} → {parent}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut via: Vec<String> = paths
+                .iter()
+                .filter_map(|p| p.last().map(|(c, cc, ..)| format!("{c}.{cc}")))
+                .collect();
+            via.sort();
+            via.dedup();
+            return Err(q(
+                format!(
+                    "`{t}` is reached from `{base}` along {} foreign-key paths, each a different \
+                     meaning ({}): name the column that says which, e.g. `{}`",
+                    paths.len(),
+                    paths.iter().map(show).collect::<Vec<_>>().join("; "),
+                    via[0]
+                ),
+                via,
+            ));
+        }
         if !prev.contains_key(t) {
             return Err(q(
                 format!(
@@ -564,6 +664,53 @@ fn joins(
         }
     }
     Ok(out)
+}
+
+/// Every simple many-to-one path from `base` to `target` (up to `limit` of them).
+fn paths_to(
+    edges: &BTreeMap<String, Vec<(String, String, String)>>,
+    base: &str,
+    target: &str,
+    limit: usize,
+) -> Vec<Vec<(String, String, String, String)>> {
+    fn walk(
+        edges: &BTreeMap<String, Vec<(String, String, String)>>,
+        at: &str,
+        target: &str,
+        limit: usize,
+        on_path: &mut Vec<String>,
+        path: &mut Vec<(String, String, String, String)>,
+        out: &mut Vec<Vec<(String, String, String, String)>>,
+    ) {
+        if out.len() >= limit {
+            return;
+        }
+        if at == target {
+            out.push(path.clone());
+            return;
+        }
+        for (c, parent, rc) in edges.get(at).into_iter().flatten() {
+            if on_path.contains(parent) {
+                continue;
+            }
+            on_path.push(parent.clone());
+            path.push((at.to_string(), c.clone(), parent.clone(), rc.clone()));
+            walk(edges, parent, target, limit, on_path, path, out);
+            path.pop();
+            on_path.pop();
+        }
+    }
+    let mut out = vec![];
+    walk(
+        edges,
+        base,
+        target,
+        limit,
+        &mut vec![base.to_string()],
+        &mut vec![],
+        &mut out,
+    );
+    out
 }
 
 fn col(c: &ColRef) -> String {
