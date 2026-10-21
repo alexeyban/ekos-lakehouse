@@ -1,0 +1,14 @@
+{
+ "generated": true,
+ "tables": [],
+ "refused": [],
+ "settings": {
+  "trino": "http://127.0.0.1:58080",
+  "dagster": "http://127.0.0.1:53000",
+  "polaris": "http://127.0.0.1:58182/q/health",
+  "storage": "http://127.0.0.1:58333",
+  "source": "127.0.0.1:55433/pagila",
+  "target_catalog": "iceberg",
+  "bronze_schedule": "0 * * * *"
+ }
+}

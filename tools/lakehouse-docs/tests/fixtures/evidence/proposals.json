@@ -1,0 +1,10 @@
+{
+ "proposals": [
+  {
+   "kind": "schema change",
+   "subject": "public.customer",
+   "summary": "column-rename activebool \u2192 is_active",
+   "branch": "ekos/change/public.customer/c-7781"
+  }
+ ]
+}

@@ -1,0 +1,895 @@
+[
+ {
+  "schema": "public",
+  "name": "language",
+  "oid": 16400,
+  "columns": [
+   {
+    "name": "language_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 1,
+    "has_default": true
+   },
+   {
+    "name": "name",
+    "pg_type": "character(20)",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "char(20)",
+    "numeric_used": null,
+    "attnum": 2,
+    "has_default": false
+   },
+   {
+    "name": "last_update",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 3,
+    "has_default": true
+   }
+  ],
+  "primary_key": [
+   "language_id"
+  ],
+  "row_estimate": 6,
+  "update_triggers": [
+   {
+    "trigger": "last_updated",
+    "function": "last_updated",
+    "assigns": [
+     "last_update"
+    ],
+    "body_sha": "ab12"
+   }
+  ],
+  "foreign_keys": [],
+  "comment": "Languages films are available in"
+ },
+ {
+  "schema": "public",
+  "name": "film",
+  "oid": 16410,
+  "columns": [
+   {
+    "name": "film_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 1,
+    "has_default": true
+   },
+   {
+    "name": "title",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 2,
+    "has_default": false,
+    "comment": "Film title as shown in the catalogue"
+   },
+   {
+    "name": "description",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": false,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 3,
+    "has_default": false
+   },
+   {
+    "name": "release_year",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": false,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 4,
+    "has_default": false
+   },
+   {
+    "name": "language_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 5,
+    "has_default": false
+   },
+   {
+    "name": "rental_duration",
+    "pg_type": "smallint",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "smallint",
+    "numeric_used": null,
+    "attnum": 6,
+    "has_default": false
+   },
+   {
+    "name": "rental_rate",
+    "pg_type": "numeric(4,2)",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "decimal(4,2)",
+    "numeric_used": null,
+    "attnum": 7,
+    "has_default": false,
+    "comment": "Price for one rental period"
+   },
+   {
+    "name": "length",
+    "pg_type": "smallint",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": false,
+    "trino_type": "smallint",
+    "numeric_used": null,
+    "attnum": 8,
+    "has_default": false
+   },
+   {
+    "name": "rating",
+    "pg_type": "mpaa_rating",
+    "kind": {
+     "kind": "enum"
+    },
+    "not_null": false,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 9,
+    "has_default": false,
+    "enum_labels": [
+     "G",
+     "PG",
+     "PG-13",
+     "R",
+     "NC-17"
+    ]
+   },
+   {
+    "name": "last_update",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 10,
+    "has_default": true
+   }
+  ],
+  "primary_key": [
+   "film_id"
+  ],
+  "row_estimate": 1000,
+  "update_triggers": [
+   {
+    "trigger": "last_updated",
+    "function": "last_updated",
+    "assigns": [
+     "last_update"
+    ],
+    "body_sha": "ab12"
+   }
+  ],
+  "foreign_keys": [
+   {
+    "name": "film_language_id_fkey",
+    "columns": [
+     "language_id"
+    ],
+    "ref_schema": "public",
+    "ref_table": "language",
+    "ref_columns": [
+     "language_id"
+    ]
+   }
+  ],
+  "comment": "Every film in the rental catalogue"
+ },
+ {
+  "schema": "public",
+  "name": "city",
+  "oid": 16420,
+  "columns": [
+   {
+    "name": "city_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 1,
+    "has_default": false
+   },
+   {
+    "name": "city",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 2,
+    "has_default": false
+   },
+   {
+    "name": "country_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 3,
+    "has_default": false
+   },
+   {
+    "name": "last_update",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 4,
+    "has_default": true
+   }
+  ],
+  "primary_key": [
+   "city_id"
+  ],
+  "row_estimate": 600,
+  "update_triggers": [
+   {
+    "trigger": "last_updated",
+    "function": "last_updated",
+    "assigns": [
+     "last_update"
+    ],
+    "body_sha": "ab12"
+   }
+  ],
+  "foreign_keys": []
+ },
+ {
+  "schema": "public",
+  "name": "address",
+  "oid": 16430,
+  "columns": [
+   {
+    "name": "address_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 1,
+    "has_default": false
+   },
+   {
+    "name": "address",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 2,
+    "has_default": false,
+    "pii_candidate": "address"
+   },
+   {
+    "name": "district",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 3,
+    "has_default": false
+   },
+   {
+    "name": "city_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 4,
+    "has_default": false
+   },
+   {
+    "name": "postal_code",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": false,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 5,
+    "has_default": false
+   },
+   {
+    "name": "phone",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 6,
+    "has_default": false,
+    "pii_candidate": "phone"
+   },
+   {
+    "name": "last_update",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 7,
+    "has_default": true
+   }
+  ],
+  "primary_key": [
+   "address_id"
+  ],
+  "row_estimate": 603,
+  "update_triggers": [
+   {
+    "trigger": "last_updated",
+    "function": "last_updated",
+    "assigns": [
+     "last_update"
+    ],
+    "body_sha": "ab12"
+   }
+  ],
+  "foreign_keys": [
+   {
+    "name": "address_city_id_fkey",
+    "columns": [
+     "city_id"
+    ],
+    "ref_schema": "public",
+    "ref_table": "city",
+    "ref_columns": [
+     "city_id"
+    ]
+   }
+  ]
+ },
+ {
+  "schema": "public",
+  "name": "customer",
+  "oid": 16440,
+  "columns": [
+   {
+    "name": "customer_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 1,
+    "has_default": false
+   },
+   {
+    "name": "store_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 2,
+    "has_default": false
+   },
+   {
+    "name": "first_name",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 3,
+    "has_default": false,
+    "pii_candidate": "person_name"
+   },
+   {
+    "name": "last_name",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 4,
+    "has_default": false,
+    "pii_candidate": "person_name"
+   },
+   {
+    "name": "email",
+    "pg_type": "text",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": false,
+    "trino_type": "varchar",
+    "numeric_used": null,
+    "attnum": 5,
+    "has_default": false,
+    "pii_candidate": "email"
+   },
+   {
+    "name": "address_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 6,
+    "has_default": false
+   },
+   {
+    "name": "activebool",
+    "pg_type": "boolean",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "boolean",
+    "numeric_used": null,
+    "attnum": 7,
+    "has_default": false
+   },
+   {
+    "name": "create_date",
+    "pg_type": "date",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "date",
+    "numeric_used": null,
+    "attnum": 8,
+    "has_default": false
+   },
+   {
+    "name": "last_update",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 9,
+    "has_default": true
+   },
+   {
+    "name": "active",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": false,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 10,
+    "has_default": false
+   }
+  ],
+  "primary_key": [
+   "customer_id"
+  ],
+  "row_estimate": 599,
+  "update_triggers": [
+   {
+    "trigger": "last_updated",
+    "function": "last_updated",
+    "assigns": [
+     "last_update"
+    ],
+    "body_sha": "ab12"
+   }
+  ],
+  "foreign_keys": [
+   {
+    "name": "customer_address_id_fkey",
+    "columns": [
+     "address_id"
+    ],
+    "ref_schema": "public",
+    "ref_table": "address",
+    "ref_columns": [
+     "address_id"
+    ]
+   }
+  ],
+  "comment": "Customers who have rented at least once"
+ },
+ {
+  "schema": "public",
+  "name": "inventory",
+  "oid": 16450,
+  "columns": [
+   {
+    "name": "inventory_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 1,
+    "has_default": false
+   },
+   {
+    "name": "film_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 2,
+    "has_default": false
+   },
+   {
+    "name": "store_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 3,
+    "has_default": false
+   },
+   {
+    "name": "last_update",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 4,
+    "has_default": true
+   }
+  ],
+  "primary_key": [
+   "inventory_id"
+  ],
+  "row_estimate": 4581,
+  "update_triggers": [
+   {
+    "trigger": "last_updated",
+    "function": "last_updated",
+    "assigns": [
+     "last_update"
+    ],
+    "body_sha": "ab12"
+   }
+  ],
+  "foreign_keys": [
+   {
+    "name": "inventory_film_id_fkey",
+    "columns": [
+     "film_id"
+    ],
+    "ref_schema": "public",
+    "ref_table": "film",
+    "ref_columns": [
+     "film_id"
+    ]
+   }
+  ]
+ },
+ {
+  "schema": "public",
+  "name": "rental",
+  "oid": 16460,
+  "columns": [
+   {
+    "name": "rental_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 1,
+    "has_default": false
+   },
+   {
+    "name": "rental_date",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 2,
+    "has_default": false
+   },
+   {
+    "name": "inventory_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 3,
+    "has_default": false
+   },
+   {
+    "name": "customer_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 4,
+    "has_default": false
+   },
+   {
+    "name": "return_date",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": false,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 5,
+    "has_default": false
+   },
+   {
+    "name": "staff_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 6,
+    "has_default": false
+   },
+   {
+    "name": "last_update",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 7,
+    "has_default": true
+   }
+  ],
+  "primary_key": [
+   "rental_id"
+  ],
+  "row_estimate": 16044,
+  "update_triggers": [
+   {
+    "trigger": "last_updated",
+    "function": "last_updated",
+    "assigns": [
+     "last_update"
+    ],
+    "body_sha": "ab12"
+   }
+  ],
+  "foreign_keys": [
+   {
+    "name": "rental_inventory_id_fkey",
+    "columns": [
+     "inventory_id"
+    ],
+    "ref_schema": "public",
+    "ref_table": "inventory",
+    "ref_columns": [
+     "inventory_id"
+    ]
+   },
+   {
+    "name": "rental_customer_id_fkey",
+    "columns": [
+     "customer_id"
+    ],
+    "ref_schema": "public",
+    "ref_table": "customer",
+    "ref_columns": [
+     "customer_id"
+    ]
+   }
+  ],
+  "comment": "One row per rental of one inventory item"
+ },
+ {
+  "schema": "public",
+  "name": "payment",
+  "oid": 16470,
+  "columns": [
+   {
+    "name": "payment_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 1,
+    "has_default": false
+   },
+   {
+    "name": "customer_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 2,
+    "has_default": false
+   },
+   {
+    "name": "staff_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 3,
+    "has_default": false
+   },
+   {
+    "name": "rental_id",
+    "pg_type": "integer",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "integer",
+    "numeric_used": null,
+    "attnum": 4,
+    "has_default": false
+   },
+   {
+    "name": "amount",
+    "pg_type": "numeric(5,2)",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "decimal(5,2)",
+    "numeric_used": null,
+    "attnum": 5,
+    "has_default": false,
+    "comment": "Amount paid, in USD"
+   },
+   {
+    "name": "payment_date",
+    "pg_type": "timestamp with time zone",
+    "kind": {
+     "kind": "base"
+    },
+    "not_null": true,
+    "trino_type": "timestamp(6) with time zone",
+    "numeric_used": null,
+    "attnum": 6,
+    "has_default": false
+   }
+  ],
+  "primary_key": [
+   "payment_id"
+  ],
+  "row_estimate": 16049,
+  "update_triggers": [],
+  "foreign_keys": [
+   {
+    "name": "payment_customer_id_fkey",
+    "columns": [
+     "customer_id"
+    ],
+    "ref_schema": "public",
+    "ref_table": "customer",
+    "ref_columns": [
+     "customer_id"
+    ]
+   },
+   {
+    "name": "payment_rental_id_fkey",
+    "columns": [
+     "rental_id"
+    ],
+    "ref_schema": "public",
+    "ref_table": "rental",
+    "ref_columns": [
+     "rental_id"
+    ]
+   }
+  ],
+  "comment": "Payments against rentals"
+ }
+]

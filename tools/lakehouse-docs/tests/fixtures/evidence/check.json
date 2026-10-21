@@ -1,0 +1,47 @@
+[
+ {
+  "metric": "lineage",
+  "measured": 8,
+  "of": 8,
+  "passed": true,
+  "method": "compiled dbt project resolves every silver column to bronze",
+  "gaps": []
+ },
+ {
+  "metric": "test coverage",
+  "measured": 8,
+  "of": 8,
+  "passed": true,
+  "method": "models with key, not-null and relationship tests",
+  "gaps": []
+ },
+ {
+  "metric": "doc coverage",
+  "measured": 4,
+  "of": 8,
+  "passed": false,
+  "method": "models with a description from a source comment",
+  "gaps": [
+   "public__address",
+   "public__city",
+   "public__inventory",
+   "public__language"
+  ]
+ },
+ {
+  "metric": "drift",
+  "measured": 0,
+  "of": 9,
+  "passed": true,
+  "method": "hand edits to generated files",
+  "gaps": []
+ },
+ {
+  "metric": "lint",
+  "measured": 0,
+  "of": 9,
+  "passed": true,
+  "method": "sqlfluff (trino)",
+  "gaps": []
+ }
+]
