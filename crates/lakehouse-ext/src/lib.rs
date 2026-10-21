@@ -293,6 +293,26 @@ impl EkosExtension for LakehouseExtension {
                         ),
                 )
                 .subcommand(
+                    clap::Command::new("reload")
+                        .about(
+                            "Load a table again from scratch on its next run: bronze is \
+                                emptied and every source row loaded (RFC 0194)",
+                        )
+                        .arg(
+                            clap::Arg::new("table")
+                                .long("table")
+                                .required(true)
+                                .action(clap::ArgAction::Append)
+                                .help("schema.table; repeat it"),
+                        )
+                        .arg(
+                            clap::Arg::new("cancel")
+                                .long("cancel")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Withdraw a reload not yet run"),
+                        ),
+                )
+                .subcommand(
                     clap::Command::new("status")
                         .about(
                             "Every table's health per layer, with the facts behind it (RFC 0196)",
@@ -498,6 +518,8 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse metrics", Class::External, false),
             // Reads the live source; commits and branches in the pipeline repository.
             ("lakehouse sync", Class::External, false),
+            // Empties a bronze table on its next run: its rows are loaded again from the source.
+            ("lakehouse reload", Class::Admin, false),
             // Calls the configured (local) model for prose terms.
             ("lakehouse gold draft", Class::External, true),
             // Reads the repository and the ledger; writes metric facts.
@@ -553,7 +575,13 @@ impl EkosExtension for LakehouseExtension {
                     plan_cmd::read_lock(&out)?
                 } else {
                     let redaction = ctx.config.redaction_config();
-                    off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?
+                    let mut plan = off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?;
+                    // Over a deployed plan: keep its approved renames, and rename in place what
+                    // the source renamed since, rather than add an empty column.
+                    if let Ok(deployed) = plan_cmd::read_lock(&out) {
+                        ekos_lakehouse_bronze::carry_renames(&mut plan, &deployed);
+                    }
+                    plan
                 };
                 let w = plan_cmd::write(&plan, &settings.silver_settings(), &out)?;
                 sync::commit_generated(&out, "lakehouse: generate")?;
@@ -634,6 +662,27 @@ impl EkosExtension for LakehouseExtension {
                     .collect();
                 if !bad.is_empty() {
                     anyhow::bail!("not green: {}", bad.join(", "));
+                }
+                Ok(())
+            }
+            Some(("reload", m)) => {
+                let settings = settings::load(ctx.config)?;
+                let repo = pipeline_dir(&settings, ctx);
+                let plan = plan_cmd::read_lock(&repo)?;
+                let tables: Vec<String> = m
+                    .get_many::<String>("table")
+                    .map(|v| v.cloned().collect())
+                    .unwrap_or_default();
+                let cancel = m.get_flag("cancel");
+                for t in sync::request_reload(&repo, &plan, &tables, cancel)? {
+                    if cancel {
+                        println!("reload withdrawn: {t}");
+                    } else {
+                        println!(
+                            "reload requested: {t} — its next load empties bronze and loads every \
+                             source row"
+                        );
+                    }
                 }
                 Ok(())
             }

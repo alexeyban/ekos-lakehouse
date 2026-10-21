@@ -284,3 +284,126 @@ fn the_engine_reads_silver_tables_directly() {
     );
     assert!(!e.contains("{{") && !e.contains("--"), "{e}");
 }
+
+#[test]
+fn prose_that_names_no_column_is_asked_not_drafted() {
+    // The runbook's case: an undefined business term with nothing of the description in it.
+    let s = parse(&RECEIVABLES.replace(
+        "average_invoice: the amount_bc total divided by the number of invoices",
+        "lifetime_value: customer lifetime value",
+    ))
+    .unwrap();
+    let r = resolve(&s, &ledger());
+    let qs = questions(&r);
+    assert_eq!(qs.len(), 1, "{qs:?}");
+    assert_eq!(qs[0].0.term, "lifetime_value");
+    assert!(qs[0].1.text.contains("names no column"), "{:?}", qs[0].1);
+}
+
+#[test]
+fn a_draft_is_one_expression_over_its_own_columns() {
+    let s = parse(RECEIVABLES).unwrap();
+    let r = resolve(&s, &ledger());
+    let avg = r
+        .iter()
+        .find(|x| x.term == "average_invoice")
+        .unwrap()
+        .resolution
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        check_draft(avg, "sum(\"ar\".\"amount_bc\") / count(*)"),
+        Ok(())
+    );
+    // A comma splices another column into the SELECT and still plans (found live on Pagila:
+    // `"store"."store_id", count(*)`).
+    let e = check_draft(avg, "\"ar\".\"amount_bc\", count(*)").unwrap_err();
+    assert!(e.contains("not one SQL expression"), "{e}");
+    // A column the description states, but for another term.
+    let e = check_draft(
+        avg,
+        "sum(\"ar\".\"amount_bc\") / count(\"transactions\".\"transdate\")",
+    )
+    .unwrap_err();
+    assert!(e.contains("`transdate`"), "{e}");
+    // A resolved (non-prose) term is not the drafter's.
+    let invoiced = r
+        .iter()
+        .find(|x| x.term == "invoiced")
+        .unwrap()
+        .resolution
+        .as_ref()
+        .unwrap();
+    assert_eq!(check_draft(invoiced, "anything, at all"), Ok(()));
+}
+
+/// Pagila's shape: a rental reaches `store` through its customer and through its inventory.
+fn rentals() -> Plan {
+    plan(
+        &[
+            table(
+                "rental",
+                vec![
+                    col("id", "integer", "integer"),
+                    col("customer_id", "integer", "integer"),
+                    col("inventory_id", "integer", "integer"),
+                ],
+                vec![
+                    ("customer_id", "customer", "id"),
+                    ("inventory_id", "inventory", "id"),
+                ],
+            ),
+            table(
+                "customer",
+                vec![
+                    col("id", "integer", "integer"),
+                    col("store_id", "integer", "integer"),
+                ],
+                vec![("store_id", "store", "id")],
+            ),
+            table(
+                "inventory",
+                vec![
+                    col("id", "integer", "integer"),
+                    col("store_id", "integer", "integer"),
+                ],
+                vec![("store_id", "store", "id")],
+            ),
+            table(
+                "store",
+                vec![
+                    col("id", "integer", "integer"),
+                    col("name", "text", "varchar"),
+                ],
+                vec![],
+            ),
+        ],
+        &PlanSettings::default(),
+    )
+}
+
+#[test]
+fn a_table_reached_along_several_paths_is_asked_and_a_column_picks_one() {
+    let s = parse(
+        "---\nmart: m\ngrain: [store]\ndimensions:\n  store: store.name\n\
+         measures:\n  n: count of rental.id\n---\n",
+    )
+    .unwrap();
+    let r = resolve(&s, &rentals());
+    let qs = compile(&s, &rentals(), &r, &BTreeMap::new()).unwrap_err();
+    assert!(qs[0].text.contains("2 foreign-key paths"), "{qs:?}");
+    assert_eq!(
+        qs[0].candidates,
+        ["customer.store_id", "inventory.store_id"]
+    );
+    // Naming the column on the path meant resolves it.
+    let s = parse(
+        "---\nmart: m\ngrain: [store]\ndimensions:\n  store: inventory.store_id\n\
+         measures:\n  n: count of rental.id\n---\n",
+    )
+    .unwrap();
+    let r = resolve(&s, &rentals());
+    let c = compile(&s, &rentals(), &r, &BTreeMap::new()).unwrap();
+    assert_eq!(c.joins.len(), 1, "{:?}", c.joins);
+    assert!(check(&c).accepted());
+}

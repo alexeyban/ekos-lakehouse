@@ -187,14 +187,23 @@ pub fn deletes_sql(t: &TablePlan, s: &PlanSettings) -> Option<String> {
 }
 
 /// For an incremental table: its schema brought to the plan's, idempotently, before each load
-/// (RFC 0194 §3). New columns are added; numeric columns are set to their planned type, which
-/// promotes a widened one and is a no-op otherwise (measured: no new metadata version).
+/// (RFC 0194 §3). Approved renames first, in place, so the rows already loaded keep their values
+/// (`IF EXISTS`: once done, a no-op); then new columns are added; numeric columns are set to
+/// their planned type, which promotes a widened one and is a no-op otherwise (measured: no new
+/// metadata version).
 pub fn schema_sql(t: &TablePlan, s: &PlanSettings) -> Option<String> {
     if !matches!(t.decision.mode, LoadMode::Incremental { .. }) {
         return None;
     }
     let tgt = target(t, s);
     let mut out = String::from(HEADER);
+    for r in &t.renames {
+        out.push_str(&format!(
+            "ALTER TABLE {tgt} RENAME COLUMN IF EXISTS {} TO {};\n",
+            ident(&r.from),
+            ident(&r.to)
+        ));
+    }
     for m in &t.columns {
         out.push_str(&format!(
             "ALTER TABLE {tgt} ADD COLUMN IF NOT EXISTS {} {};\n",
@@ -395,6 +404,66 @@ mod tests {
         assert!(
             !a.contains_key("bronze/public/actor/deletes.sql"),
             "a full table has none"
+        );
+    }
+
+    #[test]
+    fn an_approved_rename_renames_the_bronze_column_in_place() {
+        // Deployed with `len`; the source renamed it to `length` (same attnum).
+        let mut live = plan(&sources(), &settings());
+        for (i, t) in live.tables.iter_mut().enumerate() {
+            t.oid = 16000 + i as u32;
+            for (n, f) in t.facts.columns.iter_mut().enumerate() {
+                f.attnum = n as i32 + 1;
+            }
+        }
+        let mut deployed = live.clone();
+        let film = deployed
+            .tables
+            .iter_mut()
+            .find(|t| t.table == "film")
+            .unwrap();
+        for f in &mut film.facts.columns {
+            if f.name == "length" {
+                f.name = "len".into();
+            }
+        }
+        let live_film = live.tables.iter().find(|t| t.table == "film").unwrap();
+        let next = crate::plan::TablePlan::succeeding(film, live_film);
+        assert_eq!(
+            next.renames,
+            vec![crate::plan::ColumnRename {
+                from: "len".into(),
+                to: "length".into()
+            }]
+        );
+        let sql = schema_sql(&next, &settings()).unwrap();
+        let rename = sql
+            .find("ALTER TABLE \"iceberg\".\"bronze_public\".\"film\" RENAME COLUMN IF EXISTS \"len\" TO \"length\";")
+            .unwrap_or_else(|| panic!("{sql}"));
+        assert!(
+            rename < sql.find("ADD COLUMN").unwrap(),
+            "renamed before anything is added"
+        );
+
+        // A later plan read fresh from the source keeps it; a second rename is appended.
+        let mut deployed2 = deployed.clone();
+        *deployed2
+            .tables
+            .iter_mut()
+            .find(|t| t.table == "film")
+            .unwrap() = next;
+        let mut fresh = live.clone();
+        crate::plan::carry_renames(&mut fresh, &deployed2);
+        let f = fresh.tables.iter().find(|t| t.table == "film").unwrap();
+        assert_eq!(f.renames.len(), 1, "{:?}", f.renames);
+        assert!(
+            fresh
+                .tables
+                .iter()
+                .filter(|t| t.table != "film")
+                .all(|t| t.renames.is_empty()),
+            "only the renamed table carries one"
         );
     }
 

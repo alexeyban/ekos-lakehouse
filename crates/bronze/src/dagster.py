@@ -93,6 +93,8 @@ def _ident(name):
 
 
 STATUS = REPO / ".lakehouse" / "status.json"
+# `lakehouse reload --table t` leaves one empty file per table here (RFC 0194).
+RELOAD = REPO / ".lakehouse" / "reload"
 
 
 def _state(qualified):
@@ -174,17 +176,34 @@ def _make_asset(table):
             _ensure_namespace(cur, schema)
             lsn = _source_lsn(cur)
             watermark = "NULL"
+            reload = (RELOAD / qualified).is_file()
             if mode["mode"] == "incremental":
                 for f in ("create.sql", "schema.sql"):
                     for stmt in _statements((base / f).read_text()):
-                        _run(cur, stmt)
-                wm_type = next(
-                    c["iceberg_type"]
-                    for c in table["columns"]
-                    if c["column"] == mode["watermark"]
-                )
-                rows = _run(cur, _statements((base / "watermark.sql").read_text())[0])
-                watermark = _watermark_literal(rows[0][0], wm_type)
+                        try:
+                            _run(cur, stmt)
+                        except trino.exceptions.TrinoQueryError as e:
+                            # A rename whose new name a load already added as a column: the
+                            # old column keeps the history, the new one is filled from here.
+                            # `lakehouse reload` loads the table whole again.
+                            if " RENAME COLUMN " not in stmt or "already exists" not in str(e):
+                                raise
+                            context.log.warning(
+                                f"{qualified}: {stmt.strip()} not applied ({e.message}); "
+                                f"run `lakehouse reload --table {qualified}`"
+                            )
+                if reload:
+                    # Emptied, not dropped: the earlier snapshots stay for time travel.
+                    _run(cur, f"DELETE FROM {target}")
+                    context.log.info(f"{qualified}: full reload requested; bronze emptied")
+                else:
+                    wm_type = next(
+                        c["iceberg_type"]
+                        for c in table["columns"]
+                        if c["column"] == mode["watermark"]
+                    )
+                    rows = _run(cur, _statements((base / "watermark.sql").read_text())[0])
+                    watermark = _watermark_literal(rows[0][0], wm_type)
             written = 0
             for f in ("load.sql", "deletes.sql"):
                 if (base / f).exists():
@@ -201,6 +220,9 @@ def _make_asset(table):
             _ekos("lakehouse", "run-report", "--table", qualified, "--run-id", run_id,
                   "--status", "failed", "--message", str(e)[:500])
             raise
+        if reload:
+            # A full table is replaced on every load anyway: its request is met all the same.
+            (RELOAD / qualified).unlink(missing_ok=True)
         duration_ms = int((time.monotonic() - started) * 1000)
         _ekos("lakehouse", "run-report", "--table", qualified, "--run-id", run_id,
               "--status", "ok", "--rows", str(written), "--duration-ms", str(duration_ms),
@@ -217,6 +239,7 @@ def _make_asset(table):
                 "rows_written": written,
                 "snapshot_id": snap,
                 "source_lsn": lsn,
+                "full_reload": reload,
                 "reconciliation": dg.MetadataValue.text(check.stdout.strip()),
             }
         )

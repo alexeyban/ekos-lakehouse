@@ -93,6 +93,7 @@ ekos-lakehouse lakehouse generate        # SQL + lakehouse.lock.json + Dagster p
 ekos-lakehouse lakehouse reconcile       # V1–V3 with a planted control, recorded in the ledger
 ekos-lakehouse lakehouse check --lint    # lineage, test/doc coverage, drift, sqlfluff
 ekos-lakehouse lakehouse sync            # source changes: safe ones committed, the rest proposed
+ekos-lakehouse lakehouse reload --table public.rental   # next load empties bronze and loads every row
 ekos-lakehouse lakehouse gold draft marts/revenue.md   # a mart from a description, or questions
 ekos-lakehouse lakehouse pentaho scan    # Kettle packages: transformations, jobs, steps, links
 ekos-lakehouse lakehouse pentaho translate etl   # silver + gold dbt models on a proposal branch
@@ -119,13 +120,17 @@ What each customer was invoiced per month.
 
 Every term must resolve to a silver column, or it comes back as a question. Prose terms are
 drafted by a local model (`gold-model`, Ollama) and must state nothing the description does not
-and run on Trino. The mart is proposed on a branch with grain and reconciliation tests.
+and run on Trino; a prose term names at least one column of the tables the mart reads (else it
+is asked back), and its draft is one expression over the columns it names. A table the mart can
+reach along more than one foreign-key path is asked about: name the column on the path you mean.
+The mart is proposed on a branch with grain and reconciliation tests.
 
 `sync` commits a new table, a new nullable column and a widened type on the pipeline
 repository's branch; a rename, a drop, a narrowed type, a new required column, a key change or
 a changed watermark trigger becomes a branch `ekos/change/<table>/<id>` with
 `proposals/<id>.md` (the change, its evidence, the silver columns and tests it reaches).
-Merging the branch is the approval. With `git-remote = "origin"` the branch is pushed and a
+Merging the branch is the approval; a merged rename renames the bronze column in place, so the
+rows already loaded keep their values. With `git-remote = "origin"` the branch is pushed and a
 pull request opened with `gh` (signed in, with rights on the repository); `sync` then starts by
 fast-forwarding from the remote, so a request merged there resumes its table on the next run,
 pushes the safe changes it commits, and removes merged proposal branches from the remote.

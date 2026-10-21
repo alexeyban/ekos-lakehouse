@@ -475,3 +475,68 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
         status,
     })
 }
+
+/// Where a full reload is requested: one empty file per table, under the repository's run-time
+/// state, so loads running in parallel never write the same file. The orchestrator empties the
+/// table, loads every source row and removes the file.
+pub const RELOAD_DIR: &str = ".lakehouse/reload";
+
+/// Request (or withdraw) a full reload of planned tables; returns them.
+pub fn request_reload(
+    repo: &Path,
+    plan: &Plan,
+    tables: &[String],
+    cancel: bool,
+) -> anyhow::Result<Vec<String>> {
+    let planned: Vec<String> = plan
+        .tables
+        .iter()
+        .map(|t| format!("{}.{}", t.schema, t.table))
+        .collect();
+    for t in tables {
+        if !planned.contains(t) {
+            anyhow::bail!("{t} is not in the deployed plan (lakehouse.lock.json)");
+        }
+    }
+    let dir = repo.join(RELOAD_DIR);
+    std::fs::create_dir_all(&dir)?;
+    for t in tables {
+        let marker = dir.join(t);
+        if cancel {
+            match std::fs::remove_file(&marker) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            std::fs::write(&marker, "")?;
+        }
+    }
+    Ok(tables.to_vec())
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+
+    #[test]
+    fn a_reload_is_a_marker_per_planned_table_and_can_be_withdrawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan: Plan = serde_json::from_str(
+            r#"{"format":3,"settings":{},"refused":[],"tables":[{"schema":"public",
+            "table":"rental","namespace":"bronze_public","primary_key":["rental_id"],
+            "decision":{"mode":{"mode":"full"},"evidence":[],"notes":[]},"columns":[]}]}"#,
+        )
+        .unwrap();
+        assert!(
+            request_reload(dir.path(), &plan, &["public.film".into()], false).is_err(),
+            "an unplanned table is refused"
+        );
+        let marker = dir.path().join(RELOAD_DIR).join("public.rental");
+        request_reload(dir.path(), &plan, &["public.rental".into()], false).unwrap();
+        assert!(marker.is_file());
+        request_reload(dir.path(), &plan, &["public.rental".into()], true).unwrap();
+        assert!(!marker.exists());
+        request_reload(dir.path(), &plan, &["public.rental".into()], true).unwrap();
+    }
+}
