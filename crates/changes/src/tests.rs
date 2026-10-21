@@ -239,6 +239,34 @@ fn auto_changes_merge_and_proposed_ones_wait() {
         .find(|t| t.table == "orders")
         .unwrap();
     assert!(o.columns.iter().any(|m| m.column == "remark"));
+    assert_eq!(
+        o.renames,
+        [ekos_lakehouse_bronze::ColumnRename {
+            from: "note".into(),
+            to: "remark".into()
+        }],
+        "the merged plan renames bronze's column in place"
+    );
+    assert!(
+        diff(&proposed, &live, &Policy::new()).is_empty(),
+        "after the merge the source matches"
+    );
+}
+
+#[test]
+fn an_auto_rename_by_policy_also_renames_in_place() {
+    let mut a = orders();
+    a.columns[2].name = "remark".into();
+    let policy: Policy = [("rename".to_string(), Action::Auto)].into();
+    let (dep, live) = (plan(&[orders()], &settings()), plan(&[a], &settings()));
+    let next = apply_auto(&dep, &live, &diff(&dep, &live, &policy));
+    assert_eq!(
+        next.tables[0].renames.len(),
+        1,
+        "{:?}",
+        next.tables[0].renames
+    );
+    assert_eq!(next.tables[0].renames[0].to, "remark");
 }
 
 #[test]

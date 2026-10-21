@@ -49,6 +49,16 @@ pub struct TablePlan {
     /// The source facts silver is generated from (RFC 0193): keys, comments, labels, candidates.
     #[serde(default)]
     pub facts: TableFacts,
+    /// Approved column renames, oldest first (RFC 0194): bronze renames the column in place, so
+    /// the rows already loaded keep their values. Each applies once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renames: Vec<ColumnRename>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnRename {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +90,45 @@ pub struct ColumnFacts {
 impl TablePlan {
     pub fn column_facts(&self, name: &str) -> Option<&ColumnFacts> {
         self.facts.columns.iter().find(|c| c.name == name)
+    }
+
+    /// `live` as it replaces `deployed`: the renames already approved, then each column whose
+    /// `attnum` is the same but whose name changed. An `attnum` of 0 is unknown (a lock written
+    /// before format 3) and never matches.
+    pub fn succeeding(deployed: &TablePlan, live: &TablePlan) -> TablePlan {
+        let mut out = live.clone();
+        out.renames = deployed.renames.clone();
+        for f in &live.facts.columns {
+            let renamed = deployed
+                .facts
+                .columns
+                .iter()
+                .find(|d| f.attnum > 0 && d.attnum == f.attnum && d.name != f.name);
+            if let Some(d) = renamed {
+                let r = ColumnRename {
+                    from: d.name.clone(),
+                    to: f.name.clone(),
+                };
+                if !out.renames.contains(&r) {
+                    out.renames.push(r);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// `plan`, read fresh from the source, as it replaces `deployed`: each table keeps the renames
+/// already approved and records the columns renamed since (by table OID and `attnum`).
+pub fn carry_renames(plan: &mut Plan, deployed: &Plan) {
+    for t in &mut plan.tables {
+        if let Some(d) = deployed
+            .tables
+            .iter()
+            .find(|d| d.oid != 0 && d.oid == t.oid)
+        {
+            *t = TablePlan::succeeding(d, t);
+        }
     }
 }
 
@@ -157,6 +206,7 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
                     })
                     .collect(),
             },
+            renames: vec![],
         });
     }
     out

@@ -10,5 +10,5 @@ pub mod typemap;
 
 pub use mode::{LoadMode, ModeSettings};
 pub use model::{ForeignKey, SourceColumn, SourceTable, TypeKind, UpdateTrigger};
-pub use plan::{Plan, TablePlan, plan};
+pub use plan::{ColumnRename, Plan, TablePlan, carry_renames, plan};
 pub use typemap::{CompareRule, Lossiness, Mapping};

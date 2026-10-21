@@ -344,7 +344,7 @@ pub fn apply_auto(deployed: &Plan, live: &Plan, changes: &[Change]) -> Plan {
         let live_t = live.tables.iter().find(|t| qualified(t) == table);
         match live_t {
             Some(l) => match out.tables.iter_mut().find(|t| t.oid == l.oid) {
-                Some(slot) => *slot = l.clone(),
+                Some(slot) => *slot = TablePlan::succeeding(slot, l),
                 None => out.tables.push(l.clone()),
             },
             None => out.tables.retain(|t| qualified(t) != table), // an auto drop by policy
@@ -359,16 +359,16 @@ pub fn apply_auto(deployed: &Plan, live: &Plan, changes: &[Change]) -> Plan {
 /// removed, when the live plan no longer has it).
 pub fn with_table(base: &Plan, live: &Plan, table: &str) -> Plan {
     let mut out = base.clone();
-    let dep_oid = base
-        .tables
-        .iter()
-        .find(|t| qualified(t) == table)
-        .map(|t| t.oid);
+    let dep = base.tables.iter().find(|t| qualified(t) == table);
+    let dep_oid = dep.map(|t| t.oid);
     let live_t = live
         .tables
         .iter()
         .find(|t| Some(t.oid) == dep_oid || qualified(t) == table)
-        .cloned();
+        .map(|l| match dep {
+            Some(d) => TablePlan::succeeding(d, l),
+            None => l.clone(),
+        });
     out.tables
         .retain(|t| qualified(t) != table && Some(t.oid) != dep_oid);
     if let Some(l) = live_t {
@@ -415,8 +415,10 @@ pub fn proposal_markdown(id: &str, table: &str, changes: &[&Change], impact: &[S
     }
     s.push_str(
         "\n## After merging\n\nThe next `lakehouse sync` finds the deployed plan equal to the \
-         source for this table and resumes it. A dropped or renamed column's history stays in \
-         Iceberg's snapshots.\n",
+         source for this table and resumes it. A renamed column is renamed in bronze in place, \
+         so the rows already loaded keep their values; a dropped column's history stays in \
+         Iceberg's snapshots. To load a table again from scratch: \
+         `lakehouse reload --table <schema.table>`.\n",
     );
     s
 }
