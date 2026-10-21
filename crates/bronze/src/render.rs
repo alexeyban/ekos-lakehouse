@@ -400,6 +400,12 @@ mod tests {
         let b = files(&plan(&reversed, &settings()));
         assert_eq!(a, b, "input order must not change the output");
         assert!(a.contains_key("dagster/definitions.py"));
+        let dagster = &a["dagster/definitions.py"];
+        assert!(
+            dagster.contains(r#"groups("lakehouse", "bronze", "silver", "gold")"#)
+                && dagster.contains("def get_group_name"),
+            "the job must build approved gold marts, grouped by their folder"
+        );
         assert!(a.contains_key("bronze/public/film/deletes.sql"));
         assert!(
             !a.contains_key("bronze/public/actor/deletes.sql"),

@@ -277,6 +277,14 @@ if (DBT_DIR / "dbt_project.yml").exists():
             key = super().get_asset_key(dbt_resource_props)
             return key.with_prefix(PREFIX) if PREFIX else key
 
+        def get_group_name(self, dbt_resource_props):
+            # Gold marts arrive by proposal (RFC 0195) without `meta.dagster.group`: group them
+            # by their folder, so the job builds them — otherwise their reconciliation tests,
+            # selected through the silver models they also read, run against no gold schema.
+            if "gold" in (dbt_resource_props.get("fqn") or [])[1:-1]:
+                return "gold"
+            return super().get_group_name(dbt_resource_props)
+
     @dbt_assets(manifest=dbt_project.manifest_path, project=dbt_project,
                 dagster_dbt_translator=_Keys())
     def silver(context: dg.AssetExecutionContext, dbt: DbtCliResource):
@@ -319,7 +327,7 @@ assets.append(health)
 # Four loads at a time: the sandbox's measured best (RFC 0190 M0), and gentle on the source.
 bronze_job = dg.define_asset_job(
     "bronze",
-    selection=dg.AssetSelection.groups("lakehouse", "bronze", "silver"),
+    selection=dg.AssetSelection.groups("lakehouse", "bronze", "silver", "gold"),
     config={"execution": {"config": {"multiprocess": {"max_concurrent": 4}}}},
 )
 
