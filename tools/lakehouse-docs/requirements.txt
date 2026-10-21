@@ -1,0 +1,6 @@
+# Generator
+PyYAML>=6.0
+sqlglot>=25.0          # column-level lineage through silver and gold SQL
+# Publishers
+requests>=2.31
+Markdown>=3.5          # Markdown → Confluence storage format

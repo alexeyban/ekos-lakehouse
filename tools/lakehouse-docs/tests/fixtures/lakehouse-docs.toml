@@ -1,0 +1,41 @@
+# lakehouse-docs.toml — what only people know. Every key is optional: a missing text becomes a
+# manual section on the page (kept across regeneration) instead of an invented sentence.
+project = "Pagila rentals lakehouse"
+domain = "Retail / DVD rental"
+purpose = "Gives the retention and finance teams trusted monthly rental and revenue figures per customer, built from the Pagila OLTP database."
+scope = "Customers, films, inventory, rentals and payments of all stores."
+out-of-scope = "Staff and store operations data; real-time dashboards."
+source-system = "PostgreSQL (Pagila)"
+source-description = "The rental OLTP database used by the store front-ends. Owned by the store systems team."
+
+[[owners]]
+role = "Data owner"
+name = "Head of Retention"
+contact = "retention@example.com"
+
+[[owners]]
+role = "Technical owner"
+name = "Data platform team"
+contact = "#data-platform"
+
+[[consumers]]
+name = "Retention dashboard"
+uses = "gold.rentals_by_customer_month"
+notes = "Refreshed hourly"
+
+[glossary]
+"active customer" = "A customer with at least one rental in the last 90 days."
+"rental" = "One loan of one inventory item to one customer."
+
+[[environments]]
+name = "sandbox"
+purpose = "docker compose stack from ekos-lakehouse install"
+notes = "local only"
+
+[sla]
+"bronze freshness" = "≤ 2 h behind the source (late-after-minutes = 120)"
+"gold availability" = "07:00–20:00 CET, business days"
+
+# Generation switches
+er-max-tables = 40       # above this, the overview ER diagram shows keys only
+lineage-max-nodes = 120  # above this, the lineage flowchart groups by schema

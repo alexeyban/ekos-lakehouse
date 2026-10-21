@@ -1,0 +1,1341 @@
+{
+  "format": 3,
+  "settings": {
+    "source-catalog": "pagila",
+    "target-catalog": "iceberg",
+    "namespace-prefix": "bronze_",
+    "watermarks": {
+      "public.address": "last_update",
+      "public.city": "last_update",
+      "public.customer": "last_update",
+      "public.film": "last_update",
+      "public.inventory": "last_update",
+      "public.language": "last_update",
+      "public.rental": "last_update"
+    },
+    "full-refresh-max-rows": 5000000,
+    "bronze-schedule": "0 * * * *",
+    "maintenance-schedule": "0 3 * * *"
+  },
+  "tables": [
+    {
+      "schema": "public",
+      "table": "address",
+      "oid": 16430,
+      "namespace": "bronze_public",
+      "primary_key": [
+        "address_id"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "incremental",
+          "watermark": "last_update",
+          "keyset_deletes": true
+        },
+        "evidence": [
+          "last_update declared as the watermark in settings",
+          "trigger last_updated runs last_updated before every update and assigns NEW.last_update",
+          "last_updated body sha256 ab12",
+          "primary key (address_id) allows a key-set diff for deletes"
+        ],
+        "notes": []
+      },
+      "columns": [
+        {
+          "column": "address_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"address_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "address",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"address\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "district",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"district\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "city_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"city_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "postal_code",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"postal_code\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "phone",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"phone\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "last_update",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"last_update\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        }
+      ],
+      "facts": {
+        "foreign_keys": [
+          {
+            "name": "address_city_id_fkey",
+            "columns": [
+              "city_id"
+            ],
+            "ref_schema": "public",
+            "ref_table": "city",
+            "ref_columns": [
+              "city_id"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "address_id",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "address",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false,
+            "pii_candidate": "address"
+          },
+          {
+            "name": "district",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "city_id",
+            "attnum": 4,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "postal_code",
+            "attnum": 5,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "phone",
+            "attnum": 6,
+            "not_null": true,
+            "has_default": false,
+            "pii_candidate": "phone"
+          },
+          {
+            "name": "last_update",
+            "attnum": 7,
+            "not_null": true,
+            "has_default": true
+          }
+        ]
+      }
+    },
+    {
+      "schema": "public",
+      "table": "city",
+      "oid": 16420,
+      "namespace": "bronze_public",
+      "primary_key": [
+        "city_id"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "incremental",
+          "watermark": "last_update",
+          "keyset_deletes": true
+        },
+        "evidence": [
+          "last_update declared as the watermark in settings",
+          "trigger last_updated runs last_updated before every update and assigns NEW.last_update",
+          "last_updated body sha256 ab12",
+          "primary key (city_id) allows a key-set diff for deletes"
+        ],
+        "notes": []
+      },
+      "columns": [
+        {
+          "column": "city_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"city_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "city",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"city\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "country_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"country_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "last_update",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"last_update\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        }
+      ],
+      "facts": {
+        "columns": [
+          {
+            "name": "city_id",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "city",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "country_id",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "last_update",
+            "attnum": 4,
+            "not_null": true,
+            "has_default": true
+          }
+        ]
+      }
+    },
+    {
+      "schema": "public",
+      "table": "customer",
+      "oid": 16440,
+      "namespace": "bronze_public",
+      "primary_key": [
+        "customer_id"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "incremental",
+          "watermark": "last_update",
+          "keyset_deletes": true
+        },
+        "evidence": [
+          "last_update declared as the watermark in settings",
+          "trigger last_updated runs last_updated before every update and assigns NEW.last_update",
+          "last_updated body sha256 ab12",
+          "primary key (customer_id) allows a key-set diff for deletes"
+        ],
+        "notes": []
+      },
+      "columns": [
+        {
+          "column": "customer_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"customer_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "store_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"store_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "first_name",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"first_name\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "last_name",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"last_name\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "email",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"email\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "address_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"address_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "activebool",
+          "pg_type": "boolean",
+          "trino_type": "boolean",
+          "iceberg_type": "boolean",
+          "expr": "\"activebool\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "bool"
+          }
+        },
+        {
+          "column": "create_date",
+          "pg_type": "date",
+          "trino_type": "date",
+          "iceberg_type": "date",
+          "expr": "\"create_date\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "date"
+          }
+        },
+        {
+          "column": "last_update",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"last_update\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        },
+        {
+          "column": "active",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"active\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        }
+      ],
+      "facts": {
+        "comment": "Customers who have rented at least once",
+        "foreign_keys": [
+          {
+            "name": "customer_address_id_fkey",
+            "columns": [
+              "address_id"
+            ],
+            "ref_schema": "public",
+            "ref_table": "address",
+            "ref_columns": [
+              "address_id"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "customer_id",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "store_id",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "first_name",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": false,
+            "pii_candidate": "person_name"
+          },
+          {
+            "name": "last_name",
+            "attnum": 4,
+            "not_null": true,
+            "has_default": false,
+            "pii_candidate": "person_name"
+          },
+          {
+            "name": "email",
+            "attnum": 5,
+            "not_null": false,
+            "has_default": false,
+            "pii_candidate": "email"
+          },
+          {
+            "name": "address_id",
+            "attnum": 6,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "activebool",
+            "attnum": 7,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "create_date",
+            "attnum": 8,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "last_update",
+            "attnum": 9,
+            "not_null": true,
+            "has_default": true
+          },
+          {
+            "name": "active",
+            "attnum": 10,
+            "not_null": false,
+            "has_default": false
+          }
+        ]
+      }
+    },
+    {
+      "schema": "public",
+      "table": "film",
+      "oid": 16410,
+      "namespace": "bronze_public",
+      "primary_key": [
+        "film_id"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "incremental",
+          "watermark": "last_update",
+          "keyset_deletes": true
+        },
+        "evidence": [
+          "last_update declared as the watermark in settings",
+          "trigger last_updated runs last_updated before every update and assigns NEW.last_update",
+          "last_updated body sha256 ab12",
+          "primary key (film_id) allows a key-set diff for deletes"
+        ],
+        "notes": []
+      },
+      "columns": [
+        {
+          "column": "film_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"film_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "title",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"title\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "description",
+          "pg_type": "text",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"description\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "release_year",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"release_year\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "language_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"language_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "rental_duration",
+          "pg_type": "smallint",
+          "trino_type": "smallint",
+          "iceberg_type": "integer",
+          "expr": "CAST(\"rental_duration\" AS integer)",
+          "lossiness": "widening",
+          "rule": "int-widen",
+          "rationale": "Iceberg has no smallint",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "rental_rate",
+          "pg_type": "numeric(4,2)",
+          "trino_type": "decimal(4,2)",
+          "iceberg_type": "decimal(4,2)",
+          "expr": "\"rental_rate\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "decimal",
+            "scale": 2
+          }
+        },
+        {
+          "column": "length",
+          "pg_type": "smallint",
+          "trino_type": "smallint",
+          "iceberg_type": "integer",
+          "expr": "CAST(\"length\" AS integer)",
+          "lossiness": "widening",
+          "rule": "int-widen",
+          "rationale": "Iceberg has no smallint",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "rating",
+          "pg_type": "mpaa_rating",
+          "trino_type": "varchar",
+          "iceberg_type": "varchar",
+          "expr": "\"rating\"",
+          "lossiness": "exact",
+          "rule": "enum-label",
+          "rationale": "an enum's labels are its values",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "last_update",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"last_update\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        }
+      ],
+      "facts": {
+        "comment": "Every film in the rental catalogue",
+        "foreign_keys": [
+          {
+            "name": "film_language_id_fkey",
+            "columns": [
+              "language_id"
+            ],
+            "ref_schema": "public",
+            "ref_table": "language",
+            "ref_columns": [
+              "language_id"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "film_id",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": true
+          },
+          {
+            "name": "title",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false,
+            "comment": "Film title as shown in the catalogue"
+          },
+          {
+            "name": "description",
+            "attnum": 3,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "release_year",
+            "attnum": 4,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "language_id",
+            "attnum": 5,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "rental_duration",
+            "attnum": 6,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "rental_rate",
+            "attnum": 7,
+            "not_null": true,
+            "has_default": false,
+            "comment": "Price for one rental period"
+          },
+          {
+            "name": "length",
+            "attnum": 8,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "rating",
+            "attnum": 9,
+            "not_null": false,
+            "has_default": false,
+            "enum_labels": [
+              "G",
+              "PG",
+              "PG-13",
+              "R",
+              "NC-17"
+            ]
+          },
+          {
+            "name": "last_update",
+            "attnum": 10,
+            "not_null": true,
+            "has_default": true
+          }
+        ]
+      }
+    },
+    {
+      "schema": "public",
+      "table": "inventory",
+      "oid": 16450,
+      "namespace": "bronze_public",
+      "primary_key": [
+        "inventory_id"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "incremental",
+          "watermark": "last_update",
+          "keyset_deletes": true
+        },
+        "evidence": [
+          "last_update declared as the watermark in settings",
+          "trigger last_updated runs last_updated before every update and assigns NEW.last_update",
+          "last_updated body sha256 ab12",
+          "primary key (inventory_id) allows a key-set diff for deletes"
+        ],
+        "notes": []
+      },
+      "columns": [
+        {
+          "column": "inventory_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"inventory_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "film_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"film_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "store_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"store_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "last_update",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"last_update\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        }
+      ],
+      "facts": {
+        "foreign_keys": [
+          {
+            "name": "inventory_film_id_fkey",
+            "columns": [
+              "film_id"
+            ],
+            "ref_schema": "public",
+            "ref_table": "film",
+            "ref_columns": [
+              "film_id"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "inventory_id",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "film_id",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "store_id",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "last_update",
+            "attnum": 4,
+            "not_null": true,
+            "has_default": true
+          }
+        ]
+      }
+    },
+    {
+      "schema": "public",
+      "table": "language",
+      "oid": 16400,
+      "namespace": "bronze_public",
+      "primary_key": [
+        "language_id"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "incremental",
+          "watermark": "last_update",
+          "keyset_deletes": true
+        },
+        "evidence": [
+          "last_update declared as the watermark in settings",
+          "trigger last_updated runs last_updated before every update and assigns NEW.last_update",
+          "last_updated body sha256 ab12",
+          "primary key (language_id) allows a key-set diff for deletes"
+        ],
+        "notes": []
+      },
+      "columns": [
+        {
+          "column": "language_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"language_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "name",
+          "pg_type": "character(20)",
+          "trino_type": "char(20)",
+          "iceberg_type": "varchar",
+          "expr": "CAST(\"name\" AS varchar)",
+          "lossiness": "exact",
+          "rule": "char-padded",
+          "rationale": "char(n) landed as varchar with its padding",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "last_update",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"last_update\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        }
+      ],
+      "facts": {
+        "comment": "Languages films are available in",
+        "columns": [
+          {
+            "name": "language_id",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": true
+          },
+          {
+            "name": "name",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "last_update",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": true
+          }
+        ]
+      }
+    },
+    {
+      "schema": "public",
+      "table": "payment",
+      "oid": 16470,
+      "namespace": "bronze_public",
+      "primary_key": [
+        "payment_id"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "full"
+        },
+        "evidence": [
+          "about 16049 rows"
+        ],
+        "notes": []
+      },
+      "columns": [
+        {
+          "column": "payment_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"payment_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "customer_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"customer_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "staff_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"staff_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "rental_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"rental_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "amount",
+          "pg_type": "numeric(5,2)",
+          "trino_type": "decimal(5,2)",
+          "iceberg_type": "decimal(5,2)",
+          "expr": "\"amount\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "decimal",
+            "scale": 2
+          }
+        },
+        {
+          "column": "payment_date",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"payment_date\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        }
+      ],
+      "facts": {
+        "comment": "Payments against rentals",
+        "foreign_keys": [
+          {
+            "name": "payment_customer_id_fkey",
+            "columns": [
+              "customer_id"
+            ],
+            "ref_schema": "public",
+            "ref_table": "customer",
+            "ref_columns": [
+              "customer_id"
+            ]
+          },
+          {
+            "name": "payment_rental_id_fkey",
+            "columns": [
+              "rental_id"
+            ],
+            "ref_schema": "public",
+            "ref_table": "rental",
+            "ref_columns": [
+              "rental_id"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "payment_id",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "customer_id",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "staff_id",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "rental_id",
+            "attnum": 4,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "amount",
+            "attnum": 5,
+            "not_null": true,
+            "has_default": false,
+            "comment": "Amount paid, in USD"
+          },
+          {
+            "name": "payment_date",
+            "attnum": 6,
+            "not_null": true,
+            "has_default": false
+          }
+        ]
+      }
+    },
+    {
+      "schema": "public",
+      "table": "rental",
+      "oid": 16460,
+      "namespace": "bronze_public",
+      "primary_key": [
+        "rental_id"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "incremental",
+          "watermark": "last_update",
+          "keyset_deletes": true
+        },
+        "evidence": [
+          "last_update declared as the watermark in settings",
+          "trigger last_updated runs last_updated before every update and assigns NEW.last_update",
+          "last_updated body sha256 ab12",
+          "primary key (rental_id) allows a key-set diff for deletes"
+        ],
+        "notes": []
+      },
+      "columns": [
+        {
+          "column": "rental_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"rental_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "rental_date",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"rental_date\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        },
+        {
+          "column": "inventory_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"inventory_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "customer_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"customer_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "return_date",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"return_date\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        },
+        {
+          "column": "staff_id",
+          "pg_type": "integer",
+          "trino_type": "integer",
+          "iceberg_type": "integer",
+          "expr": "\"staff_id\"",
+          "lossiness": "exact",
+          "rule": "same",
+          "rationale": "the same type",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "last_update",
+          "pg_type": "timestamp with time zone",
+          "trino_type": "timestamp(6) with time zone",
+          "iceberg_type": "timestamp(6) with time zone",
+          "expr": "CAST(\"last_update\" AS timestamp(6) with time zone)",
+          "lossiness": "exact",
+          "rule": "timestamptz",
+          "rationale": "an instant, at microseconds",
+          "compare": {
+            "rule": "timestamp_utc"
+          }
+        }
+      ],
+      "facts": {
+        "comment": "One row per rental of one inventory item",
+        "foreign_keys": [
+          {
+            "name": "rental_inventory_id_fkey",
+            "columns": [
+              "inventory_id"
+            ],
+            "ref_schema": "public",
+            "ref_table": "inventory",
+            "ref_columns": [
+              "inventory_id"
+            ]
+          },
+          {
+            "name": "rental_customer_id_fkey",
+            "columns": [
+              "customer_id"
+            ],
+            "ref_schema": "public",
+            "ref_table": "customer",
+            "ref_columns": [
+              "customer_id"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "rental_id",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "rental_date",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "inventory_id",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "customer_id",
+            "attnum": 4,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "return_date",
+            "attnum": 5,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "staff_id",
+            "attnum": 6,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "last_update",
+            "attnum": 7,
+            "not_null": true,
+            "has_default": true
+          }
+        ]
+      }
+    }
+  ],
+  "refused": []
+}

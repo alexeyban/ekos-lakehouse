@@ -1,0 +1,174 @@
+[
+ {
+  "table": "public.address",
+  "tiers": [
+   {
+    "tier": "V1 counts",
+    "divergences": []
+   },
+   {
+    "tier": "V2 bucket hashes",
+    "divergences": []
+   },
+   {
+    "tier": "V3 row hashes",
+    "divergences": []
+   }
+  ],
+  "not_compared": [],
+  "control_fired": true,
+  "control_detail": "planted 1 row in bucket 7",
+  "verdict": "green"
+ },
+ {
+  "table": "public.city",
+  "tiers": [
+   {
+    "tier": "V1 counts",
+    "divergences": []
+   },
+   {
+    "tier": "V2 bucket hashes",
+    "divergences": []
+   },
+   {
+    "tier": "V3 row hashes",
+    "divergences": []
+   }
+  ],
+  "not_compared": [],
+  "control_fired": true,
+  "control_detail": "planted 1 row in bucket 7",
+  "verdict": "green"
+ },
+ {
+  "table": "public.customer",
+  "tiers": [
+   {
+    "tier": "V1 counts",
+    "divergences": []
+   },
+   {
+    "tier": "V2 bucket hashes",
+    "divergences": []
+   },
+   {
+    "tier": "V3 row hashes",
+    "divergences": []
+   }
+  ],
+  "not_compared": [],
+  "control_fired": true,
+  "control_detail": "planted 1 row in bucket 7",
+  "verdict": "green"
+ },
+ {
+  "table": "public.film",
+  "tiers": [
+   {
+    "tier": "V1 counts",
+    "divergences": []
+   },
+   {
+    "tier": "V2 bucket hashes",
+    "divergences": []
+   },
+   {
+    "tier": "V3 row hashes",
+    "divergences": []
+   }
+  ],
+  "not_compared": [
+   "film.fulltext"
+  ],
+  "control_fired": true,
+  "control_detail": "planted 1 row in bucket 7",
+  "verdict": "green"
+ },
+ {
+  "table": "public.inventory",
+  "tiers": [
+   {
+    "tier": "V1 counts",
+    "divergences": []
+   },
+   {
+    "tier": "V2 bucket hashes",
+    "divergences": []
+   },
+   {
+    "tier": "V3 row hashes",
+    "divergences": []
+   }
+  ],
+  "not_compared": [],
+  "control_fired": true,
+  "control_detail": "planted 1 row in bucket 7",
+  "verdict": "green"
+ },
+ {
+  "table": "public.language",
+  "tiers": [
+   {
+    "tier": "V1 counts",
+    "divergences": []
+   },
+   {
+    "tier": "V2 bucket hashes",
+    "divergences": []
+   },
+   {
+    "tier": "V3 row hashes",
+    "divergences": []
+   }
+  ],
+  "not_compared": [],
+  "control_fired": true,
+  "control_detail": "planted 1 row in bucket 7",
+  "verdict": "green"
+ },
+ {
+  "table": "public.payment",
+  "tiers": [
+   {
+    "tier": "V1 counts",
+    "divergences": [
+     "source 16049 rows, bronze 16048"
+    ]
+   },
+   {
+    "tier": "V2 bucket hashes",
+    "divergences": []
+   },
+   {
+    "tier": "V3 row hashes",
+    "divergences": []
+   }
+  ],
+  "not_compared": [],
+  "control_fired": true,
+  "control_detail": "planted 1 row in bucket 7",
+  "verdict": "diverged"
+ },
+ {
+  "table": "public.rental",
+  "tiers": [
+   {
+    "tier": "V1 counts",
+    "divergences": []
+   },
+   {
+    "tier": "V2 bucket hashes",
+    "divergences": []
+   },
+   {
+    "tier": "V3 row hashes",
+    "divergences": []
+   }
+  ],
+  "not_compared": [],
+  "control_fired": false,
+  "control_detail": "planted 1 row in bucket 7",
+  "verdict": "unverified"
+ }
+]

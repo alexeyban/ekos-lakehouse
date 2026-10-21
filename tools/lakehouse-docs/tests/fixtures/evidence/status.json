@@ -1,0 +1,333 @@
+[
+ {
+  "table": "public.address",
+  "layer": "bronze",
+  "state": "healthy",
+  "evidence": [
+   "last run ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590106,
+  "last_run": {
+   "table": "public.address",
+   "layer": "bronze",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590106,
+   "rows": 100,
+   "duration_ms": 2100,
+   "message": null
+  }
+ },
+ {
+  "table": "public.address",
+  "layer": "silver",
+  "state": "healthy",
+  "evidence": [
+   "dbt build ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590206,
+  "last_run": {
+   "table": "public.address",
+   "layer": "silver",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590206,
+   "rows": null,
+   "duration_ms": 900,
+   "message": null
+  }
+ },
+ {
+  "table": "public.city",
+  "layer": "bronze",
+  "state": "healthy",
+  "evidence": [
+   "last run ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590106,
+  "last_run": {
+   "table": "public.city",
+   "layer": "bronze",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590106,
+   "rows": 100,
+   "duration_ms": 2100,
+   "message": null
+  }
+ },
+ {
+  "table": "public.city",
+  "layer": "silver",
+  "state": "healthy",
+  "evidence": [
+   "dbt build ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590206,
+  "last_run": {
+   "table": "public.city",
+   "layer": "silver",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590206,
+   "rows": null,
+   "duration_ms": 900,
+   "message": null
+  }
+ },
+ {
+  "table": "public.customer",
+  "layer": "bronze",
+  "state": "healthy",
+  "evidence": [
+   "last run ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590106,
+  "last_run": {
+   "table": "public.customer",
+   "layer": "bronze",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590106,
+   "rows": 100,
+   "duration_ms": 2100,
+   "message": null
+  }
+ },
+ {
+  "table": "public.customer",
+  "layer": "silver",
+  "state": "schema_pending",
+  "evidence": [
+   "proposal ekos/change/public.customer/c-7781 open"
+  ],
+  "cause": null,
+  "last_success_at": 1792590206,
+  "last_run": {
+   "table": "public.customer",
+   "layer": "silver",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590206,
+   "rows": null,
+   "duration_ms": 900,
+   "message": null
+  }
+ },
+ {
+  "table": "public.film",
+  "layer": "bronze",
+  "state": "healthy",
+  "evidence": [
+   "last run ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590106,
+  "last_run": {
+   "table": "public.film",
+   "layer": "bronze",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590106,
+   "rows": 100,
+   "duration_ms": 2100,
+   "message": null
+  }
+ },
+ {
+  "table": "public.film",
+  "layer": "silver",
+  "state": "healthy",
+  "evidence": [
+   "dbt build ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590206,
+  "last_run": {
+   "table": "public.film",
+   "layer": "silver",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590206,
+   "rows": null,
+   "duration_ms": 900,
+   "message": null
+  }
+ },
+ {
+  "table": "public.inventory",
+  "layer": "bronze",
+  "state": "healthy",
+  "evidence": [
+   "last run ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590106,
+  "last_run": {
+   "table": "public.inventory",
+   "layer": "bronze",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590106,
+   "rows": 100,
+   "duration_ms": 2100,
+   "message": null
+  }
+ },
+ {
+  "table": "public.inventory",
+  "layer": "silver",
+  "state": "healthy",
+  "evidence": [
+   "dbt build ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590206,
+  "last_run": {
+   "table": "public.inventory",
+   "layer": "silver",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590206,
+   "rows": null,
+   "duration_ms": 900,
+   "message": null
+  }
+ },
+ {
+  "table": "public.language",
+  "layer": "bronze",
+  "state": "healthy",
+  "evidence": [
+   "last run ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590106,
+  "last_run": {
+   "table": "public.language",
+   "layer": "bronze",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590106,
+   "rows": 100,
+   "duration_ms": 2100,
+   "message": null
+  }
+ },
+ {
+  "table": "public.language",
+  "layer": "silver",
+  "state": "healthy",
+  "evidence": [
+   "dbt build ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590206,
+  "last_run": {
+   "table": "public.language",
+   "layer": "silver",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590206,
+   "rows": null,
+   "duration_ms": 900,
+   "message": null
+  }
+ },
+ {
+  "table": "public.payment",
+  "layer": "bronze",
+  "state": "healthy",
+  "evidence": [
+   "last run ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590106,
+  "last_run": {
+   "table": "public.payment",
+   "layer": "bronze",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590106,
+   "rows": 100,
+   "duration_ms": 2100,
+   "message": null
+  }
+ },
+ {
+  "table": "public.payment",
+  "layer": "silver",
+  "state": "healthy",
+  "evidence": [
+   "dbt build ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590206,
+  "last_run": {
+   "table": "public.payment",
+   "layer": "silver",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590206,
+   "rows": null,
+   "duration_ms": 900,
+   "message": null
+  }
+ },
+ {
+  "table": "public.rental",
+  "layer": "bronze",
+  "state": "unverified",
+  "evidence": [
+   "reconciliation: control missed in run r-118"
+  ],
+  "cause": null,
+  "last_success_at": 1792590106,
+  "last_run": {
+   "table": "public.rental",
+   "layer": "bronze",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590106,
+   "rows": 100,
+   "duration_ms": 2100,
+   "message": null
+  }
+ },
+ {
+  "table": "public.rental",
+  "layer": "silver",
+  "state": "healthy",
+  "evidence": [
+   "dbt build ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590206,
+  "last_run": {
+   "table": "public.rental",
+   "layer": "silver",
+   "run_id": "r-118",
+   "ok": true,
+   "at": 1792590206,
+   "rows": null,
+   "duration_ms": 900,
+   "message": null
+  }
+ },
+ {
+  "table": "gold.rentals_by_customer_month",
+  "layer": "gold",
+  "state": "healthy",
+  "evidence": [
+   "dbt build ok"
+  ],
+  "cause": null,
+  "last_success_at": 1792590306,
+  "last_run": null
+ }
+]

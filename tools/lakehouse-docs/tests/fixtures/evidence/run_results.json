@@ -1,0 +1,153 @@
+{
+ "metadata": {
+  "dbt_version": "1.9.0"
+ },
+ "results": [
+  {
+   "unique_id": "model.ekos_lakehouse.public__address",
+   "status": "success",
+   "execution_time": 1.2,
+   "failures": null,
+   "message": "CREATE TABLE",
+   "adapter_response": {
+    "rows_affected": 100
+   }
+  },
+  {
+   "unique_id": "model.ekos_lakehouse.public__city",
+   "status": "success",
+   "execution_time": 1.2,
+   "failures": null,
+   "message": "CREATE TABLE",
+   "adapter_response": {
+    "rows_affected": 100
+   }
+  },
+  {
+   "unique_id": "model.ekos_lakehouse.public__customer",
+   "status": "success",
+   "execution_time": 1.2,
+   "failures": null,
+   "message": "CREATE TABLE",
+   "adapter_response": {
+    "rows_affected": 100
+   }
+  },
+  {
+   "unique_id": "model.ekos_lakehouse.public__film",
+   "status": "success",
+   "execution_time": 1.2,
+   "failures": null,
+   "message": "CREATE TABLE",
+   "adapter_response": {
+    "rows_affected": 100
+   }
+  },
+  {
+   "unique_id": "model.ekos_lakehouse.public__inventory",
+   "status": "success",
+   "execution_time": 1.2,
+   "failures": null,
+   "message": "CREATE TABLE",
+   "adapter_response": {
+    "rows_affected": 100
+   }
+  },
+  {
+   "unique_id": "model.ekos_lakehouse.public__language",
+   "status": "success",
+   "execution_time": 1.2,
+   "failures": null,
+   "message": "CREATE TABLE",
+   "adapter_response": {
+    "rows_affected": 100
+   }
+  },
+  {
+   "unique_id": "model.ekos_lakehouse.public__payment",
+   "status": "success",
+   "execution_time": 1.2,
+   "failures": null,
+   "message": "CREATE TABLE",
+   "adapter_response": {
+    "rows_affected": 100
+   }
+  },
+  {
+   "unique_id": "model.ekos_lakehouse.public__rental",
+   "status": "success",
+   "execution_time": 1.2,
+   "failures": null,
+   "message": "CREATE TABLE",
+   "adapter_response": {
+    "rows_affected": 100
+   }
+  },
+  {
+   "unique_id": "model.ekos_lakehouse.gold__rentals_by_customer_month",
+   "status": "success",
+   "execution_time": 1.2,
+   "failures": null,
+   "message": "CREATE TABLE",
+   "adapter_response": {
+    "rows_affected": 100
+   }
+  },
+  {
+   "unique_id": "test.ekos_lakehouse.not_null_public__customer_customer_id.a1b2c3",
+   "status": "pass",
+   "execution_time": 0.3,
+   "failures": 0,
+   "message": null
+  },
+  {
+   "unique_id": "test.ekos_lakehouse.unique_public__customer_customer_id.a1b2c3",
+   "status": "pass",
+   "execution_time": 0.3,
+   "failures": 0,
+   "message": null
+  },
+  {
+   "unique_id": "test.ekos_lakehouse.relationships_public__customer_address_id__address_id__ref_public__address_.a1b2c3",
+   "status": "pass",
+   "execution_time": 0.3,
+   "failures": 0,
+   "message": null
+  },
+  {
+   "unique_id": "test.ekos_lakehouse.not_null_public__film_title.a1b2c3",
+   "status": "pass",
+   "execution_time": 0.3,
+   "failures": 0,
+   "message": null
+  },
+  {
+   "unique_id": "test.ekos_lakehouse.accepted_values_public__film_rating__G__PG__PG_13__R__NC_17.a1b2c3",
+   "status": "pass",
+   "execution_time": 0.3,
+   "failures": 0,
+   "message": null
+  },
+  {
+   "unique_id": "test.ekos_lakehouse.relationships_public__payment_rental_id__rental_id__ref_public__rental_.a1b2c3",
+   "status": "fail",
+   "execution_time": 0.3,
+   "failures": 1,
+   "message": "Got 1 result, configured to fail if != 0"
+  },
+  {
+   "unique_id": "test.ekos_lakehouse.unique_public__payment_payment_id.a1b2c3",
+   "status": "pass",
+   "execution_time": 0.3,
+   "failures": 0,
+   "message": null
+  },
+  {
+   "unique_id": "test.ekos_lakehouse.reconcile_rentals_by_customer_month_revenue.a1b2c3",
+   "status": "pass",
+   "execution_time": 0.3,
+   "failures": 0,
+   "message": null
+  }
+ ]
+}
