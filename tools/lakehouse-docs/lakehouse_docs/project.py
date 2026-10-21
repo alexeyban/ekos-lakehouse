@@ -329,7 +329,10 @@ def _load_lock(root: Path) -> tuple[dict[str, Any], list[SourceTable], list[Refu
     refused = [
         Refused(f"{r['schema']}.{r['table']}", r.get("reasons", [])) for r in lock.get("refused", [])
     ]
-    return lock.get("settings", {}), tables, refused, lock.get("format", 0)
+    # The lock writes settings in kebab-case (`source-catalog`, `bronze-schedule`); pages read them
+    # as Python names.
+    settings = {k.replace("-", "_"): v for k, v in (lock.get("settings") or {}).items()}
+    return settings, tables, refused, lock.get("format", 0)
 
 
 _REF = re.compile(r"\{\{\s*ref\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\}\}")

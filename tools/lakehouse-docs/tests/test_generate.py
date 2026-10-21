@@ -108,3 +108,14 @@ def test_without_evidence_quality_pages_say_so(pipeline, tmp_path):
     res = generate(pipeline, out, tmp_path / "none", None)
     assert "No run evidence collected yet" in (out / "quality/index.md").read_text()
     assert any("no run evidence" in w for w in res.warnings)
+
+
+def test_plan_settings_reach_the_pages(docs):
+    # The lock's settings are kebab-case; every page that names them must show the values.
+    home = (docs / "index.md").read_text()
+    assert "| Source catalog (Trino) | `pagila` |" in home, home
+    assert "| Target catalog (Iceberg) | `iceberg` |" in home
+    runbook = (docs / "operations/runbook.md").read_text()
+    assert "| Bronze loads | `0 * * * *` |" in runbook, runbook
+    assert "| Iceberg maintenance | `0 3 * * *` |" in runbook
+    assert "namespace `bronze_<schema>`" in (docs / "architecture/index.md").read_text()
