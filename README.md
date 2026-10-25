@@ -192,6 +192,27 @@ than 38 digits are refused with the reason. Reconciliation reads Oracle directly
 watermark is proven by a `BEFORE … FOR EACH ROW` update trigger that assigns `:NEW.<column>`; without one a table
 loads in full.
 
+### Incremental loads and deletes from write behaviour
+
+When EKOS has compiled the application's code (RFC 0212 write-behaviour facts), name the column the application sets
+on every write:
+
+```toml
+[extensions.lakehouse]
+application-watermark = "UPDATED"
+mass-delete-percent   = 5        # default; and mass-delete-rows = 10000
+delete-audit-days     = 7        # default
+[extensions.lakehouse.purge-policy]
+"ADEMPIERE.AD_PINSTANCE_LOG" = "propagate"   # default for a purge-only table: retain
+```
+
+A table loads incrementally on it when the code always sets it (update class `po_only` or `raw_sql_sets_updated`)
+and the table has a primary key. Its deletes are then found by `lakehouse deletes --table T`, which the orchestrator
+runs after each load: key buckets compared on both sides, keys read only where a bucket differs, tombstones in bronze,
+counts in the ledger. When more than the guard's share of keys vanishes at once nothing is applied and the run fails
+until `lakehouse deletes --table T --accept`. Tables the code never hard-deletes are audited every `delete-audit-days`
+instead of every run.
+
 ## Try it on the sandbox
 
 ```bash

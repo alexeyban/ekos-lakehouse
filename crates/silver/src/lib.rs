@@ -120,7 +120,13 @@ pub fn model_sql(t: &TablePlan, s: &SilverSettings, report: &mut SilverReport) -
             format!(
                 "{source},\n\nlatest as (\n    select\n        *,\n        row_number() over (\n            \
                  partition by {key}\n            order by \"_ekos_loaded_at\" desc\n        ) as \"_ekos_rn\"\n    \
-                 from bronze\n)\n\nselect\n{select}\nfrom latest\nwhere \"_ekos_rn\" = 1 and \"_ekos_op\" != 'delete'\n"
+                 from bronze{retained}\n)\n\nselect\n{select}\nfrom latest\nwhere \"_ekos_rn\" = 1 and \"_ekos_op\" != 'delete'\n",
+                // Purged rows the policy keeps: their last real version stays current here.
+                retained = if ekos_lakehouse_bronze::render::retains_purges(t) {
+                    "\n    where \"_ekos_op\" != 'purge'"
+                } else {
+                    ""
+                }
             )
         }
         // No key: a re-read row cannot be told from its earlier copy except by its values.

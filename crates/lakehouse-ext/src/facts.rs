@@ -339,3 +339,94 @@ pub fn translations(store: &dyn KnowledgeStore) -> anyhow::Result<Vec<serde_json
     out.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     Ok(out.into_iter().map(|(_, v)| v).collect())
 }
+
+/// EKOS's `WriteBehaviour` kind (RFC 0212).
+pub const WRITE_BEHAVIOUR_KIND: &str = "WriteBehaviour";
+
+/// The latest write-behaviour facts per table, keyed `OWNER.TABLE` as the catalog spells them
+/// (RFC 0225 §2.1). Only live tables (`origin: live`) have an owner the source schema matches.
+pub fn write_facts(
+    store: &dyn ekos_ledger::KnowledgeReader,
+) -> anyhow::Result<std::collections::BTreeMap<String, ekos_lakehouse_bronze::WriteFacts>> {
+    let mut latest: std::collections::BTreeMap<String, (i64, ekos_lakehouse_bronze::WriteFacts)> =
+        Default::default();
+    for o in store.all_objects()? {
+        if o.kind != ObjectKind::Custom(WRITE_BEHAVIOUR_KIND.into()) {
+            continue;
+        }
+        let text = |k: &str| o.properties.get(k).and_then(|v| v.as_str());
+        let (Some(owner), Some(table), Some(update)) =
+            (text("owner"), text("table"), text("update_class"))
+        else {
+            continue;
+        };
+        let facts = ekos_lakehouse_bronze::WriteFacts {
+            update_class: update.to_string(),
+            delete_classes: o
+                .properties
+                .get("delete_classes")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            change_log: text("change_log").map(str::to_string),
+        };
+        let at = o.created_at.timestamp_micros();
+        let key = format!("{owner}.{table}");
+        if latest.get(&key).is_none_or(|(t, _)| at >= *t) {
+            latest.insert(key, (at, facts));
+        }
+    }
+    Ok(latest.into_iter().map(|(k, (_, f))| (k, f)).collect())
+}
+
+/// The facts a plan uses: none unless `application-watermark` is set (reading the ledger costs a
+/// full pass over its objects, which a PostgreSQL plan does not need).
+pub fn plan_facts(
+    s: &crate::settings::Settings,
+    ctx: &ekos::extension::CommandContext,
+) -> anyhow::Result<std::collections::BTreeMap<String, ekos_lakehouse_bronze::WriteFacts>> {
+    if s.application_watermark.is_none() {
+        return Ok(Default::default());
+    }
+    let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd).map_err(|e| {
+        anyhow::anyhow!(
+            "application-watermark needs EKOS's write-behaviour facts: run `ekos commit` with a \
+             [[databases]] entry first ({e})"
+        )
+    })?;
+    let facts = write_facts(store.as_ref())?;
+    if facts.is_empty() {
+        eprintln!(
+            "note: the ledger holds no write-behaviour facts; every table is planned without them"
+        );
+    }
+    Ok(facts)
+}
+
+/// One delete check (RFC 0225 §2.4): counts, method, guard and times — never a key value.
+pub fn record_delete_check(
+    store: &dyn KnowledgeStore,
+    c: &crate::deletes::Check,
+) -> anyhow::Result<KirId> {
+    with_context(store, &c.run, "deletes", || {
+        let mut obj = KirObject::new(
+            format!("{} deletes {}", c.table, c.run),
+            ObjectKind::Custom(METRIC_KIND.into()),
+        );
+        obj.id = metric_id(&c.table, &c.run, "deletes");
+        obj.properties.insert("table".into(), json!(c.table));
+        obj.properties.insert("run_id".into(), json!(c.run));
+        obj.properties.insert("metric".into(), json!("deletes"));
+        if let serde_json::Value::Object(m) = serde_json::to_value(c)? {
+            for (k, v) in m {
+                obj.properties.entry(k).or_insert(v);
+            }
+        }
+        store.append_object(&obj)?;
+        Ok(obj.id)
+    })
+}

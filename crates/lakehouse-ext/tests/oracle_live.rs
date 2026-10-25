@@ -325,3 +325,235 @@ fn idempiere_plans_lands_and_reconciles() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+
+/// SQL as the schema owner, through the testbed container's SQL*Plus: the source user cannot
+/// write, by design. Only rows this test planted (ids above 9,000,000) are touched.
+fn as_owner(sql: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("docker")
+        .args([
+            "exec",
+            "-i",
+            "ekos-oracle-xe-1",
+            "sqlplus",
+            "-s",
+            "-L",
+            "adempiere/adempiere@localhost:1521/XEPDB1",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("WHENEVER SQLERROR EXIT FAILURE\n{sql}\nCOMMIT;\nEXIT\n").as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{sql}\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+fn plant(from: u32, to: u32) {
+    as_owner(&format!(
+        "INSERT INTO AD_MESSAGE (AD_MESSAGE_ID, AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, CREATED, \
+         CREATEDBY, UPDATED, UPDATEDBY, VALUE, MSGTEXT, MSGTYPE, ENTITYTYPE, AD_MESSAGE_UU) \
+         SELECT 9000000 + LEVEL, 0, 0, 'Y', SYSDATE, 100, SYSDATE, 100, 'EKOS_TEST_' || LEVEL, \
+         'planted by the RFC 0225 live test', 'I', 'U', 'ekos-test-' || LEVEL FROM dual \
+         WHERE LEVEL >= {from} CONNECT BY LEVEL <= {to};"
+    ));
+}
+
+fn unplant(range: &str) {
+    as_owner(&format!(
+        "DELETE FROM AD_MESSAGE WHERE AD_MESSAGE_ID > 9000000 AND {range};"
+    ));
+}
+
+/// An incremental run as the orchestrator does it: create, watermark, load.
+fn incremental(admin: &Client, t: &TablePlan, plan: &Plan, run: &str) {
+    let s = &plan.settings;
+    for stmt in render::statements(&render::create_sql(t, s).unwrap()) {
+        admin.execute(&stmt).unwrap();
+    }
+    let q = render::statements(&render::watermark_sql(t, s).unwrap()).remove(0);
+    let r = admin.execute(&q).unwrap();
+    let text = r.rows[0][0].as_str().map(str::to_string);
+    let ty = &t
+        .columns
+        .iter()
+        .find(|m| m.column == "UPDATED")
+        .unwrap()
+        .iceberg_type;
+    let wm = render::watermark_literal(text.as_deref(), ty);
+    for stmt in render::statements(&render::fill(&render::load_sql(t, s), run, "", &wm)) {
+        admin
+            .execute(&stmt)
+            .unwrap_or_else(|e| panic!("{e}\n{stmt}"));
+    }
+}
+
+/// `lakehouse deletes` without the CLI around it: find, guard, tombstone. Returns what was found
+/// and whether the guard stopped it.
+fn deletes(
+    admin: &Client,
+    t: &TablePlan,
+    plan: &Plan,
+    run: &str,
+    accept: bool,
+) -> (usize, Option<String>) {
+    use ekos_lakehouse_ext::deletes;
+    let target = TrinoReader::new(settings().trino_connection().unwrap()).unwrap();
+    let f = deletes::find(t, &plan.settings, oracle().reader(), &target).unwrap();
+    let guard = if accept {
+        None
+    } else {
+        deletes::guard(f.deleted.len(), f.bronze_keys, 5, 10_000)
+    };
+    eprintln!(
+        "deletes {run}: {} of {} buckets differ, {} found, {} unloaded, guard {guard:?}",
+        f.differing.len(),
+        f.buckets,
+        f.deleted.len(),
+        f.unloaded
+    );
+    if guard.is_none() {
+        let op = if render::retains_purges(t) {
+            "purge"
+        } else {
+            "delete"
+        };
+        for sql in deletes::tombstone_statements(t, &plan.settings, op, &f.deleted).unwrap() {
+            for stmt in render::statements(&render::fill(&sql, run, "", "NULL")) {
+                admin.execute(&stmt).unwrap();
+            }
+        }
+    }
+    (f.deleted.len(), guard)
+}
+
+fn green(t: &TablePlan, plan: &Plan) -> bool {
+    let target = TrinoReader::new(settings().trino_connection().unwrap()).unwrap();
+    let r = reconcile(t, &plan.settings, oracle().reader(), &target).unwrap();
+    eprintln!("reconcile: {:?} control={:?}", r.verdict, r.control_fired);
+    r.verdict == Verdict::Green && r.control_fired == Some(true)
+}
+
+fn message_plan(prefix: &str, classes: &[&str]) -> (Plan, TablePlan) {
+    let mut s = settings();
+    s.namespace_prefix = Some(prefix.into());
+    s.application_watermark = Some("UPDATED".into());
+    let facts = std::collections::BTreeMap::from([(
+        "ADEMPIERE.AD_MESSAGE".to_string(),
+        ekos_lakehouse_bronze::WriteFacts {
+            update_class: "po_only".into(),
+            delete_classes: classes.iter().map(|c| c.to_string()).collect(),
+            change_log: None,
+        },
+    )]);
+    let plan =
+        ekos_lakehouse_ext::plan_cmd::build_plan_with(&s, &Default::default(), &facts).unwrap();
+    let t = plan
+        .tables
+        .iter()
+        .find(|t| t.table == "AD_MESSAGE")
+        .unwrap()
+        .clone();
+    (plan, t)
+}
+
+/// RFC 0225 Phase 3: hard deletes with no marker, found by the bucketed key diff. The classes
+/// are the testbed's own for `AD_MESSAGE` (`po_only`, `deleted_by_users`); the purge path is
+/// driven by declaring the table purged.
+#[test]
+fn idempiere_deletes_are_found_guarded_and_tombstoned() {
+    if !live() {
+        eprintln!("skipped: set EKOS_LAKEHOUSE_LIVE=1 EKOS_ORACLE_LIVE=1 with the testbed up");
+        return;
+    }
+    unplant("1 = 1");
+    plant(1, 150);
+    let (plan, t) = message_plan("bronze_o225_", &["deleted_by_users"]);
+    let dp = t.decision.deletes.clone().expect("a delete plan");
+    assert_eq!(dp.kind, "delete");
+    assert!(matches!(
+        t.decision.mode,
+        ekos_lakehouse_bronze::LoadMode::Incremental { .. }
+    ));
+    let admin = Client::new(settings().trino_connection().unwrap()).unwrap();
+    admin
+        .execute(&render::statements(&render::namespace_sql(&t.namespace, &plan.settings))[0])
+        .unwrap();
+    admin
+        .execute(&format!(
+            "DROP TABLE IF EXISTS {}",
+            render::target(&t, &plan.settings)
+        ))
+        .unwrap();
+    incremental(&admin, &t, &plan, "o225-1");
+    assert!(green(&t, &plan), "first load");
+
+    // A single delete.
+    unplant("AD_MESSAGE_ID = 9000002");
+    incremental(&admin, &t, &plan, "o225-2");
+    assert_eq!(deletes(&admin, &t, &plan, "o225-2", false), (1, None));
+    assert!(green(&t, &plan), "after a single delete");
+
+    // Delete, then the same key again: a new version.
+    unplant("AD_MESSAGE_ID = 9000001");
+    incremental(&admin, &t, &plan, "o225-3");
+    assert_eq!(deletes(&admin, &t, &plan, "o225-3", false), (1, None));
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    plant(1, 1);
+    incremental(&admin, &t, &plan, "o225-4");
+    assert_eq!(deletes(&admin, &t, &plan, "o225-4", false), (0, None));
+    assert!(green(&t, &plan), "after delete + re-insert");
+
+    // A mass delete: the guard stops it, nothing is applied, until a person accepts it.
+    unplant("AD_MESSAGE_ID BETWEEN 9000003 AND 9000150");
+    incremental(&admin, &t, &plan, "o225-5");
+    let (found, guard) = deletes(&admin, &t, &plan, "o225-5", false);
+    assert_eq!(found, 148);
+    assert!(
+        guard.as_deref().unwrap_or("").contains("148 of"),
+        "{guard:?}"
+    );
+    assert!(
+        !green(&t, &plan),
+        "the guard applied nothing, so bronze still has the rows"
+    );
+    assert_eq!(deletes(&admin, &t, &plan, "o225-5", true), (148, None));
+    assert!(green(&t, &plan), "after the accepted mass delete");
+
+    // A purge, retained: it leaves bronze's current state as `purge`, history keeps the rows.
+    let (pplan, pt) = message_plan("bronze_o225p_", &["purged"]);
+    assert!(render::retains_purges(&pt));
+    admin
+        .execute(&render::statements(&render::namespace_sql(&pt.namespace, &pplan.settings))[0])
+        .unwrap();
+    admin
+        .execute(&format!(
+            "DROP TABLE IF EXISTS {}",
+            render::target(&pt, &pplan.settings)
+        ))
+        .unwrap();
+    plant(201, 203);
+    incremental(&admin, &pt, &pplan, "o225p-1");
+    unplant("AD_MESSAGE_ID = 9000201");
+    incremental(&admin, &pt, &pplan, "o225p-2");
+    assert_eq!(deletes(&admin, &pt, &pplan, "o225p-2", false), (1, None));
+    assert!(green(&pt, &pplan), "after a retained purge");
+    let purged = admin
+        .execute(&format!(
+            "SELECT count(*) FROM {} WHERE \"_ekos_op\" = 'purge'",
+            render::target(&pt, &pplan.settings)
+        ))
+        .unwrap();
+    assert_eq!(purged.rows[0][0].as_i64(), Some(1));
+
+    unplant("1 = 1");
+}

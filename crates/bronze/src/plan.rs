@@ -1,10 +1,11 @@
 //! The plan: every table's landing, mode and mappings, with the evidence (RFC 0192 §5). Written
 //! to the pipeline repository as `lakehouse.lock.json`, it is also M3's "last deployed snapshot".
 
-use crate::mode::{ModeDecision, ModeSettings, choose_for};
-use crate::model::{SourceEngine, SourceTable};
+use crate::mode::{ModeDecision, ModeSettings, choose_with};
+use crate::model::{SourceEngine, SourceTable, WriteFacts};
 use crate::typemap::{Lossiness, Mapping, map_column};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
@@ -161,6 +162,15 @@ pub const FORMAT: u32 = 3;
 /// Every table's plan, sorted by (schema, table). A table with any refused column is refused
 /// whole: bronze never drops a column.
 pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
+    plan_with(sources, settings, &BTreeMap::new())
+}
+
+/// [`plan`], with EKOS's write-behaviour facts by `schema.table` (RFC 0225).
+pub fn plan_with(
+    sources: &[SourceTable],
+    settings: &PlanSettings,
+    facts: &BTreeMap<String, WriteFacts>,
+) -> Plan {
     let mut sorted: Vec<&SourceTable> = sources.iter().collect();
     sorted.sort_by(|a, b| (&a.schema, &a.name).cmp(&(&b.schema, &b.name)));
     let mut out = Plan {
@@ -198,7 +208,12 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
             oid: t.oid,
             namespace: format!("{}{}", settings.namespace_prefix, t.schema),
             primary_key: t.primary_key.clone(),
-            decision: choose_for(t, &settings.modes, settings.source_engine),
+            decision: choose_with(
+                t,
+                &settings.modes,
+                settings.source_engine,
+                facts.get(&t.qualified()),
+            ),
             columns,
             facts: TableFacts {
                 comment: t.comment.clone(),

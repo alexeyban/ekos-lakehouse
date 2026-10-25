@@ -211,6 +211,16 @@ def _make_asset(table):
                         result = _run(cur, stmt)
                         if result and isinstance(result[0][0], int):
                             written += result[0][0]
+            if table["decision"].get("deletes") and not reload:
+                # RFC 0225: a bucketed key diff against the source; the mass-delete guard stops a
+                # run whose deletes need a person.
+                found = _ekos("lakehouse", "deletes", "--table", qualified, "--run-id", run_id)
+                context.log.info(found.stdout + found.stderr)
+                if found.returncode != 0:
+                    raise dg.Failure(
+                        description=f"{qualified}: deletes need the operator",
+                        metadata={"deletes": dg.MetadataValue.text(found.stdout + found.stderr)},
+                    )
             snap = _run(
                 cur,
                 f'SELECT CAST(snapshot_id AS varchar) FROM {target.rsplit(".", 1)[0]}.'

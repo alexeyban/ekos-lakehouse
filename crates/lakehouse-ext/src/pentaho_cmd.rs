@@ -168,8 +168,7 @@ pub fn summary(name: &str, path: &Path, package: &Package) -> Value {
 /// `lakehouse pentaho scan`.
 pub fn scan(settings: &Settings, ctx: &CommandContext<'_>, as_json: bool) -> anyhow::Result<()> {
     let redaction = ctx.config.redaction_config();
-    let repo = ctx
-        .cwd
+    let repo = crate::settings::pipeline_base(ctx.cwd, ctx.config_path)
         .join(settings.pipeline_dir.as_deref().unwrap_or("pipeline"));
     let rows: Vec<Value> = packages(settings, ctx)
         .iter()

@@ -6,6 +6,7 @@
 
 pub mod check;
 pub mod console;
+pub mod deletes;
 pub mod doctor;
 pub mod facts;
 pub mod gold_cmd;
@@ -209,6 +210,36 @@ impl EkosExtension for LakehouseExtension {
                                 .long("json")
                                 .action(clap::ArgAction::SetTrue)
                                 .help("Machine-readable output"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("deletes")
+                        .about(
+                            "Find rows deleted at the source by a bucketed key diff, tombstone them \
+                                in bronze, record the counts (RFC 0225)",
+                        )
+                        .arg(
+                            clap::Arg::new("table")
+                                .long("table")
+                                .required(true)
+                                .help("schema.table"),
+                        )
+                        .arg(
+                            clap::Arg::new("run-id")
+                                .long("run-id")
+                                .help("The orchestrator's run id (default: manual-<time>)"),
+                        )
+                        .arg(
+                            clap::Arg::new("accept")
+                                .long("accept")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Apply what the mass-delete guard stopped: a person knows why"),
+                        )
+                        .arg(
+                            clap::Arg::new("force")
+                                .long("force")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Check now, even when an audited table is not due"),
                         ),
                 )
                 .subcommand(
@@ -518,6 +549,9 @@ impl EkosExtension for LakehouseExtension {
             // Reads the source and bronze, writes facts to the project's ledger.
             ("lakehouse reconcile", Class::External, false),
             ("lakehouse run-report", Class::Write, false),
+            // Reads the source, writes tombstones to bronze; `--accept` overrides the mass-delete
+            // guard, a person's decision.
+            ("lakehouse deletes", Class::Admin, false),
             ("lakehouse status", Class::Read, false),
             ("lakehouse tables", Class::Read, false),
             ("lakehouse install", Class::Local, false),
@@ -563,9 +597,10 @@ impl EkosExtension for LakehouseExtension {
             }
             Some(("plan", m)) => {
                 let settings = settings::load(ctx.config)?;
+                let wf = facts::plan_facts(&settings, ctx)?;
                 let plan = {
                     let redaction = ctx.config.redaction_config();
-                    off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?
+                    off_runtime(|| plan_cmd::build_plan_with(&settings, &redaction, &wf))?
                 };
                 if m.get_flag("json") {
                     println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -585,7 +620,9 @@ impl EkosExtension for LakehouseExtension {
                     plan_cmd::read_lock(&out)?
                 } else {
                     let redaction = ctx.config.redaction_config();
-                    let mut plan = off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?;
+                    let wf = facts::plan_facts(&settings, ctx)?;
+                    let mut plan =
+                        off_runtime(|| plan_cmd::build_plan_with(&settings, &redaction, &wf))?;
                     // Over a deployed plan: keep its approved renames, and rename in place what
                     // the source renamed since, rather than add an empty column.
                     if let Ok(deployed) = plan_cmd::read_lock(&out) {
@@ -607,6 +644,7 @@ impl EkosExtension for LakehouseExtension {
                 println!("wrote {n} files under {}", out.display());
                 Ok(())
             }
+            Some(("deletes", m)) => deletes_cmd(ctx, m),
             Some(("reconcile", m)) => {
                 let settings = settings::load(ctx.config)?;
                 let plan = plan_cmd::read_lock(&pipeline_dir(&settings, ctx))?;
@@ -700,9 +738,10 @@ impl EkosExtension for LakehouseExtension {
                 let settings = settings::load(ctx.config)?;
                 workflow::gate(&settings, ctx)?;
                 let repo = pipeline_dir(&settings, ctx);
+                let wf = facts::plan_facts(&settings, ctx)?;
                 let live = {
                     let redaction = ctx.config.redaction_config();
-                    off_runtime(|| plan_cmd::build_plan(&settings, &redaction))?
+                    off_runtime(|| plan_cmd::build_plan_with(&settings, &redaction, &wf))?
                 };
                 let run = format!(
                     "sync-{}",
@@ -1085,9 +1124,120 @@ impl EkosExtension for LakehouseExtension {
     }
 }
 
+/// `lakehouse deletes` (RFC 0225 §2.4).
+fn deletes_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result<()> {
+    use ekos_lakehouse_bronze::Cadence;
+    let settings = settings::load(ctx.config)?;
+    let plan = plan_cmd::read_lock(&pipeline_dir(&settings, ctx))?;
+    let name = m.get_one::<String>("table").expect("required");
+    let t = plan
+        .tables
+        .iter()
+        .find(|t| &format!("{}.{}", t.schema, t.table) == name)
+        .ok_or_else(|| anyhow::anyhow!("{name} is not in the deployed plan"))?;
+    let Some(dp) = &t.decision.deletes else {
+        anyhow::bail!(
+            "{name} has no delete plan: it loads in full (deletes leave with the replacement) or \
+             its generated deletes.sql finds them"
+        );
+    };
+    let now = chrono::Utc::now();
+    let run = m
+        .get_one::<String>("run-id")
+        .cloned()
+        .unwrap_or_else(|| format!("manual-{}", now.timestamp()));
+    let state_path = ctx.config.ekos_dir(ctx.cwd).join("lakehouse/deletes.json");
+    let mut state = deletes::read_state(&state_path);
+    let last = state.get(name).cloned();
+    if let Cadence::Audit { days } = dp.cadence
+        && !m.get_flag("force")
+        && !deletes::due(last.as_deref(), days, now)
+    {
+        println!(
+            "{name}: audit not due (last checked {}, every {days} days)",
+            last.unwrap_or_default()
+        );
+        return Ok(());
+    }
+    // A retained purge leaves bronze's current state as `purge`; a propagated one as `delete`.
+    let op = if dp.kind == "purge"
+        && dp.purge_policy == Some(ekos_lakehouse_bronze::PurgePolicy::Retain)
+    {
+        "purge"
+    } else {
+        "delete"
+    };
+    let found = off_runtime(|| {
+        let src = plan_cmd::connect_source(&settings, &format!("lakehouse-{run}"))?;
+        let tgt = ekos_lakehouse_trino::TrinoReader::new(settings.trino_connection()?)?;
+        deletes::find(t, &plan.settings, src.reader(), &tgt)
+    })?;
+    let mut check = deletes::Check {
+        table: name.clone(),
+        run: run.clone(),
+        method: dp.method.clone(),
+        kind: dp.kind.clone(),
+        buckets: found.buckets,
+        differing_buckets: found.differing.len(),
+        source_keys_read: found.source_keys_read,
+        bronze_keys_read: found.bronze_keys_read,
+        bronze_keys: found.bronze_keys,
+        found: found.deleted.len(),
+        applied: 0,
+        unloaded: found.unloaded,
+        guard: None,
+        contradicts_code: dp.contradicts_code && !found.deleted.is_empty(),
+        last_seen: last,
+        detected_at: now.to_rfc3339(),
+    };
+    if !m.get_flag("accept") {
+        check.guard = deletes::guard(
+            found.deleted.len(),
+            found.bronze_keys,
+            settings.mass_delete_percent.unwrap_or(5),
+            settings.mass_delete_rows.unwrap_or(10_000),
+        );
+    }
+    if check.guard.is_none() && !found.deleted.is_empty() {
+        let admin = ekos_lakehouse_trino::Client::new(settings.trino_connection()?)?;
+        for sql in deletes::tombstone_statements(t, &plan.settings, op, &found.deleted)? {
+            for stmt in ekos_lakehouse_bronze::render::statements(
+                &ekos_lakehouse_bronze::render::fill(&sql, &run, "", "NULL"),
+            ) {
+                admin.execute(&stmt)?;
+            }
+        }
+        check.applied = found.deleted.len();
+    }
+    let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+    facts::record_delete_check(store.as_ref(), &check)?;
+    println!(
+        "{name}: {} of {} buckets differ; {} {}(s) found, {} applied as {op}; {} key(s) not loaded yet{}",
+        check.differing_buckets,
+        check.buckets,
+        check.found,
+        check.kind,
+        check.applied,
+        check.unloaded,
+        if check.contradicts_code {
+            " — the code says this table is never hard-deleted"
+        } else {
+            ""
+        }
+    );
+    if let Some(why) = &check.guard {
+        anyhow::bail!(
+            "{name}: nothing applied, the deletes need the operator ({why}); when the cause is \
+             known: lakehouse deletes --table {name} --accept"
+        );
+    }
+    state.insert(name.clone(), check.detected_at.clone());
+    deletes::write_state(&state_path, &state)
+}
+
 /// The pipeline repository: `--out`, else `pipeline-dir` relative to the project.
 fn pipeline_dir(s: &settings::Settings, ctx: &CommandContext<'_>) -> std::path::PathBuf {
-    ctx.cwd
+    settings::pipeline_base(ctx.cwd, ctx.config_path)
         .join(s.pipeline_dir.as_deref().unwrap_or("pipeline"))
 }
 

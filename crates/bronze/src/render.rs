@@ -132,12 +132,27 @@ pub fn current_sql(t: &TablePlan, s: &PlanSettings) -> String {
             format!(
                 "SELECT {cols} FROM (SELECT *, row_number() OVER (PARTITION BY {} \
                  ORDER BY \"_ekos_loaded_at\" DESC) AS \"_ekos_rn\" FROM {}) \
-                 WHERE \"_ekos_rn\" = 1 AND \"_ekos_op\" <> 'delete'",
+                 WHERE \"_ekos_rn\" = 1 AND {}",
                 key.join(", "),
-                target(t, s)
+                target(t, s),
+                if retains_purges(t) {
+                    "\"_ekos_op\" NOT IN ('delete', 'purge')"
+                } else {
+                    "\"_ekos_op\" <> 'delete'"
+                }
             )
         }
     }
+}
+
+/// A table whose purges are kept in the lakehouse (RFC 0225): its purged rows are tombstoned
+/// with `_ekos_op = 'purge'`, which leaves bronze's current state (the source's mirror, what
+/// reconciliation compares) but not silver.
+pub fn retains_purges(t: &TablePlan) -> bool {
+    t.decision
+        .deletes
+        .as_ref()
+        .is_some_and(|d| d.purge_policy == Some(crate::mode::PurgePolicy::Retain))
 }
 
 /// For an incremental table with a key: a tombstone for every current key the source lacks.
@@ -159,6 +174,29 @@ pub fn deletes_sql(t: &TablePlan, s: &PlanSettings) -> Option<String> {
             format!("{expr} AS {}", ident(k))
         })
         .collect();
+    let join: Vec<String> = key.iter().map(|k| format!("s.{k} = b.{k}")).collect();
+    Some(tombstones(
+        t,
+        s,
+        "delete",
+        &format!(
+            "LEFT JOIN (SELECT {src_key} FROM {src}) AS s ON {join}\nWHERE s.{first} IS NULL\n",
+            src_key = src_key.join(", "),
+            src = source(t, s),
+            join = join.join(" AND "),
+            first = key[0],
+        ),
+    ))
+}
+
+/// RFC 0225: tombstones for the current rows `predicate` selects (over bronze's current state,
+/// aliased `b`), recorded as `op` (`delete` or `purge`). The key is kept; every other column is
+/// NULL.
+pub fn tombstones_where(t: &TablePlan, s: &PlanSettings, op: &str, predicate: &str) -> String {
+    tombstones(t, s, op, &format!("WHERE {predicate}\n"))
+}
+
+fn tombstones(t: &TablePlan, s: &PlanSettings, op: &str, tail: &str) -> String {
     let columns: Vec<String> = t
         .columns
         .iter()
@@ -170,20 +208,15 @@ pub fn deletes_sql(t: &TablePlan, s: &PlanSettings) -> Option<String> {
             }
         })
         .collect();
-    let join: Vec<String> = key.iter().map(|k| format!("s.{k} = b.{k}")).collect();
-    Some(format!(
+    format!(
         "{HEADER}INSERT INTO {tgt} ({insert})\nSELECT\n  {cols},\n  CAST(current_timestamp AS timestamp(6) with time zone),\n  \
-         CAST('{{{{run_id}}}}' AS varchar),\n  CAST('{{{{lsn}}}}' AS varchar),\n  CAST('delete' AS varchar)\n\
-         FROM ({current}) AS b\nLEFT JOIN (SELECT {src_key} FROM {src}) AS s ON {join}\nWHERE s.{first} IS NULL\n",
+         CAST('{{{{run_id}}}}' AS varchar),\n  CAST('{{{{lsn}}}}' AS varchar),\n  CAST('{op}' AS varchar)\n\
+         FROM ({current}) AS b\n{tail}",
         tgt = target(t, s),
         insert = insert_columns(t),
         cols = columns.join(",\n  "),
         current = current_sql(t, s),
-        src_key = src_key.join(", "),
-        src = source(t, s),
-        join = join.join(" AND "),
-        first = key[0],
-    ))
+    )
 }
 
 /// For an incremental table: its schema brought to the plan's, idempotently, before each load

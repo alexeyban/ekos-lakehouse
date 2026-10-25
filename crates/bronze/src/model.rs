@@ -95,6 +95,15 @@ pub struct UpdateTrigger {
     pub body_sha: String,
 }
 
+/// EKOS's write-behaviour facts for one table (RFC 0212), as the plan uses them (RFC 0225).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteFacts {
+    pub update_class: String,
+    pub delete_classes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_log: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceTable {
     pub schema: String,

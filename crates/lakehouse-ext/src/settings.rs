@@ -76,6 +76,19 @@ pub struct Settings {
     /// EKOS RFC 0213: `generate`, `sync` and `gold draft` refuse to run until every review
     /// subject of the source model has a valid sign-off. Default false.
     pub require_signoff: Option<bool>,
+    /// RFC 0225: the column the application sets on every write it makes (iDempiere `UPDATED`).
+    /// A table loads incrementally on it where EKOS's write-behaviour facts say the code keeps it.
+    pub application_watermark: Option<String>,
+    /// Tables smaller than this stay in full even with an application watermark. Default 0.
+    pub incremental_min_rows: Option<i64>,
+    /// Days between delete audits of tables the code never hard-deletes. Default 7.
+    pub delete_audit_days: Option<u32>,
+    /// `"schema.table" = "retain" | "propagate"` for tables only purged. Default `retain`.
+    pub purge_policy: std::collections::BTreeMap<String, ekos_lakehouse_bronze::PurgePolicy>,
+    /// The mass-delete guard (plan D9): more than this percentage of a table's keys, or more
+    /// than `mass-delete-rows` keys, vanishing in one check is not applied. Defaults 5 and 10,000.
+    pub mass_delete_percent: Option<u32>,
+    pub mass_delete_rows: Option<u64>,
     /// For `oracle`: the `[[databases]]` entry `source-database` names, filled in by [`load`].
     #[serde(skip)]
     pub database: Option<ekos_compiler_core::DatabaseConfig>,
@@ -102,6 +115,10 @@ impl Settings {
                 full_refresh_max_rows: self
                     .full_refresh_max_rows
                     .unwrap_or(d.modes.full_refresh_max_rows),
+                application_watermark: self.application_watermark.clone(),
+                incremental_min_rows: self.incremental_min_rows.unwrap_or(0),
+                delete_audit_days: self.delete_audit_days.unwrap_or(d.modes.delete_audit_days),
+                purge_policy: self.purge_policy.clone(),
             },
             bronze_schedule: self.bronze_schedule.clone().unwrap_or(d.bronze_schedule),
             maintenance_schedule: self
@@ -149,6 +166,26 @@ impl Settings {
             schema: None,
         })
     }
+}
+
+/// What a relative `pipeline-dir` is resolved against. The workspace, as before — except for an
+/// EKOS home project whose workspace is someone's source tree (no installer marker
+/// `.lakehouse/project.json` there): its pipeline goes beside its `ekos.toml` in the home, because
+/// a project run must leave the sources untouched (EKOS RFC 0178).
+pub fn pipeline_base(cwd: &std::path::Path, config_path: &std::path::Path) -> std::path::PathBuf {
+    let config_dir = config_path.parent().unwrap_or(cwd);
+    let home_project = !same_dir(config_dir, cwd);
+    if home_project && !cwd.join(".lakehouse/project.json").is_file() {
+        config_dir.to_path_buf()
+    } else {
+        cwd.to_path_buf()
+    }
+}
+
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a.as_os_str().is_empty()
+        || a == b
+        || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
 /// The project's settings; an absent table means nothing is configured yet. For an Oracle source,
@@ -215,6 +252,22 @@ user = "ekos_ro"
 password-env = "ERP_PW"
 owners = ["ADEMPIERE"]
 "#;
+
+    /// A home project's pipeline never lands in its sources (EKOS RFC 0178).
+    #[test]
+    fn a_home_projects_pipeline_is_kept_out_of_its_sources() {
+        let sources = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("ekos.toml");
+        assert_eq!(pipeline_base(sources.path(), &config), home.path());
+        // A project in its own directory, as before.
+        let local = sources.path().join("ekos.toml");
+        assert_eq!(pipeline_base(sources.path(), &local), sources.path());
+        // The installer's projects: the workspace is the pipeline's own directory.
+        std::fs::create_dir_all(sources.path().join(".lakehouse")).unwrap();
+        std::fs::write(sources.path().join(".lakehouse/project.json"), "{}").unwrap();
+        assert_eq!(pipeline_base(sources.path(), &config), sources.path());
+    }
 
     /// RFC 0216 §2.2: an Oracle source's connection is its [[databases]] entry.
     #[test]

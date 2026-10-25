@@ -45,7 +45,7 @@ pub struct Reconciliation {
     pub verdict: Verdict,
 }
 
-fn rule(c: CompareRule) -> ColumnRule {
+pub(crate) fn rule(c: CompareRule) -> ColumnRule {
     match c {
         CompareRule::Text => ColumnRule::Text,
         CompareRule::Bool => ColumnRule::Bool,
@@ -62,7 +62,7 @@ fn rule(c: CompareRule) -> ColumnRule {
 
 /// The key's canonical expression: its columns joined by the unit separator. Without a primary
 /// key, every compared column is the key — V3 then compares the rows as a multiset.
-fn key_expr(d: Dialect, cols: &[(String, ColumnRule)]) -> String {
+pub(crate) fn key_expr(d: Dialect, cols: &[(String, ColumnRule)]) -> String {
     let parts: Vec<String> = cols.iter().map(|(c, r)| canon_expr(d, c, *r)).collect();
     parts.join(" || chr(31) || ")
 }

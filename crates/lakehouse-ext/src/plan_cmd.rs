@@ -3,7 +3,7 @@
 use crate::settings::Settings;
 use crate::source;
 use ekos_lakehouse_bronze::plan::Plan;
-use ekos_lakehouse_bronze::{LoadMode, Lossiness, SourceEngine, plan, render};
+use ekos_lakehouse_bronze::{Cadence, LoadMode, Lossiness, SourceEngine, render};
 use std::path::Path;
 
 /// Read the source and plan bronze. Synchronous (the source and Trino clients both block): the
@@ -11,6 +11,15 @@ use std::path::Path;
 pub fn build_plan(
     s: &Settings,
     redaction: &ekos_common::redaction::RedactionConfig,
+) -> anyhow::Result<Plan> {
+    build_plan_with(s, redaction, &Default::default())
+}
+
+/// [`build_plan`] with EKOS's write-behaviour facts by `schema.table` (RFC 0225).
+pub fn build_plan_with(
+    s: &Settings,
+    redaction: &ekos_common::redaction::RedactionConfig,
+    facts: &std::collections::BTreeMap<String, ekos_lakehouse_bronze::WriteFacts>,
 ) -> anyhow::Result<Plan> {
     let src = connect_source(s, "lakehouse-plan")?;
     let trino = ekos_lakehouse_trino::TrinoReader::new(s.trino_connection()?)?;
@@ -22,7 +31,7 @@ pub fn build_plan(
         redaction,
         ps.modes.full_refresh_max_rows,
     )?;
-    Ok(plan(&sources, &ps))
+    Ok(ekos_lakehouse_bronze::plan_with(&sources, &ps, facts))
 }
 
 /// The source engine, connected read-only (RFC 0216 §2.1).
@@ -85,7 +94,14 @@ pub fn render_summary(p: &Plan) -> String {
                 keyset_deletes,
             } => format!(
                 "incremental by {watermark}{}",
-                if *keyset_deletes { " + deletes" } else { "" }
+                match (&t.decision.deletes, keyset_deletes) {
+                    (Some(d), _) => match d.cadence {
+                        Cadence::Run => format!(" + {}s", d.kind),
+                        Cadence::Audit { days } => format!(" + audit {days}d"),
+                    },
+                    (None, true) => " + deletes".to_string(),
+                    (None, false) => String::new(),
+                }
             ),
         };
         let count = |l: Lossiness| t.columns.iter().filter(|c| c.lossiness == l).count();
