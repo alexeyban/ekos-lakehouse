@@ -37,6 +37,7 @@ ekos-ledger           = { git = "https://github.com/alexeyban/EKOS", branch = "m
 ekos-semantic         = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-recovery         = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-pg-live          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-ora-live         = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-migrate          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 # The statement classifier (RFC 0160), used with Trino's grammar through `classify_with`.
 ekos-migrate-target-clickhouse = { git = "https://github.com/alexeyban/EKOS", branch = "main" }

@@ -7,7 +7,7 @@
 
 use ekos_lakehouse_bronze::plan::{PlanSettings, TablePlan};
 use ekos_lakehouse_bronze::typemap::ident;
-use ekos_lakehouse_bronze::{CompareRule, render};
+use ekos_lakehouse_bronze::{CompareRule, SourceEngine, render};
 use ekos_migrate_validate::dialect::{
     ColumnRule, Dialect, bucket_checksum_query, canon_expr, count_query,
 };
@@ -67,7 +67,16 @@ fn key_expr(d: Dialect, cols: &[(String, ColumnRule)]) -> String {
     parts.join(" || chr(31) || ")
 }
 
+/// The dialect a plan's source is read in (RFC 0216).
+pub fn source_dialect(s: &PlanSettings) -> Dialect {
+    match s.source_engine {
+        SourceEngine::Postgres => Dialect::Postgres,
+        SourceEngine::Oracle => Dialect::Oracle,
+    }
+}
+
 pub fn unit_plan(t: &TablePlan, s: &PlanSettings) -> (UnitPlan, Vec<String>) {
+    let src = source_dialect(s);
     let compared: Vec<(String, ColumnRule)> = t
         .columns
         .iter()
@@ -92,17 +101,19 @@ pub fn unit_plan(t: &TablePlan, s: &PlanSettings) -> (UnitPlan, Vec<String>) {
         unit: format!("{}.{}", t.schema, t.table),
         source_table: format!("{}.{}", ident(&t.schema), ident(&t.table)),
         target_table: format!("({}) AS t", render::current_sql(t, s)),
-        source_pk: key_expr(Dialect::Postgres, &key),
+        source_pk: key_expr(src, &key),
         target_pk: key_expr(Dialect::Trino, &key),
         source_columns: compared
             .iter()
-            .map(|(c, r)| canon_expr(Dialect::Postgres, c, *r))
+            .map(|(c, r)| canon_expr(src, c, *r))
             .collect(),
         target_columns: compared
             .iter()
             .map(|(c, r)| canon_expr(Dialect::Trino, c, *r))
             .collect(),
         buckets: 64,
+        // Oracle cannot build a row string past 4000 bytes (RFC 0216 §2.5).
+        digest_columns: src == Dialect::Oracle,
     };
     (unit, not_compared)
 }
@@ -200,6 +211,7 @@ pub fn reconcile(
                 source_columns: unit.source_columns.clone(),
                 target_columns,
                 buckets: unit.buckets,
+                digest_columns: unit.digest_columns,
             };
             match run_v3(&planted, source, target) {
                 Ok(o) => (
@@ -230,21 +242,22 @@ pub fn reconcile(
 /// both sides. They read aggregates only.
 pub fn evidence_queries(t: &TablePlan, s: &PlanSettings) -> Vec<String> {
     let (u, _) = unit_plan(t, s);
+    let src = source_dialect(s);
     vec![
-        count_query(Dialect::Postgres, &u.source_table),
+        count_query(src, &u.source_table),
         count_query(Dialect::Trino, &u.target_table),
         bucket_checksum_query(
-            Dialect::Postgres,
+            src,
             &u.source_table,
             &u.source_pk,
-            &u.source_columns,
+            &u.source_row(src),
             u.buckets,
         ),
         bucket_checksum_query(
             Dialect::Trino,
             &u.target_table,
             &u.target_pk,
-            &u.target_columns,
+            &u.target_row(Dialect::Trino),
             u.buckets,
         ),
     ]

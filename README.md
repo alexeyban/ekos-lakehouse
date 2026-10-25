@@ -1,6 +1,6 @@
 # EKOS Lakehouse
 
-Generated, maintained medallion pipelines from a PostgreSQL database into Apache Iceberg tables.
+Generated, maintained medallion pipelines from a PostgreSQL or Oracle database into Apache Iceberg tables.
 Trino is the engine, Polaris the REST catalog and any S3 store the storage (SeaweedFS in the
 sandbox); transforms are dbt-trino and
 the orchestrator is Dagster.
@@ -27,6 +27,8 @@ Pentaho (Kettle) packages are translated into silver and gold dbt models, every 
 exact, rewritten, llm-drafted or gap, JavaScript and Java steps included, proposed on a branch
 ([RFC 0200](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0200-pentaho-to-lakehouse-dbt.md);
 [docs/pentaho.md](docs/pentaho.md)).
+An Oracle database is a source too: catalog, type map and reconciliation behind one source-engine seam
+([RFC 0216](https://github.com/alexeyban/EKOS/blob/main/ekos/docs/rfcs/0216-lakehouse-source-engine-oracle.md)).
 
 ## Install
 
@@ -58,6 +60,9 @@ git clone https://github.com/alexeyban/EKOS ../EKOS
 cargo build
 ./target/debug/ekos-lakehouse --help
 ```
+
+Oracle sources need `cargo build --features oracle`: the driver compiles with a C compiler and loads
+Oracle Instant Client from `LD_LIBRARY_PATH` at run time.
 
 The binary is `ekos-lakehouse`, not `ekos`, so it never shadows a plain EKOS install. Every EKOS
 command works from it; the Lakehouse commands are under `ekos-lakehouse lakehouse …`.
@@ -157,6 +162,35 @@ history = ["public.customer"]            # SCD2 snapshot in silver
 The source's Trino catalog needs `postgresql.array-mapping=AS_ARRAY` and
 `unsupported-type-handling=CONVERT_TO_VARCHAR`: with the defaults the connector silently drops
 columns of types it does not map. A table whose column the connector does not expose is refused.
+
+### An Oracle source
+
+The connection is the project's `[[databases]]` entry, the one EKOS reads the catalog through (steps 1–3), so the
+password stays where the console's Sources page put it:
+
+```toml
+[[databases]]
+name = "erp"
+kind = "oracle"
+connect = "db-host:1521/ORCLPDB1"
+user = "ekos_ro"                     # read-only
+password-env = "ERP_DB_PASSWORD"
+owners = ["ADEMPIERE"]
+
+[extensions.lakehouse]
+source-engine   = "oracle"
+source-database = "erp"              # the [[databases]] entry
+source-catalog  = "erp"              # a Trino `oracle` catalog over the same database
+```
+
+The Trino catalog needs `unsupported-type-handling=CONVERT_TO_VARCHAR` (see
+`deploy/trino/catalog/idempiere.properties`). Names keep Oracle's case (`ADEMPIERE.C_ORDER`); Trino folds them. The
+type map: integer `NUMBER(p,0)` → `integer`/`bigint`, `NUMBER(p,s)` → `decimal(p,s)`, an unconstrained `NUMBER` →
+`decimal(38,s)` at the scale its data uses (scale 10 when it holds no values yet), `DATE` → `timestamp(6)` (it has a
+time), `CHAR` keeps its padding, LOBs land but are not compared, and `LONG`, `TIMESTAMP(p > 6)` and numbers wider
+than 38 digits are refused with the reason. Reconciliation reads Oracle directly and needs an AL32UTF8 database. A
+watermark is proven by a `BEFORE … FOR EACH ROW` update trigger that assigns `:NEW.<column>`; without one a table
+loads in full.
 
 ## Try it on the sandbox
 

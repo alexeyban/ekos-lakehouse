@@ -3,20 +3,19 @@
 use crate::settings::Settings;
 use crate::source;
 use ekos_lakehouse_bronze::plan::Plan;
-use ekos_lakehouse_bronze::{LoadMode, Lossiness, plan, render};
+use ekos_lakehouse_bronze::{LoadMode, Lossiness, SourceEngine, plan, render};
 use std::path::Path;
 
-/// Read the source and plan bronze. Synchronous (PostgreSQL and Trino clients both block): the
+/// Read the source and plan bronze. Synchronous (the source and Trino clients both block): the
 /// caller runs it off the async runtime.
 pub fn build_plan(
     s: &Settings,
     redaction: &ekos_common::redaction::RedactionConfig,
 ) -> anyhow::Result<Plan> {
-    let pg = connect_source(s, "lakehouse-plan")?;
+    let src = connect_source(s, "lakehouse-plan")?;
     let trino = ekos_lakehouse_trino::TrinoReader::new(s.trino_connection()?)?;
     let ps = s.plan_settings();
-    let sources = source::read(
-        &pg,
+    let sources = src.read_tables(
         &trino,
         &ps.source_catalog,
         &s.schemas(),
@@ -26,8 +25,25 @@ pub fn build_plan(
     Ok(plan(&sources, &ps))
 }
 
-/// The source, through EKOS's read-only session (RFC 0157).
-pub fn connect_source(s: &Settings, purpose: &str) -> anyhow::Result<ekos_pg_live::PgSource> {
+/// The source engine, connected read-only (RFC 0216 §2.1).
+pub fn connect_source(s: &Settings, purpose: &str) -> anyhow::Result<Box<dyn source::Source>> {
+    match s.engine() {
+        SourceEngine::Postgres => Ok(Box::new(source::Postgres(connect_postgres(s, purpose)?))),
+        SourceEngine::Oracle => {
+            let db = s.database.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "an Oracle source needs `source-database` naming a [[databases]] entry"
+                )
+            })?;
+            Ok(Box::new(crate::source_oracle::Oracle::connect(
+                db, purpose,
+            )?))
+        }
+    }
+}
+
+/// The PostgreSQL source, through EKOS's read-only session (RFC 0157).
+fn connect_postgres(s: &Settings, purpose: &str) -> anyhow::Result<ekos_pg_live::PgSource> {
     let (host, port) = s.source_host_port()?;
     let database = s
         .source_database

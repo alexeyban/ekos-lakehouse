@@ -83,7 +83,12 @@ pub async fn run(s: &Settings) -> Vec<Check> {
             Check::of("dagster", url.clone(), status_ok(&client, &url).await)
         }
     });
-    out.push(match &s.source {
+    // An Oracle source is reached at its [[databases]] entry's `host:port/service` (RFC 0216).
+    let addr = match &s.database {
+        Some(db) => Some(db.connect.split('/').next().unwrap_or_default().to_string()),
+        None => s.source.clone(),
+    };
+    out.push(match &addr {
         None => Check::not_configured("source", "source"),
         Some(addr) => Check::of("source", addr.clone(), tcp(addr).await),
     });
@@ -172,7 +177,7 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
                 s.source_database.as_deref().unwrap_or("?"),
                 ps.source_catalog
             );
-            match crate::source::read(pg, trino, &ps.source_catalog, &s.schemas(), redaction, 0) {
+            match pg.read_tables(trino, &ps.source_catalog, &s.schemas(), redaction, 0) {
                 Ok(tables) => {
                     let hidden: Vec<String> = tables
                         .iter()
@@ -191,10 +196,15 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
                             Ok(format!("the connector exposes all {n} columns of {} tables", tables.len()))
                         } else {
                             Err(format!(
-                                "the connector hides {} of {n} columns ({}…): set postgresql.array-mapping=AS_ARRAY \
-                                 and unsupported-type-handling=CONVERT_TO_VARCHAR on catalog {}",
+                                "the connector hides {} of {n} columns ({}…): set {}unsupported-type-handling=CONVERT_TO_VARCHAR \
+                                 on catalog {}",
                                 hidden.len(),
                                 hidden.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+                                if pg.engine() == ekos_lakehouse_bronze::SourceEngine::Postgres {
+                                    "postgresql.array-mapping=AS_ARRAY and "
+                                } else {
+                                    ""
+                                },
                                 ps.source_catalog
                             ))
                         },
@@ -202,15 +212,19 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
                 }
                 Err(e) => out.push(Check::of("columns", target, Err(e.to_string()))),
             }
-            out.push(match pg.check_write_refused() {
-                Ok(w) if w.is_safe() => Check::of("role", s.source_user.clone().unwrap_or_default(), Ok("the source refuses this role's writes".into())),
+            let user = match &s.database {
+                Some(db) => db.user.clone(),
+                None => s.source_user.clone().unwrap_or_default(),
+            };
+            out.push(match pg.writes_refused() {
+                Ok(true) => Check::of("role", user.clone(), Ok("the source refuses this role's writes".into())),
                 Ok(_) => Check {
                     service: "role",
-                    target: s.source_user.clone(),
+                    target: (!user.is_empty()).then(|| user.clone()),
                     status: Status::Warning,
                     detail: "this role can write to the source: EKOS only reads, but a read-only role is the guarantee".into(),
                 },
-                Err(e) => Check::of("role", s.source_user.clone().unwrap_or_default(), Err(e.to_string())),
+                Err(e) => Check::of("role", user.clone(), Err(e.to_string())),
             });
             let catalog = s.plan_settings().target_catalog;
             out.push(Check::of(

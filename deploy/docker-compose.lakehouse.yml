@@ -142,6 +142,8 @@ services:
       CLIENT_ID: root
       CLIENT_SECRET: ${EKOS_LH_POLARIS_SECRET:-polaris-local-only}
       PG_PASSWORD: ${EKOS_LH_PG_PASSWORD:-ekos-local-only}
+      # RFC 0216: the iDempiere/Oracle testbed's read-only user (trino/catalog/idempiere.properties).
+      ORA_PASSWORD: ${EKOS_ORACLE_PASSWORD:-ekos-ro-local-only}
     # RFC 0199: passwords of the sources `lakehouse install --source` added (one variable per
     # catalog, owner-readable file); absent for the sandbox alone.
     env_file:

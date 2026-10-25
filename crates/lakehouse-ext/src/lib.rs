@@ -16,6 +16,7 @@ pub mod plan_cmd;
 pub mod reconcile;
 pub mod settings;
 pub mod source;
+pub mod source_oracle;
 pub mod sync;
 pub mod workflow;
 
@@ -629,7 +630,7 @@ impl EkosExtension for LakehouseExtension {
                         if !wanted.is_empty() && !wanted.contains(&name) {
                             continue;
                         }
-                        let r = reconcile::reconcile(t, &plan.settings, &src, &tgt)?;
+                        let r = reconcile::reconcile(t, &plan.settings, src.reader(), &tgt)?;
                         out.push((r, reconcile::evidence_queries(t, &plan.settings)));
                     }
                     Ok(out)

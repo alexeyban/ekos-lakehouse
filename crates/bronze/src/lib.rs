@@ -7,8 +7,9 @@ pub mod model;
 pub mod plan;
 pub mod render;
 pub mod typemap;
+pub mod typemap_oracle;
 
 pub use mode::{LoadMode, ModeSettings};
-pub use model::{ForeignKey, SourceColumn, SourceTable, TypeKind, UpdateTrigger};
+pub use model::{ForeignKey, SourceColumn, SourceEngine, SourceTable, TypeKind, UpdateTrigger};
 pub use plan::{ColumnRename, Plan, TablePlan, carry_renames, plan};
 pub use typemap::{CompareRule, Lossiness, Mapping};

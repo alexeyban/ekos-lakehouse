@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# RFC 0216: Oracle as a source. The driver (rust-oracle) compiles with a C compiler and loads
+# Oracle Instant Client at run time; without the feature an Oracle source reports that the
+# driver was not built.
+oracle = ["ekos-ora-live/oracle"]
+
 [dependencies]
 ekos.workspace = true
 ekos-common.workspace = true
@@ -28,6 +34,7 @@ ekos-semantic.workspace = true
 ekos-migrate.workspace = true
 ekos-migrate-validate.workspace = true
 ekos-pg-live.workspace = true
+ekos-ora-live.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true

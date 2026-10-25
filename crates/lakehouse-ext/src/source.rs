@@ -1,10 +1,70 @@
-//! Source facts for the bronze plan (RFC 0192 §1): PostgreSQL's own catalog, read through EKOS's
-//! read-only session (RFC 0157), and the Trino connector's column list for the same tables.
+//! Source facts for the bronze plan (RFC 0192 §1): the source engine's own catalog, read through
+//! EKOS's read-only session (RFC 0157 for PostgreSQL, RFC 0211 for Oracle), and the Trino
+//! connector's column list for the same tables. RFC 0216: each engine is a [`Source`].
 
-use ekos_lakehouse_bronze::{SourceColumn, SourceTable, TypeKind, UpdateTrigger};
+use ekos_lakehouse_bronze::{SourceColumn, SourceEngine, SourceTable, TypeKind, UpdateTrigger};
 use ekos_lakehouse_trino::TrinoReader;
+use ekos_migrate_validate::EngineReader;
 use ekos_pg_live::catalog::CatalogSource;
 use std::collections::BTreeMap;
+
+/// A connected source engine (RFC 0216 §2.1).
+pub trait Source {
+    fn engine(&self) -> SourceEngine;
+
+    /// Base tables of `schemas` with columns, keys, foreign keys, update triggers, comments and
+    /// the connector's column types, measured where the type map needs a measurement (only
+    /// tables of at most `max_measured_rows` rows, except PostgreSQL's numerics).
+    fn read_tables(
+        &self,
+        trino: &TrinoReader,
+        trino_catalog: &str,
+        schemas: &[String],
+        redaction: &ekos_common::redaction::RedactionConfig,
+        max_measured_rows: i64,
+    ) -> anyhow::Result<Vec<SourceTable>>;
+
+    /// The source side of a reconciliation (RFC 0156): read-only, in the engine's dialect.
+    fn reader(&self) -> &dyn EngineReader;
+
+    /// `true` when the server refuses this session's writes, as it must.
+    fn writes_refused(&self) -> anyhow::Result<bool>;
+}
+
+/// PostgreSQL, through `ekos-pg-live`'s session.
+pub struct Postgres(pub ekos_pg_live::PgSource);
+
+impl Source for Postgres {
+    fn engine(&self) -> SourceEngine {
+        SourceEngine::Postgres
+    }
+
+    fn read_tables(
+        &self,
+        trino: &TrinoReader,
+        trino_catalog: &str,
+        schemas: &[String],
+        redaction: &ekos_common::redaction::RedactionConfig,
+        max_measured_rows: i64,
+    ) -> anyhow::Result<Vec<SourceTable>> {
+        read(
+            &self.0,
+            trino,
+            trino_catalog,
+            schemas,
+            redaction,
+            max_measured_rows,
+        )
+    }
+
+    fn reader(&self) -> &dyn EngineReader {
+        &self.0
+    }
+
+    fn writes_refused(&self) -> anyhow::Result<bool> {
+        Ok(self.0.check_write_refused()?.is_safe())
+    }
+}
 
 fn lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -247,7 +307,9 @@ fn measure_numeric(
 }
 
 /// Columns a PL/pgSQL body assigns as `NEW.<col> := …` or `NEW.<col> = …` at the start of a
-/// statement. A comparison (`IF NEW.x = OLD.x`) is not an assignment: what precedes it decides.
+/// statement — or a PL/SQL body as `:NEW.<col> := …` (RFC 0216). A comparison
+/// (`IF NEW.x = OLD.x`) is not an assignment: what precedes it decides. Names come back
+/// lower-cased.
 pub fn assigned_new_columns(body: &str) -> Vec<String> {
     let lower = body.to_ascii_lowercase();
     let b = lower.as_bytes();
@@ -256,11 +318,17 @@ pub fn assigned_new_columns(body: &str) -> Vec<String> {
     while let Some(pos) = lower[i..].find("new.") {
         let at = i + pos;
         i = at + 4;
-        if at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_') {
+        // PL/SQL's bind-style `:NEW`: the colon belongs to the reference.
+        let start = if at > 0 && b[at - 1] == b':' {
+            at - 1
+        } else {
+            at
+        };
+        if start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_') {
             continue;
         }
         // What precedes: start, `;`, or a block keyword.
-        let before = lower[..at].trim_end();
+        let before = lower[..start].trim_end();
         let starts_statement = before.is_empty()
             || before.ends_with(';')
             || ["begin", "then", "else", "loop"].iter().any(|k| {
@@ -297,6 +365,13 @@ mod tests {
     fn pagila_last_updated_assigns_last_update() {
         let body = "\nBEGIN\n    NEW.last_update = CURRENT_TIMESTAMP;\n    RETURN NEW;\nEND ";
         assert_eq!(assigned_new_columns(body), ["last_update"]);
+    }
+
+    #[test]
+    fn a_plsql_trigger_assigns_through_colon_new() {
+        let body =
+            "BEGIN\n  :NEW.Updated := SYSDATE;\n  IF :NEW.a = :OLD.a THEN NULL; END IF;\nEND;";
+        assert_eq!(assigned_new_columns(body), ["updated"]);
     }
 
     #[test]

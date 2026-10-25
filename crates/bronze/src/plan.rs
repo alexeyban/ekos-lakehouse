@@ -1,8 +1,8 @@
 //! The plan: every table's landing, mode and mappings, with the evidence (RFC 0192 §5). Written
 //! to the pipeline repository as `lakehouse.lock.json`, it is also M3's "last deployed snapshot".
 
-use crate::mode::{ModeDecision, ModeSettings, choose};
-use crate::model::SourceTable;
+use crate::mode::{ModeDecision, ModeSettings, choose_for};
+use crate::model::{SourceEngine, SourceTable};
 use crate::typemap::{Lossiness, Mapping, map_column};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,9 @@ pub struct PlanSettings {
     /// Cron for the bronze job, and for Iceberg maintenance.
     pub bronze_schedule: String,
     pub maintenance_schedule: String,
+    /// RFC 0216. Not written for PostgreSQL, so a PostgreSQL lock file is unchanged.
+    #[serde(skip_serializing_if = "SourceEngine::is_postgres")]
+    pub source_engine: SourceEngine,
 }
 
 impl Default for PlanSettings {
@@ -31,6 +34,7 @@ impl Default for PlanSettings {
             modes: ModeSettings::default(),
             bronze_schedule: "0 * * * *".into(),
             maintenance_schedule: "0 3 * * *".into(),
+            source_engine: SourceEngine::Postgres,
         }
     }
 }
@@ -166,7 +170,14 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
         refused: vec![],
     };
     for t in sorted {
-        let columns: Vec<Mapping> = t.columns.iter().map(map_column).collect();
+        let columns: Vec<Mapping> = t
+            .columns
+            .iter()
+            .map(|c| match settings.source_engine {
+                SourceEngine::Postgres => map_column(c),
+                SourceEngine::Oracle => crate::typemap_oracle::map_column(c),
+            })
+            .collect();
         let reasons: Vec<String> = columns
             .iter()
             .filter(|m| m.lossiness == Lossiness::Refused)
@@ -187,7 +198,7 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
             oid: t.oid,
             namespace: format!("{}{}", settings.namespace_prefix, t.schema),
             primary_key: t.primary_key.clone(),
-            decision: choose(t, &settings.modes),
+            decision: choose_for(t, &settings.modes, settings.source_engine),
             columns,
             facts: TableFacts {
                 comment: t.comment.clone(),
@@ -210,4 +221,27 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    /// RFC 0216: a PostgreSQL lock does not name its engine, so it is byte-identical to one
+    /// written before the seam; an Oracle lock does, and reads back as Oracle.
+    #[test]
+    fn only_a_non_default_engine_is_written() {
+        let pg = serde_json::to_string(&PlanSettings::default()).unwrap();
+        assert!(!pg.contains("source-engine"), "{pg}");
+        let oracle = PlanSettings {
+            source_engine: SourceEngine::Oracle,
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&oracle).unwrap();
+        assert!(text.contains("\"source-engine\":\"oracle\""), "{text}");
+        let back: PlanSettings = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.source_engine, SourceEngine::Oracle);
+        let old: PlanSettings = serde_json::from_str(&pg).unwrap();
+        assert_eq!(old.source_engine, SourceEngine::Postgres);
+    }
 }

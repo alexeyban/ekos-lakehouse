@@ -453,7 +453,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "clap_lex",
- "strsim",
+ "strsim 0.11.1",
 ]
 
 [[package]]
@@ -646,6 +646,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a01d95850c592940db9b8194bc39f4bc0e89dee5c4265e4b1807c34a9aba453c"
+dependencies = [
+ "darling_core",
+ "darling_macro",
+]
+
+[[package]]
+name = "darling_core"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "859d65a907b6852c9361e3185c862aae7fafd2887876799fa55f5f99dc40d610"
+dependencies = [
+ "fnv",
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim 0.10.0",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c972679f83bdf9c42bd905396b6c3588a843a17f0f16dfcfa3e2c5d57441835"
+dependencies = [
+ "darling_core",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "defmt"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -770,7 +805,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 [[package]]
 name = "ekos"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -849,7 +884,7 @@ dependencies = [
 [[package]]
 name = "ekos-artifact"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-common",
@@ -867,7 +902,7 @@ dependencies = [
 [[package]]
 name = "ekos-clickhouse-query"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -893,7 +928,7 @@ dependencies = [
 [[package]]
 name = "ekos-cluster"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "serde",
@@ -906,7 +941,7 @@ dependencies = [
 [[package]]
 name = "ekos-common"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "glob",
@@ -924,7 +959,7 @@ dependencies = [
 [[package]]
 name = "ekos-compiler-core"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -947,7 +982,7 @@ dependencies = [
 [[package]]
 name = "ekos-dbt-gen"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-kir",
  "serde_json",
@@ -956,7 +991,7 @@ dependencies = [
 [[package]]
 name = "ekos-distributed"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-cluster",
@@ -974,7 +1009,7 @@ dependencies = [
 [[package]]
 name = "ekos-docs-gen"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-kir",
  "glob",
@@ -984,7 +1019,7 @@ dependencies = [
 [[package]]
 name = "ekos-ekl"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-kir",
@@ -996,7 +1031,7 @@ dependencies = [
 [[package]]
 name = "ekos-evals"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1013,7 +1048,7 @@ dependencies = [
 [[package]]
 name = "ekos-identity"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-kir",
@@ -1025,7 +1060,7 @@ dependencies = [
 [[package]]
 name = "ekos-kir"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-common",
@@ -1088,6 +1123,7 @@ dependencies = [
  "ekos-ledger",
  "ekos-migrate",
  "ekos-migrate-validate",
+ "ekos-ora-live",
  "ekos-pg-live",
  "ekos-recovery",
  "ekos-semantic",
@@ -1202,7 +1238,7 @@ dependencies = [
 [[package]]
 name = "ekos-ledger"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-artifact",
@@ -1227,7 +1263,7 @@ dependencies = [
 [[package]]
 name = "ekos-marketing"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1251,7 +1287,7 @@ dependencies = [
 [[package]]
 name = "ekos-migrate"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-kir",
@@ -1265,7 +1301,7 @@ dependencies = [
 [[package]]
 name = "ekos-migrate-approval"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-common",
@@ -1278,7 +1314,7 @@ dependencies = [
 [[package]]
 name = "ekos-migrate-dq"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-migrate",
  "serde",
@@ -1289,7 +1325,7 @@ dependencies = [
 [[package]]
 name = "ekos-migrate-logic"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-migrate-target-clickhouse",
  "ekos-migrate-validate",
@@ -1303,7 +1339,7 @@ dependencies = [
 [[package]]
 name = "ekos-migrate-report"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-common",
  "serde",
@@ -1314,7 +1350,7 @@ dependencies = [
 [[package]]
 name = "ekos-migrate-target-clickhouse"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-common",
  "serde",
@@ -1326,7 +1362,7 @@ dependencies = [
 [[package]]
 name = "ekos-migrate-validate"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "serde",
@@ -1339,7 +1375,7 @@ dependencies = [
 [[package]]
 name = "ekos-observation-sdk"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1357,9 +1393,10 @@ dependencies = [
 [[package]]
 name = "ekos-ora-live"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-common",
+ "oracle",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1368,7 +1405,7 @@ dependencies = [
 [[package]]
 name = "ekos-pg-live"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-common",
  "ekos-migrate",
@@ -1384,7 +1421,7 @@ dependencies = [
 [[package]]
 name = "ekos-plpgsql"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1394,7 +1431,7 @@ dependencies = [
 [[package]]
 name = "ekos-plsql"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-plpgsql",
 ]
@@ -1402,7 +1439,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-clickhouse"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1419,7 +1456,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-confluence"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1436,7 +1473,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-crypto"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1455,7 +1492,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-elixir"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1473,7 +1510,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-file"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1491,7 +1528,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-git"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1507,7 +1544,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-github"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1524,7 +1561,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-governance"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1541,7 +1578,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-java"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1559,7 +1596,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-javascript"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1577,7 +1614,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-localdocs"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1603,7 +1640,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-oracle"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1619,7 +1656,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-pentaho"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1637,7 +1674,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-perl"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1655,7 +1692,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-python"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1673,7 +1710,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-rust"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "ekos-artifact",
@@ -1691,7 +1728,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-sql-dialect-clickhouse"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-sql-dialect-sdk",
  "sqlparser",
@@ -1700,7 +1737,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-sql-dialect-databricks"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-sql-dialect-sdk",
  "sqlparser",
@@ -1709,7 +1746,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-sql-dialect-mssql"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-sql-dialect-sdk",
  "sqlparser",
@@ -1718,7 +1755,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-sql-dialect-mysql"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-sql-dialect-sdk",
  "sqlparser",
@@ -1727,7 +1764,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-sql-dialect-oracle"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-plsql",
  "ekos-sql-dialect-sdk",
@@ -1737,7 +1774,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-sql-dialect-postgres"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-sql-dialect-sdk",
  "sqlparser",
@@ -1746,7 +1783,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-sql-dialect-snowflake"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-sql-dialect-sdk",
  "sqlparser",
@@ -1755,7 +1792,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-sql-dialect-trino"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "ekos-sql-dialect-sdk",
  "sqlparser",
@@ -1764,7 +1801,7 @@ dependencies = [
 [[package]]
 name = "ekos-plugin-treasury"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1781,7 +1818,7 @@ dependencies = [
 [[package]]
 name = "ekos-recovery"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1832,7 +1869,7 @@ dependencies = [
 [[package]]
 name = "ekos-runtime"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1851,7 +1888,7 @@ dependencies = [
 [[package]]
 name = "ekos-segment-backend"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "thiserror 2.0.21",
  "tracing",
@@ -1860,7 +1897,7 @@ dependencies = [
 [[package]]
 name = "ekos-semantic"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1880,7 +1917,7 @@ dependencies = [
 [[package]]
 name = "ekos-session"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-common",
@@ -1896,7 +1933,7 @@ dependencies = [
 [[package]]
 name = "ekos-simulation"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "chrono",
  "ekos-artifact",
@@ -1920,7 +1957,7 @@ dependencies = [
 [[package]]
 name = "ekos-sql-dialect-sdk"
 version = "1.1.0"
-source = "git+https://github.com/alexeyban/EKOS?branch=main#9a9ac8d3c41f69797b6329a38892e2b586a142a8"
+source = "git+https://github.com/alexeyban/EKOS?branch=main#899da03d0bd2f3662afeef1067d8fd528cd1d6d2"
 dependencies = [
  "sqlparser",
 ]
@@ -2598,6 +2635,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae293c039020f9ec10710af98d29ce6aa2051486638b49c9a6409f3b4a9e98ad"
 
 [[package]]
+name = "ident_case"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3233,6 +3276,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "odpic-sys"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "920b5474a5128a9f0232df5a0ffc50aaa5b077b29b8b06ab0131985ac82793ed"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3249,6 +3301,32 @@ name = "oneshot"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "269bca4c2591a28585d6bf10d9ed0332b7d76900a1b02bec41bdc3a2cdcda107"
+
+[[package]]
+name = "oracle"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db40fe6e4df881b683691ade5ef1f7b1afd52aefa115581f7b92855524d7ec0"
+dependencies = [
+ "cc",
+ "odpic-sys",
+ "once_cell",
+ "oracle_procmacro",
+ "paste",
+ "rustversion",
+]
+
+[[package]]
+name = "oracle_procmacro"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad247f3421d57de56a0d0408d3249d4b1048a522be2013656d92f022c3d8af27"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
 
 [[package]]
 name = "ordered-float"
@@ -4588,6 +4666,12 @@ dependencies = [
 
 [[package]]
 name = "strsim"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73473c0e59e6d5812c5dfe2a064a6444949f089e20eec9a2e5506596494e4623"
+
+[[package]]
+name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
@@ -4597,6 +4681,17 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "syn"
+version = "1.0.109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
 
 [[package]]
 name = "syn"

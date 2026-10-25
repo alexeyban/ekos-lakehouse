@@ -11,6 +11,10 @@ rust-version.workspace = true
 name = "ekos-lakehouse"
 path = "src/main.rs"
 
+[features]
+# RFC 0216: Oracle sources, for steps 1-3 (EKOS's live catalog) and 5-7 (the lakehouse).
+oracle = ["ekos/oracle", "ekos-lakehouse-ext/oracle"]
+
 [dependencies]
 ekos.workspace = true
 ekos-lakehouse-ext.workspace = true

@@ -302,6 +302,7 @@ fn v3_catches_a_planted_one_row_defect() {
             .map(|(c, r)| canon_expr(Dialect::Trino, c, *r))
             .collect(),
         buckets: 64,
+        digest_columns: false,
     };
     let source = pg();
     let target = TrinoReader::new(conn(None)).unwrap();

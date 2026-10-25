@@ -1,6 +1,6 @@
 //! RFC 0192 §3: how a table is loaded, chosen from facts and recorded with them.
 
-use crate::model::SourceTable;
+use crate::model::{SourceEngine, SourceTable};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -45,11 +45,28 @@ pub struct ModeDecision {
 }
 
 /// Types a watermark can be compared on.
-fn orderable(pg_type: &str) -> bool {
-    pg_type.starts_with("timestamp") || matches!(pg_type, "date" | "integer" | "bigint")
+fn orderable(engine: SourceEngine, source_type: &str) -> bool {
+    match engine {
+        SourceEngine::Postgres => {
+            source_type.starts_with("timestamp")
+                || matches!(source_type, "date" | "integer" | "bigint")
+        }
+        // A DATE carries a time; an integer NUMBER orders like one.
+        SourceEngine::Oracle => {
+            source_type == "DATE"
+                || source_type.starts_with("TIMESTAMP")
+                || source_type == "INTEGER"
+                || (source_type.starts_with("NUMBER(") && source_type.ends_with(",0)"))
+        }
+    }
 }
 
+/// [`choose_for`] a PostgreSQL source.
 pub fn choose(t: &SourceTable, s: &ModeSettings) -> ModeDecision {
+    choose_for(t, s, SourceEngine::Postgres)
+}
+
+pub fn choose_for(t: &SourceTable, s: &ModeSettings, engine: SourceEngine) -> ModeDecision {
     let mut d = ModeDecision {
         mode: LoadMode::Full,
         evidence: vec![],
@@ -61,7 +78,7 @@ pub fn choose(t: &SourceTable, s: &ModeSettings) -> ModeDecision {
                 "declared watermark {w} is not a column of {}",
                 t.qualified()
             )),
-            Some(c) if !orderable(&c.pg_type) => d.notes.push(format!(
+            Some(c) if !orderable(engine, &c.pg_type) => d.notes.push(format!(
                 "declared watermark {w} is {}, which cannot order writes",
                 c.pg_type
             )),
@@ -173,6 +190,37 @@ mod tests {
             watermarks: [("public.film".to_string(), col.to_string())].into(),
             ..Default::default()
         }
+    }
+
+    /// RFC 0216: an Oracle DATE orders writes (it carries a time); a VARCHAR2 does not.
+    #[test]
+    fn oracle_watermark_types() {
+        let mut t = table(vec![], &["C_ORDER_ID"], 10);
+        t.schema = "ADEMPIERE".into();
+        t.name = "C_ORDER".into();
+        t.columns[2].name = "UPDATED".into();
+        t.columns[2].pg_type = "DATE".into();
+        t.columns[1].name = "DOCUMENTNO".into();
+        t.columns[1].pg_type = "VARCHAR2(30 CHAR)".into();
+        let trigger = UpdateTrigger {
+            trigger: "C_ORDER_TRG".into(),
+            function: "C_ORDER_TRG".into(),
+            assigns: vec!["UPDATED".into()],
+            body_sha: String::new(),
+        };
+        let at = |col: &str| ModeSettings {
+            watermarks: [("ADEMPIERE.C_ORDER".to_string(), col.to_string())].into(),
+            ..Default::default()
+        };
+        t.update_triggers = vec![trigger];
+        let d = choose_for(&t, &at("UPDATED"), SourceEngine::Oracle);
+        assert!(matches!(d.mode, LoadMode::Incremental { .. }), "{d:?}");
+        let d = choose_for(&t, &at("DOCUMENTNO"), SourceEngine::Oracle);
+        assert_eq!(d.mode, LoadMode::Full);
+        assert!(d.notes[0].contains("cannot order writes"), "{d:?}");
+        assert!(orderable(SourceEngine::Oracle, "NUMBER(10,0)"));
+        assert!(!orderable(SourceEngine::Oracle, "NUMBER"));
+        assert!(orderable(SourceEngine::Oracle, "TIMESTAMP(6)"));
     }
 
     #[test]

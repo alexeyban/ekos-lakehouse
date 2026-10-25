@@ -2,6 +2,24 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The engine a source is read from (RFC 0216). It decides the type map, which column types can
+/// order a watermark, and the dialect the source side of a reconciliation is rendered in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceEngine {
+    #[default]
+    Postgres,
+    Oracle,
+}
+
+impl SourceEngine {
+    /// The default: a lock file written for PostgreSQL does not name its engine, so it reads back
+    /// byte-identical to one written before RFC 0216.
+    pub fn is_postgres(&self) -> bool {
+        *self == Self::Postgres
+    }
+}
+
 /// What kind of PostgreSQL type a column has (`pg_type.typtype`, plus arrays).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -24,14 +42,17 @@ pub enum TypeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceColumn {
     pub name: String,
-    /// `format_type(atttypid, atttypmod)`, e.g. `numeric(5,2)`, `timestamp with time zone`.
+    /// The source engine's type as it spells it: PostgreSQL's `format_type(atttypid, atttypmod)`
+    /// (`numeric(5,2)`, `timestamp with time zone`), Oracle's DDL form (`NUMBER(10,0)`,
+    /// `VARCHAR2(60 CHAR)`). The field keeps its first name: lock files carry it.
     pub pg_type: String,
     pub kind: TypeKind,
     pub not_null: bool,
     /// The connector's type for this column, or `None` when the connector does not expose it.
     pub trino_type: Option<String>,
     /// From a P1 profile, for an unconstrained `numeric` (RFC 0157): precision and scale the data
-    /// actually uses.
+    /// actually uses. Precision 0 means it was measured and holds no values (RFC 0216: an Oracle
+    /// column, the scale is then [`crate::typemap_oracle::NO_VALUES_SCALE`]).
     pub numeric_used: Option<(u32, u32)>,
     /// `COMMENT ON COLUMN`, redacted (RFC 0043).
     #[serde(default, skip_serializing_if = "Option::is_none")]
