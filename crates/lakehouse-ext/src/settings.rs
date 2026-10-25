@@ -69,6 +69,9 @@ pub struct Settings {
     /// Kettle reads `''` as null; silver models apply `nullif(c, '')` to text (RFC 0202).
     /// Default true; false for a Kettle run with `KETTLE_EMPTY_STRING_DIFFERS_FROM_NULL=Y`.
     pub pentaho_empty_string_is_null: Option<bool>,
+    /// EKOS RFC 0213: `generate`, `sync` and `gold draft` refuse to run until every review
+    /// subject of the source model has a valid sign-off. Default false.
+    pub require_signoff: Option<bool>,
 }
 
 impl Settings {

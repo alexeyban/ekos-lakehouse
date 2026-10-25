@@ -86,6 +86,13 @@ bronze-schedule     = "0 * * * *"
 "public.film" = "last_update"     # used only when a BEFORE UPDATE trigger proves it
 ```
 
+With `require-signoff = true`, `generate`, `sync` and `gold draft` refuse to run until every
+review subject of the source model (scope, PII, conflicts, identity, write behaviour, glossary)
+has a valid sign-off in EKOS (`ekos signoff approve`, EKOS RFC 0213); the refusal names each
+subject that is not signed, stale or revoked. `ekos-lakehouse workflow status` shows the seven
+steps: EKOS reports analysis and review, this extension documentation, requirements (gold marts),
+extraction (synced tables), bronze/silver and marts (latest run per table).
+
 ```bash
 ekos-lakehouse lakehouse doctor          # which services answer; --json for a program
 ekos-lakehouse lakehouse plan            # each table's mode, mappings and refusals

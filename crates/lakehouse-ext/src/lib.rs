@@ -17,6 +17,7 @@ pub mod reconcile;
 pub mod settings;
 pub mod source;
 pub mod sync;
+pub mod workflow;
 
 use async_trait::async_trait;
 use ekos::commands::catalogue::Class;
@@ -499,6 +500,13 @@ impl EkosExtension for LakehouseExtension {
         Some(("ekos-lakehouse", env!("CARGO_PKG_VERSION")))
     }
 
+    fn workflow_steps(
+        &self,
+        ctx: &ekos::extension::WorkflowContext<'_>,
+    ) -> Vec<ekos_semantic::workflow::Step> {
+        workflow::workflow_steps(ctx)
+    }
+
     fn command_classes(&self) -> Vec<(&'static str, Class, bool)> {
         // Reaches services outside the EKOS home (RFC 0186): the source database among them.
         vec![
@@ -567,6 +575,7 @@ impl EkosExtension for LakehouseExtension {
             }
             Some(("generate", m)) => {
                 let settings = settings::load(ctx.config)?;
+                workflow::gate(&settings, ctx)?;
                 let out = match m.get_one::<std::path::PathBuf>("out") {
                     Some(o) => ctx.invoked_from.join(o),
                     None => pipeline_dir(&settings, ctx),
@@ -688,6 +697,7 @@ impl EkosExtension for LakehouseExtension {
             }
             Some(("sync", m)) => {
                 let settings = settings::load(ctx.config)?;
+                workflow::gate(&settings, ctx)?;
                 let repo = pipeline_dir(&settings, ctx);
                 let live = {
                     let redaction = ctx.config.redaction_config();
@@ -779,6 +789,7 @@ impl EkosExtension for LakehouseExtension {
                     anyhow::bail!("unknown gold command");
                 };
                 let settings = settings::load(ctx.config)?;
+                workflow::gate(&settings, ctx)?;
                 let repo = pipeline_dir(&settings, ctx);
                 let description = ctx.invoked_from.join(
                     m.get_one::<std::path::PathBuf>("description")

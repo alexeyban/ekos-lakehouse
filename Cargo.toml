@@ -34,6 +34,7 @@ ekos-migrate-validate = { git = "https://github.com/alexeyban/EKOS", branch = "m
 ekos-common           = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-kir              = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-ledger           = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-semantic         = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-recovery         = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-pg-live          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-migrate          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }

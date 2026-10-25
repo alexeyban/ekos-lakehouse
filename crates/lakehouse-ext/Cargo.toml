@@ -24,6 +24,7 @@ ekos-recovery.workspace = true
 ekos-lakehouse-trino.workspace = true
 ekos-kir.workspace = true
 ekos-ledger.workspace = true
+ekos-semantic.workspace = true
 ekos-migrate.workspace = true
 ekos-migrate-validate.workspace = true
 ekos-pg-live.workspace = true
@@ -39,6 +40,7 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+chrono = "0.4"
 tempfile = "3"
 toml.workspace = true
 postgres = "0.19"
