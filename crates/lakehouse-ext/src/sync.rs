@@ -515,9 +515,65 @@ pub fn request_reload(
     Ok(tables.to_vec())
 }
 
+/// Incremental tables whose load expression for a column both plans have changed: the rows
+/// bronze already holds were written by the old expression, and an incremental load never
+/// rewrites an unchanged source row, so the table needs a reload (a fix to the type map, such
+/// as Oracle `CHAR(n)` padding, otherwise leaves it diverged for good).
+pub fn expression_changes(deployed: &Plan, plan: &Plan) -> Vec<String> {
+    plan.tables
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.decision.mode,
+                ekos_lakehouse_bronze::LoadMode::Incremental { .. }
+            )
+        })
+        .filter(|t| {
+            deployed
+                .tables
+                .iter()
+                .find(|d| d.schema == t.schema && d.table == t.table)
+                .is_some_and(|d| {
+                    t.columns.iter().any(|c| {
+                        d.columns
+                            .iter()
+                            .any(|o| o.column == c.column && o.expr != c.expr)
+                    })
+                })
+        })
+        .map(|t| format!("{}.{}", t.schema, t.table))
+        .collect()
+}
+
 #[cfg(test)]
 mod reload_tests {
     use super::*;
+
+    #[test]
+    fn an_incremental_table_whose_expression_changed_needs_a_reload() {
+        let plan = |mode: &str, expr: &str| -> Plan {
+            serde_json::from_str(&format!(
+                r#"{{"format":3,"settings":{{}},"refused":[],"tables":[{{"schema":"S",
+                "table":"T","namespace":"n","primary_key":["ID"],
+                "decision":{{"mode":{mode},"evidence":[],"notes":[]}},"columns":[{{"column":"C",
+                "pg_type":"CHAR(3)","trino_type":"char(3)","iceberg_type":"varchar","expr":"{expr}",
+                "lossiness":"as_text","rule":"char-padded","rationale":""}}]}}]}}"#
+            ))
+            .unwrap()
+        };
+        let inc = r#"{"mode":"incremental","watermark":"UPDATED","keyset_deletes":false}"#;
+        let (old, new) = ("CAST(C AS varchar)", "rpad(CAST(C AS varchar), 3, ' ')");
+        assert_eq!(
+            expression_changes(&plan(inc, old), &plan(inc, new)),
+            vec!["S.T"]
+        );
+        assert!(expression_changes(&plan(inc, new), &plan(inc, new)).is_empty());
+        let full = r#"{"mode":"full"}"#;
+        assert!(
+            expression_changes(&plan(full, old), &plan(full, new)).is_empty(),
+            "a full load rewrites every row anyway"
+        );
+    }
 
     #[test]
     fn a_reload_is_a_marker_per_planned_table_and_can_be_withdrawn() {

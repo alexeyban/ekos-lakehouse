@@ -53,6 +53,9 @@ pub struct Settings {
     pub pii: std::collections::BTreeMap<String, ekos_lakehouse_silver::MaskMethod>,
     /// Tables that keep SCD2 history in silver (RFC 0193 §4).
     pub history: Vec<String>,
+    /// EKOS RFC 0227: keep `Y`/`N` flags as text in silver. Default false: converted to boolean
+    /// where a check constraint or the application model says the column is a flag.
+    pub flags_as_text: Option<bool>,
     /// A change class's action, overriding RFC 0190's default (`rename = "auto"`), RFC 0194.
     pub policy: ekos_lakehouse_changes::Policy,
     /// Push proposal branches to this git remote and open pull requests with `gh` (RFC 0194).
@@ -102,6 +105,7 @@ impl Settings {
         ekos_lakehouse_silver::SilverSettings {
             pii: self.pii.clone(),
             history: self.history.clone(),
+            flags_as_text: self.flags_as_text.unwrap_or(false),
         }
     }
 }

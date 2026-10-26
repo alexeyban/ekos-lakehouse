@@ -1282,7 +1282,7 @@ pub fn plannable_sql(
                         "{}.{}.{}",
                         q(&plan.settings.target_catalog),
                         q(&ekos_lakehouse_silver::silver_schema(t)),
-                        q(&t.table)
+                        q(&ekos_lakehouse_bronze::iceberg_name(&t.table))
                     )),
                     None => {
                         return Err(format!(

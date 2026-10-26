@@ -23,6 +23,16 @@ fn base(oracle_type: &str) -> &str {
 }
 
 /// `(p, s)` of `NUMBER(p,s)`.
+/// `char(3)` → 3.
+fn char_length(trino_type: &str) -> Option<u32> {
+    trino_type
+        .strip_prefix("char(")?
+        .strip_suffix(')')?
+        .trim()
+        .parse()
+        .ok()
+}
+
 fn number_params(t: &str) -> Option<(i64, i64)> {
     let inner = t.strip_prefix("NUMBER(")?.strip_suffix(')')?;
     let (p, s) = inner.split_once(',')?;
@@ -122,16 +132,38 @@ pub fn map_column(col: &SourceColumn) -> Mapping {
             "Iceberg strings have no length; Oracle stores '' as NULL",
             Some(CompareRule::Text),
         ),
-        // The padding is part of the value (RFC 0155): kept, as for PostgreSQL's char(n).
-        "CHAR" | "NCHAR" => set(
-            m,
-            "varchar",
-            cast("varchar"),
-            Lossiness::AsText,
-            "char-padded",
-            "CHAR(n) landed as varchar with its padding",
-            Some(CompareRule::Text),
-        ),
+        // The padding is part of the value (RFC 0155), and Oracle returns it: iDempiere's
+        // `UserLevel` is 'S  ' or ' CO'. Trino's cast from char(n) to varchar drops trailing
+        // spaces, so the value is padded back to n (EKOS RFC 0227: found by reconciliation).
+        // A CHAR(1) value has no padding to lose (Oracle's '' is NULL): its plain cast stays, so
+        // the fix changed no flag column's expression and reloaded no table for it.
+        "CHAR" | "NCHAR" => match char_length(&trino) {
+            Some(1) => set(
+                m,
+                "varchar",
+                cast("varchar"),
+                Lossiness::AsText,
+                "char-padded",
+                "CHAR(1) landed as varchar",
+                Some(CompareRule::Text),
+            ),
+            Some(n) => set(
+                m,
+                "varchar",
+                Some(format!("rpad(CAST({id} AS varchar), {n}, ' ')")),
+                Lossiness::AsText,
+                "char-padded",
+                "CHAR(n) landed as varchar with its padding",
+                Some(CompareRule::Text),
+            ),
+            None => refuse(
+                m,
+                "char-length-unknown",
+                format!(
+                    "the connector types it {trino}: its length, and so its padding, is unknown"
+                ),
+            ),
+        },
         "CLOB" | "NCLOB" => set(
             m,
             "varchar",
@@ -423,7 +455,14 @@ mod tests {
             (c.lossiness, c.compare),
             (Lossiness::AsText, Some(CompareRule::Text))
         );
+        // One character has no padding to lose; wider, Trino's cast drops trailing spaces and
+        // the padding is put back.
         assert_eq!(c.expr, "CAST(\"C\" AS varchar)");
+        assert_eq!(
+            mapped("CHAR(3)", "char(3)").expr,
+            "rpad(CAST(\"C\" AS varchar), 3, ' ')"
+        );
+        assert_eq!(mapped("CHAR(3)", "varchar").lossiness, Lossiness::Refused);
         let lob = mapped("CLOB", "varchar");
         assert_eq!((lob.lossiness, lob.compare), (Lossiness::Exact, None));
     }

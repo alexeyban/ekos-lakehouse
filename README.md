@@ -240,6 +240,31 @@ require-plan-approval = true
 `generate` builds only the approved plan; when the source, step 3 or a change has moved since, it refuses and names the
 tables. The console's **Extraction** page does all of this, with a reason typed beside each change.
 
+### Silver from the source model (EKOS RFC 0227)
+
+Silver reads what the source and EKOS know about each column:
+
+| The column is… | Evidence | Silver |
+|---|---|---|
+| a `Y`/`N` flag | a check constraint `c IN ('Y','N')`, or the application model's `boolean` accessor on a one-character column | `boolean`; a flag only the code declares is also tested on bronze (`accepted_values [Y, N]`), so no other value turns into NULL unseen |
+| a list of codes | a check constraint | `accepted_values`, fails the build |
+| a list of codes | the application model (`AD_Ref_List`) | `accepted_values`, **warns**: the dictionary can add values |
+| a logical foreign key | the application model, and the database declares none | `relationships`, **warns** |
+
+`flags-as-text = true` keeps flags as text. Tables that keep purged rows get `_ekos_purged_at_source` (when the purge
+was detected). A `history` snapshot closes a row deleted at the source (`hard_deletes: invalidate`); its
+`dbt_valid_to` is when the delete was seen, not when it happened.
+
+`lakehouse run [--in-process] [--wait]` launches the Dagster job through `dagster-url`; the console's Lakehouse page
+has **Run the pipeline**. Use `--in-process` for pipelines of hundreds of tables. Dagster for a project in the EKOS
+home needs `EKOS_HOME`, `EKOS_LH_PROJECT_NAME`, the project's source checkout mounted (read-only is enough), and for
+Oracle the Instant Client and `libaio.so.1`.
+
+When a fix changes how a column is loaded (an Oracle `CHAR(n)` is now padded back to *n*), `generate` requests a
+reload of every incremental table it affects, since an incremental load never rewrites an unchanged row. An Iceberg
+table whose source name has a `$` (Oracle's `CREATE$JAVA$LOB$TABLE`) is named without it: Trino reads `t$x` as a
+metadata table of `t`.
+
 ## Try it on the sandbox
 
 ```bash

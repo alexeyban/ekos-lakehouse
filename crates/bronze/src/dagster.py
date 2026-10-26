@@ -88,6 +88,22 @@ def _watermark_literal(value, iceberg_type):
     return "CAST('{}' AS {})".format(value.replace("'", "''"), iceberg_type)
 
 
+def _safe(name):
+    """Mirrors `plan::safe_name`: a name Dagster and dbt accept, hashed when it had to change."""
+    safe = "".join(c if (c.isascii() and c.isalnum()) or c == "_" else "_" for c in name)
+    if safe == name:
+        return safe
+    h = 0x811C9DC5
+    for b in name.encode():
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return f"{safe}_{h:08x}"
+
+
+def _iceberg_name(name):
+    """Mirrors `plan::iceberg_name`: Trino reads `t$x` as a metadata table of `t`."""
+    return _safe(name) if "$" in name else name
+
+
 def _ident(name):
     return '"' + name.replace('"', '""') + '"'
 
@@ -123,6 +139,9 @@ def _ensure_namespace(cur, schema):
 
 
 def _source_lsn(cur):
+    # The WAL position is PostgreSQL's; another engine's is recorded as unknown (RFC 0227).
+    if SETTINGS.get("source-engine", "postgres") != "postgres":
+        return ""
     catalog = _ident(SETTINGS["source-catalog"])
     try:
         rows = _run(
@@ -152,11 +171,11 @@ def _make_asset(table):
     base = REPO / "bronze" / schema / name
     mode = table["decision"]["mode"]
     target = ".".join(
-        _ident(p) for p in (SETTINGS["target-catalog"], table["namespace"], name)
+        _ident(p) for p in (SETTINGS["target-catalog"], table["namespace"], _iceberg_name(name))
     )
 
     @dg.asset(
-        name=f"{schema}__{name}",
+        name=_safe(f"{schema}__{name}"),
         key_prefix=[*PREFIX, "bronze"],
         group_name="bronze",
         deps=[sync],
@@ -224,7 +243,7 @@ def _make_asset(table):
             snap = _run(
                 cur,
                 f'SELECT CAST(snapshot_id AS varchar) FROM {target.rsplit(".", 1)[0]}.'
-                f'{_ident(name + "$snapshots")} ORDER BY committed_at DESC LIMIT 1',
+                f'{_ident(_iceberg_name(name) + "$snapshots")} ORDER BY committed_at DESC LIMIT 1',
             )[0][0]
         except Exception as e:
             _ekos("lakehouse", "run-report", "--table", qualified, "--run-id", run_id,
@@ -276,9 +295,23 @@ resources = {}
 DBT_DIR = REPO / "dbt"
 if (DBT_DIR / "dbt_project.yml").exists():
     dbt_project = DbtProject(project_dir=DBT_DIR, profiles_dir=DBT_DIR)
-    # Always, not only under `dagster dev`: EKOS regenerates the dbt project, so the manifest
-    # must follow it, and a one-off `dagster job execute` has none otherwise.
-    dbt_project.preparer.prepare(dbt_project)
+    # Not only under `dagster dev`: EKOS regenerates the dbt project, so the manifest must follow
+    # it, and a one-off `dagster job execute` has none otherwise. But only when it is missing or
+    # older than a project file: every step process imports this file, and parsing a large
+    # project for each of them costs minutes per table (RFC 0227).
+    def _manifest_stale():
+        manifest = Path(dbt_project.manifest_path)
+        if not manifest.is_file():
+            return True
+        built = manifest.stat().st_mtime
+        return any(
+            p.stat().st_mtime > built
+            for p in DBT_DIR.rglob("*")
+            if p.suffix in (".sql", ".yml", ".yaml") and "target" not in p.relative_to(DBT_DIR).parts
+        )
+
+    if _manifest_stale():
+        dbt_project.preparer.prepare(dbt_project)
 
     class _Keys(DagsterDbtTranslator):
         """Models, and the bronze sources they read, under the project's prefix (RFC 0199)."""

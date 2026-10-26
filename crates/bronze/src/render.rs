@@ -22,7 +22,7 @@ pub fn target(t: &TablePlan, s: &PlanSettings) -> String {
         "{}.{}.{}",
         ident(&s.target_catalog),
         ident(&t.namespace),
-        ident(&t.table)
+        ident(&crate::plan::iceberg_name(&t.table))
     )
 }
 

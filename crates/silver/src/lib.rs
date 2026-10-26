@@ -30,6 +30,8 @@ pub struct SilverSettings {
     pub pii: BTreeMap<String, MaskMethod>,
     /// `"schema.table"` entries that get an SCD2 snapshot (RFC 0193 §4).
     pub history: Vec<String>,
+    /// EKOS RFC 0227: keep `Y`/`N` flags as text instead of converting them to `boolean`.
+    pub flags_as_text: bool,
 }
 
 /// What the generator decided that a person should see.
@@ -44,8 +46,9 @@ pub struct SilverReport {
     pub computed: Vec<String>,
 }
 
+/// The model's name, which is also its Dagster asset's: safe for both (RFC 0227).
 pub fn model_name(t: &TablePlan) -> String {
-    format!("{}__{}", t.schema, t.table)
+    ekos_lakehouse_bronze::safe_name(&format!("{}__{}", t.schema, t.table))
 }
 
 pub fn silver_schema(t: &TablePlan) -> String {
@@ -60,9 +63,54 @@ fn needs_quote(name: &str) -> bool {
         || name.starts_with(|c: char| c.is_ascii_digit())
 }
 
+/// A one-character text column, as either engine spells its type.
+fn one_char(source_type: &str) -> bool {
+    let t = source_type.to_ascii_uppercase();
+    [
+        "CHAR(1",
+        "NCHAR(1",
+        "VARCHAR2(1",
+        "NVARCHAR2(1",
+        "CHARACTER(1",
+        "CHARACTER VARYING(1",
+        "BPCHAR(1",
+    ]
+    .iter()
+    .any(|p| {
+        t.strip_prefix(p)
+            .is_some_and(|rest| rest.starts_with(')') || rest.starts_with(' '))
+    })
+}
+
+/// EKOS RFC 0227: whether a column is a `Y`/`N` flag silver converts to `boolean`, and on whose
+/// word: a check constraint (`declared`) or the application model (`code`). A masked column is
+/// left alone.
+pub fn flag(t: &TablePlan, col: &str, s: &SilverSettings) -> Option<&'static str> {
+    if s.flags_as_text
+        || s.pii
+            .contains_key(&format!("{}.{}.{}", t.schema, t.table, col))
+    {
+        return None;
+    }
+    let f = t.column_facts(col)?;
+    let m = t.columns.iter().find(|m| m.column == col)?;
+    if let Some(c) = &f.check {
+        let mut v = c.values.clone();
+        v.sort();
+        return (v == ["N", "Y"]).then_some("declared");
+    }
+    (f.code.as_ref().is_some_and(|c| c.boolean) && one_char(&m.pg_type)).then_some("code")
+}
+
 fn column_expr(t: &TablePlan, col: &str, s: &SilverSettings, report: &mut SilverReport) -> String {
     let key = format!("{}.{}.{}", t.schema, t.table, col);
     let id = ident(col);
+    if let Some(basis) = flag(t, col, s) {
+        report
+            .computed
+            .push(format!("{key}: Y/N flag as boolean ({basis})"));
+        return format!("case {id} when 'Y' then true when 'N' then false end as {id}");
+    }
     let iceberg = t
         .columns
         .iter()
@@ -102,14 +150,40 @@ pub fn model_sql(t: &TablePlan, s: &SilverSettings, report: &mut SilverReport) -
     let config = format!(
         "{{{{ config(materialized='table', schema='{}', alias='{}') }}}}\n\n",
         silver_schema(t),
-        t.table.replace('\'', "\\'")
+        ekos_lakehouse_bronze::iceberg_name(&t.table).replace('\'', "\\'")
     );
     let source = format!(
         "with bronze as (\n    select * from {{{{ source('{}', '{}') }}}}\n)",
-        t.namespace, t.table
+        t.namespace,
+        ekos_lakehouse_bronze::iceberg_name(&t.table)
     );
     let body = match (&t.decision.mode, t.primary_key.is_empty()) {
         (LoadMode::Full, _) => format!("{source}\n\nselect\n{select}\nfrom bronze\n"),
+        (LoadMode::Incremental { .. }, false)
+            if ekos_lakehouse_bronze::render::retains_purges(t) =>
+        {
+            let key = t
+                .primary_key
+                .iter()
+                .map(|k| ident(k))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // RFC 0227: a purged row stays current as its last real version, flagged with when
+            // the purge was detected; a key loaded again after the purge is current, unflagged.
+            report.computed.push(format!(
+                "{}.{}._ekos_purged_at_source: when a purge of the row was detected",
+                t.schema, t.table
+            ));
+            format!(
+                "{source},\n\nmarked as (\n    select\n        *,\n        max(case when \"_ekos_op\" = 'purge' \
+                 then \"_ekos_loaded_at\" end) over (\n            partition by {key}\n        ) as \"_ekos_purge_seen\"\n    \
+                 from bronze\n),\n\nlatest as (\n    select\n        *,\n        row_number() over (\n            \
+                 partition by {key}\n            order by \"_ekos_loaded_at\" desc\n        ) as \"_ekos_rn\"\n    \
+                 from marked\n    where \"_ekos_op\" != 'purge'\n)\n\nselect\n{select},\n    case when \"_ekos_purge_seen\" > \
+                 \"_ekos_loaded_at\" then \"_ekos_purge_seen\" end as \"_ekos_purged_at_source\"\nfrom latest\n\
+                 where \"_ekos_rn\" = 1 and \"_ekos_op\" != 'delete'\n"
+            )
+        }
         (LoadMode::Incremental { .. }, false) => {
             let key = t
                 .primary_key
@@ -120,13 +194,7 @@ pub fn model_sql(t: &TablePlan, s: &SilverSettings, report: &mut SilverReport) -
             format!(
                 "{source},\n\nlatest as (\n    select\n        *,\n        row_number() over (\n            \
                  partition by {key}\n            order by \"_ekos_loaded_at\" desc\n        ) as \"_ekos_rn\"\n    \
-                 from bronze{retained}\n)\n\nselect\n{select}\nfrom latest\nwhere \"_ekos_rn\" = 1 and \"_ekos_op\" != 'delete'\n",
-                // Purged rows the policy keeps: their last real version stays current here.
-                retained = if ekos_lakehouse_bronze::render::retains_purges(t) {
-                    "\n    where \"_ekos_op\" != 'purge'"
-                } else {
-                    ""
-                }
+                 from bronze\n)\n\nselect\n{select}\nfrom latest\nwhere \"_ekos_rn\" = 1 and \"_ekos_op\" != 'delete'\n"
             )
         }
         // No key: a re-read row cannot be told from its earlier copy except by its values.
@@ -151,6 +219,52 @@ fn test(name: &str, args: Option<Value>, rule: &str, evidence: &str) -> Value {
     let mut t = Mapping::new();
     t.insert(name.into(), Value::Mapping(body));
     Value::Mapping(t)
+}
+
+/// A test that reports instead of failing the build: a claim the database does not enforce.
+fn warn(mut v: Value) -> Value {
+    if let Some(cfg) = v
+        .as_mapping_mut()
+        .and_then(|m| m.values_mut().next())
+        .and_then(|b| b.get_mut("config"))
+        .and_then(Value::as_mapping_mut)
+    {
+        cfg.insert("severity".into(), "warn".into());
+    }
+    v
+}
+
+fn values_arg(values: &[String]) -> Value {
+    let mut a = Mapping::new();
+    a.insert(
+        "values".into(),
+        Value::Sequence(values.iter().map(|l| Value::from(l.as_str())).collect()),
+    );
+    Value::Mapping(a)
+}
+
+/// RFC 0227: a value list for a column of `iceberg_type`. A numeric column compares numbers
+/// (`quote: false`; Trino has no common type for bigint and varchar), and a list with a code
+/// that is not a number cannot apply to it: none.
+fn typed_values_arg(values: &[String], iceberg_type: &str) -> Option<Value> {
+    let numeric = [
+        "bigint", "integer", "smallint", "tinyint", "double", "real", "decimal",
+    ]
+    .iter()
+    .any(|n| iceberg_type.starts_with(n));
+    if !numeric {
+        return Some(values_arg(values));
+    }
+    if !values.iter().all(|v| v.trim().parse::<f64>().is_ok()) {
+        return None;
+    }
+    let mut a = Mapping::new();
+    a.insert(
+        "values".into(),
+        Value::Sequence(values.iter().map(|v| Value::from(v.trim())).collect()),
+    );
+    a.insert("quote".into(), false.into());
+    Some(Value::Mapping(a))
 }
 
 fn model_yaml(t: &TablePlan, plan: &Plan, s: &SilverSettings, report: &mut SilverReport) -> Value {
@@ -226,6 +340,31 @@ fn model_yaml(t: &TablePlan, plan: &Plan, s: &SilverSettings, report: &mut Silve
                 &format!("the labels of enum type {}", m.pg_type),
             ));
         }
+        // RFC 0227: a value list the database declares fails the build; one only the code
+        // declares warns, since the application's dictionary can add values at run time.
+        let is_flag = flag(t, &m.column, s).is_some();
+        if !is_flag && !masked(&m.column) {
+            if let Some(c) = &f.check
+                && let Some(arg) = typed_values_arg(&c.values, &m.iceberg_type)
+            {
+                col_tests.entry(m.column.clone()).or_default().push(test(
+                    "accepted_values",
+                    Some(arg),
+                    "check-constraint",
+                    &format!("check constraint {}", c.constraint),
+                ));
+            } else if let Some(c) = f.code.as_ref().filter(|c| !c.values.is_empty())
+                && f.check.is_none()
+                && let Some(arg) = typed_values_arg(&c.values, &m.iceberg_type)
+            {
+                col_tests.entry(m.column.clone()).or_default().push(warn(test(
+                    "accepted_values",
+                    Some(arg),
+                    "code-list",
+                    "the application model's list (code-declared; the dictionary can add values)",
+                )));
+            }
+        }
         if let Some(class) = &f.pii_candidate
             && !masked(&m.column)
         {
@@ -294,6 +433,59 @@ fn model_yaml(t: &TablePlan, plan: &Plan, s: &SilverSettings, report: &mut Silve
         }
     }
 
+    // RFC 0227: a logical key only the code declares, tested where the database declares none.
+    let declared: std::collections::BTreeSet<&str> = t
+        .facts
+        .foreign_keys
+        .iter()
+        .filter(|fk| fk.columns.len() == 1)
+        .map(|fk| fk.columns[0].as_str())
+        .collect();
+    for f in &t.facts.columns {
+        let Some(target) = f.code.as_ref().and_then(|c| c.references.as_deref()) else {
+            continue;
+        };
+        if declared.contains(f.name.as_str()) || masked(&f.name) {
+            continue;
+        }
+        let found = plan
+            .tables
+            .iter()
+            .filter(|x| x.table.eq_ignore_ascii_case(target))
+            .min_by_key(|x| x.schema != t.schema);
+        match found.map(|x| (x, x.primary_key.as_slice())) {
+            Some((x, [pk])) => {
+                let mut a = Mapping::new();
+                a.insert("to".into(), format!("ref('{}')", model_name(x)).into());
+                a.insert(
+                    "field".into(),
+                    Value::from(if needs_quote(pk) {
+                        ident(pk)
+                    } else {
+                        pk.clone()
+                    }),
+                );
+                col_tests.entry(f.name.clone()).or_default().push(warn(test(
+                    "relationships",
+                    Some(Value::Mapping(a)),
+                    "code-reference",
+                    &format!(
+                        "the application model references {target} (code-declared; no foreign key \
+                         in the database)"
+                    ),
+                )));
+            }
+            Some(_) => report.skipped_foreign_keys.push(format!(
+                "{}.{} {}: code reference to {target}, whose key is not one column",
+                t.schema, t.table, f.name
+            )),
+            None => report.skipped_foreign_keys.push(format!(
+                "{}.{} {}: code reference to {target}, which is not planned",
+                t.schema, t.table, f.name
+            )),
+        }
+    }
+
     let mut columns = vec![];
     for m in &t.columns {
         let mut c = Mapping::new();
@@ -304,7 +496,12 @@ fn model_yaml(t: &TablePlan, plan: &Plan, s: &SilverSettings, report: &mut Silve
         if let Some(d) = t.column_facts(&m.column).and_then(|f| f.comment.clone()) {
             c.insert("description".into(), d.into());
         }
-        c.insert("data_type".into(), m.iceberg_type.clone().into());
+        let data_type = if flag(t, &m.column, s).is_some() {
+            "boolean".to_string()
+        } else {
+            m.iceberg_type.clone()
+        };
+        c.insert("data_type".into(), data_type.into());
         if let Some(tests) = col_tests.remove(&m.column) {
             c.insert("data_tests".into(), Value::Sequence(tests));
         }
@@ -319,7 +516,12 @@ fn model_yaml(t: &TablePlan, plan: &Plan, s: &SilverSettings, report: &mut Silve
     ekos.insert("source".into(), format!("{}.{}", t.schema, t.table).into());
     ekos.insert(
         "bronze".into(),
-        format!("{}.{}", t.namespace, t.table).into(),
+        format!(
+            "{}.{}",
+            t.namespace,
+            ekos_lakehouse_bronze::iceberg_name(&t.table)
+        )
+        .into(),
     );
     let mut meta = Mapping::new();
     meta.insert("ekos".into(), Value::Mapping(ekos));
@@ -348,11 +550,61 @@ fn dagster_meta(name: &str) -> Value {
 fn yaml(v: &Value) -> String {
     format!(
         "{YAML_HEADER}{}",
-        serde_yaml::to_string(v).expect("YAML values serialize")
+        quote_yaml11(&serde_yaml::to_string(v).expect("YAML values serialize"))
     )
 }
 
-fn sources_yaml(plan: &Plan) -> Value {
+/// `serde_yaml` writes `<<` and `=` bare, but dbt reads YAML with PyYAML, which takes them as
+/// YAML 1.1's merge and value keys and refuses the file. A list value in iDempiere's code holds
+/// both (RFC 0227): quote them wherever they stand alone as a scalar.
+fn quote_yaml11(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        // `<<` and `=` are merge and value keys; yes/no/on/off are YAML 1.1 booleans that
+        // serde_yaml (1.2) leaves bare. iDempiere has a code `ON`, which PyYAML would read as
+        // true. True/false are left alone: serde_yaml quotes them in a string, and a bare one is
+        // a boolean.
+        let bare = [
+            "<<", "=", "yes", "Yes", "YES", "no", "No", "NO", "on", "On", "ON", "off", "Off", "OFF",
+        ]
+        .iter()
+        .find(|v| line.trim_start() == format!("- {v}") || line.ends_with(&format!(": {v}")));
+        match bare {
+            Some(v) => out.push_str(&format!("{}'{v}'", &line[..line.len() - v.len()])),
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// RFC 0227: tests on bronze itself — a flag only the code declares must hold nothing but `Y`
+/// and `N` there, or silver's conversion would turn another value into NULL unseen.
+fn source_columns(t: &TablePlan, s: &SilverSettings) -> Vec<Value> {
+    t.columns
+        .iter()
+        .filter(|m| flag(t, &m.column, s) == Some("code"))
+        .map(|m| {
+            let mut c = Mapping::new();
+            c.insert("name".into(), m.column.clone().into());
+            if needs_quote(&m.column) {
+                c.insert("quote".into(), true.into());
+            }
+            c.insert(
+                "data_tests".into(),
+                Value::Sequence(vec![test(
+                    "accepted_values",
+                    Some(values_arg(&["Y".into(), "N".into()])),
+                    "code-flag",
+                    "the application model reads it as a boolean (code-declared; silver converts it)",
+                )]),
+            );
+            Value::Mapping(c)
+        })
+        .collect()
+}
+
+fn sources_yaml(plan: &Plan, s: &SilverSettings) -> Value {
     let mut by_ns: BTreeMap<&str, Vec<&TablePlan>> = BTreeMap::new();
     for t in &plan.tables {
         by_ns.entry(t.namespace.as_str()).or_default().push(t);
@@ -373,8 +625,15 @@ fn sources_yaml(plan: &Plan) -> Value {
                     let mut cfg = Mapping::new();
                     cfg.insert("meta".into(), Value::Mapping(meta));
                     let mut m = Mapping::new();
-                    m.insert("name".into(), t.table.clone().into());
+                    m.insert(
+                        "name".into(),
+                        ekos_lakehouse_bronze::iceberg_name(&t.table).into(),
+                    );
                     m.insert("config".into(), Value::Mapping(cfg));
+                    let columns = source_columns(t, s);
+                    if !columns.is_empty() {
+                        m.insert("columns".into(), Value::Sequence(columns));
+                    }
                     Value::Mapping(m)
                 })
                 .collect();
@@ -402,7 +661,10 @@ fn snapshot_yaml(t: &TablePlan) -> Value {
     };
     let mut cfg = Mapping::new();
     cfg.insert("schema".into(), silver_schema(t).into());
-    cfg.insert("alias".into(), format!("{}_history", t.table).into());
+    cfg.insert(
+        "alias".into(),
+        format!("{}_history", ekos_lakehouse_bronze::iceberg_name(&t.table)).into(),
+    );
     cfg.insert("unique_key".into(), key);
     match &t.decision.mode {
         LoadMode::Incremental { watermark, .. } => {
@@ -414,11 +676,20 @@ fn snapshot_yaml(t: &TablePlan) -> Value {
             cfg.insert("check_cols".into(), "all".into());
         }
     }
+    // RFC 0227: a row gone from silver (deleted at the source) is closed. Its `dbt_valid_to` is
+    // the snapshot run that first missed it — when the delete was seen, not when it happened.
+    cfg.insert("hard_deletes".into(), "invalidate".into());
     let mut meta = Mapping::new();
     meta.insert(
         "dagster".into(),
         dagster_meta(&format!("{}_history", model_name(t))),
     );
+    let mut ekos = Mapping::new();
+    ekos.insert(
+        "delete_time".into(),
+        "estimated: dbt_valid_to of a deleted row is the snapshot run that first missed it".into(),
+    );
+    meta.insert("ekos".into(), Value::Mapping(ekos));
     cfg.insert("meta".into(), Value::Mapping(meta));
     let mut snap = Mapping::new();
     snap.insert("name".into(), format!("{}_history", model_name(t)).into());
@@ -525,7 +796,7 @@ pub fn files(plan: &Plan, s: &SilverSettings) -> (BTreeMap<String, String>, Silv
     );
     out.insert(
         "dbt/models/bronze_sources.yml".into(),
-        yaml(&sources_yaml(plan)),
+        yaml(&sources_yaml(plan, s)),
     );
 
     let mut by_schema: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
@@ -687,6 +958,7 @@ mod tests {
         SilverSettings {
             pii: [("public.customer.email".to_string(), MaskMethod::Hmac)].into(),
             history: vec!["public.customer".into()],
+            ..Default::default()
         }
     }
 
@@ -805,6 +1077,328 @@ mod tests {
         assert_eq!(
             files(&the_plan(), &settings()),
             files(&the_plan(), &settings())
+        );
+    }
+
+    /// RFC 0227: an iDempiere-shaped pair of tables with declared and code-declared facts.
+    fn idempiere() -> Plan {
+        use ekos_lakehouse_bronze::{CodeFacts, ValueList};
+        let t = |name: &str, cols: Vec<SourceColumn>, pk: &str| SourceTable {
+            schema: "ADEMPIERE".into(),
+            name: name.into(),
+            oid: 0,
+            columns: cols,
+            primary_key: vec![pk.into()],
+            row_estimate: 10,
+            update_triggers: vec![],
+            foreign_keys: vec![],
+            comment: None,
+        };
+        let mut p = plan(
+            &[
+                t(
+                    "C_ORDER",
+                    vec![
+                        col("C_ORDER_ID", "NUMBER(10,0)", "decimal(10,0)", true),
+                        col("ISACTIVE", "CHAR(1 BYTE)", "char(1)", true),
+                        col("ISSOTRX", "CHAR(1 BYTE)", "char(1)", true),
+                        col("PRIORITYRULE", "CHAR(1 BYTE)", "char(1)", false),
+                        col("DOCSTATUS", "CHAR(2 BYTE)", "char(2)", true),
+                        col("C_BPARTNER_ID", "NUMBER(10,0)", "decimal(10,0)", true),
+                        col("ISSECRET", "CHAR(1 BYTE)", "char(1)", false),
+                    ],
+                    "C_ORDER_ID",
+                ),
+                t(
+                    "C_BPARTNER",
+                    vec![col("C_BPARTNER_ID", "NUMBER(10,0)", "decimal(10,0)", true)],
+                    "C_BPARTNER_ID",
+                ),
+            ],
+            &PlanSettings {
+                source_engine: ekos_lakehouse_bronze::SourceEngine::Oracle,
+                ..Default::default()
+            },
+        );
+        let order = p.tables.iter_mut().find(|t| t.table == "C_ORDER").unwrap();
+        let set = |order: &mut TablePlan,
+                   c: &str,
+                   f: &dyn Fn(&mut ekos_lakehouse_bronze::plan::ColumnFacts)| {
+            f(order
+                .facts
+                .columns
+                .iter_mut()
+                .find(|x| x.name == c)
+                .unwrap())
+        };
+        set(order, "ISACTIVE", &|f| {
+            f.check = Some(ValueList {
+                constraint: "SYS_C1".into(),
+                values: vec!["Y".into(), "N".into()],
+            })
+        });
+        set(order, "ISSOTRX", &|f| {
+            f.code = Some(CodeFacts {
+                boolean: true,
+                ..Default::default()
+            })
+        });
+        set(order, "PRIORITYRULE", &|f| {
+            f.check = Some(ValueList {
+                constraint: "PRIO_CHK".into(),
+                values: vec!["1".into(), "3".into(), "5".into()],
+            })
+        });
+        set(order, "DOCSTATUS", &|f| {
+            f.code = Some(CodeFacts {
+                values: vec!["CO".into(), "DR".into()],
+                ..Default::default()
+            })
+        });
+        set(order, "C_BPARTNER_ID", &|f| {
+            f.code = Some(CodeFacts {
+                references: Some("C_BPartner".into()),
+                ..Default::default()
+            })
+        });
+        set(order, "ISSECRET", &|f| {
+            f.code = Some(CodeFacts {
+                boolean: true,
+                ..Default::default()
+            })
+        });
+        p
+    }
+
+    fn masked_secret() -> SilverSettings {
+        SilverSettings {
+            pii: [("ADEMPIERE.C_ORDER.ISSECRET".to_string(), MaskMethod::Null)].into(),
+            history: vec!["ADEMPIERE.C_ORDER".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn flags_become_booleans_on_declared_or_code_evidence() {
+        let (f, r) = files(&idempiere(), &masked_secret());
+        let sql = &f["dbt/models/silver/ADEMPIERE/ADEMPIERE__C_ORDER.sql"];
+        for c in ["ISACTIVE", "ISSOTRX"] {
+            assert!(
+                sql.contains(&format!(
+                    "case \"{c}\" when 'Y' then true when 'N' then false end as \"{c}\""
+                )),
+                "{sql}"
+            );
+        }
+        // A masked column and a non-flag list stay as they are.
+        assert!(
+            sql.contains("cast(null as") && !sql.contains("case \"ISSECRET\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("    \"PRIORITYRULE\",") || sql.contains("    \"PRIORITYRULE\"\n"),
+            "{sql}"
+        );
+        assert!(
+            r.computed.contains(
+                &"ADEMPIERE.C_ORDER.ISACTIVE: Y/N flag as boolean (declared)".to_string()
+            )
+        );
+        assert!(
+            r.computed
+                .contains(&"ADEMPIERE.C_ORDER.ISSOTRX: Y/N flag as boolean (code)".to_string())
+        );
+        let yml = &f["dbt/models/silver/ADEMPIERE/_ADEMPIERE__models.yml"];
+        assert!(
+            yml.contains("name: ISACTIVE\n    quote: true\n    data_type: boolean"),
+            "{yml}"
+        );
+        // Only the code-declared flag is tested on bronze, and fails the build.
+        let src = &f["dbt/models/bronze_sources.yml"];
+        assert!(
+            src.contains("name: ISSOTRX") && !src.contains("name: ISACTIVE"),
+            "{src}"
+        );
+        assert!(src.contains("ekos_rule: code-flag"), "{src}");
+        let (text, _) = files(
+            &idempiere(),
+            &SilverSettings {
+                flags_as_text: true,
+                ..masked_secret()
+            },
+        );
+        assert!(!text["dbt/models/silver/ADEMPIERE/ADEMPIERE__C_ORDER.sql"].contains("then true"));
+    }
+
+    #[test]
+    fn declared_lists_fail_the_build_and_code_claims_warn() {
+        let (f, _) = files(&idempiere(), &masked_secret());
+        let yml: Value =
+            serde_yaml::from_str(&f["dbt/models/silver/ADEMPIERE/_ADEMPIERE__models.yml"]).unwrap();
+        let model = &yml["models"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "ADEMPIERE__C_ORDER")
+            .unwrap();
+        let col = |n: &str| {
+            model["columns"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == n)
+                .unwrap()
+                .clone()
+        };
+        let prio = &col("PRIORITYRULE")["data_tests"][0]["accepted_values"];
+        assert_eq!(prio["config"]["meta"]["ekos_rule"], "check-constraint");
+        assert!(prio["config"].get("severity").is_none());
+        let doc = &col("DOCSTATUS")["data_tests"][1]["accepted_values"];
+        assert_eq!(doc["config"]["meta"]["ekos_rule"], "code-list");
+        assert_eq!(doc["config"]["severity"], "warn");
+        let rel = &col("C_BPARTNER_ID")["data_tests"][1]["relationships"];
+        assert_eq!(rel["config"]["meta"]["ekos_rule"], "code-reference");
+        assert_eq!(rel["config"]["severity"], "warn");
+        assert_eq!(rel["arguments"]["to"], "ref('ADEMPIERE__C_BPARTNER')");
+        // The masked flag has no list test; a declared key wins over the code's claim.
+        assert!(col("ISSECRET").get("data_tests").is_none());
+        let mut declared = idempiere();
+        declared.tables[1].facts.foreign_keys.push(ForeignKey {
+            name: "CBPARTNER_CORDER".into(),
+            columns: vec!["C_BPARTNER_ID".into()],
+            ref_schema: "ADEMPIERE".into(),
+            ref_table: "C_BPARTNER".into(),
+            ref_columns: vec!["C_BPARTNER_ID".into()],
+        });
+        let (g, _) = files(&declared, &masked_secret());
+        let text = &g["dbt/models/silver/ADEMPIERE/_ADEMPIERE__models.yml"];
+        assert!(
+            !text.contains("code-reference") && text.contains("foreign-key"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn snapshots_close_deleted_rows_with_an_estimated_time() {
+        let (f, _) = files(&idempiere(), &masked_secret());
+        let snap = &f["dbt/snapshots/_snapshots.yml"];
+        assert!(snap.contains("hard_deletes: invalidate"), "{snap}");
+        assert!(
+            snap.contains("delete_time: 'estimated:")
+                || snap.contains("delete_time: \"estimated:")
+                || snap.contains("delete_time: estimated:"),
+            "{snap}"
+        );
+    }
+
+    #[test]
+    fn a_retained_purge_stays_current_and_is_flagged() {
+        use ekos_lakehouse_bronze::{Cadence, DeletePlan, PurgePolicy};
+        let mut p = idempiere();
+        let t = p
+            .tables
+            .iter_mut()
+            .find(|t| t.table == "C_BPARTNER")
+            .unwrap();
+        t.decision.mode = LoadMode::Incremental {
+            watermark: "UPDATED".into(),
+            keyset_deletes: false,
+        };
+        t.decision.deletes = Some(DeletePlan {
+            method: "bucketed_key_diff".into(),
+            cadence: Cadence::Run,
+            kind: "purge".into(),
+            purge_policy: Some(PurgePolicy::Retain),
+            contradicts_code: false,
+            classes: vec!["purged".into()],
+        });
+        let (f, r) = files(&p, &masked_secret());
+        let sql = &f["dbt/models/silver/ADEMPIERE/ADEMPIERE__C_BPARTNER.sql"];
+        assert!(
+            sql.contains("from marked\n    where \"_ekos_op\" != 'purge'"),
+            "{sql}"
+        );
+        assert!(sql.contains("end as \"_ekos_purged_at_source\""), "{sql}");
+        assert!(
+            r.computed
+                .iter()
+                .any(|c| c.contains("_ekos_purged_at_source"))
+        );
+        // Propagated purges: no flag column, as before.
+        p.tables
+            .iter_mut()
+            .find(|t| t.table == "C_BPARTNER")
+            .unwrap()
+            .decision
+            .deletes
+            .as_mut()
+            .unwrap()
+            .purge_policy = Some(PurgePolicy::Propagate);
+        let (g, _) = files(&p, &masked_secret());
+        assert!(
+            !g["dbt/models/silver/ADEMPIERE/ADEMPIERE__C_BPARTNER.sql"]
+                .contains("_ekos_purged_at_source")
+        );
+    }
+
+    #[test]
+    fn oracle_names_become_safe_model_and_asset_names() {
+        assert_eq!(
+            ekos_lakehouse_bronze::safe_name("public__film"),
+            "public__film"
+        );
+        let a = ekos_lakehouse_bronze::safe_name("ADEMPIERE__CREATE$JAVA$LOB$TABLE");
+        let b = ekos_lakehouse_bronze::safe_name("ADEMPIERE__CREATE#JAVA#LOB#TABLE");
+        assert!(
+            a.starts_with("ADEMPIERE__CREATE_JAVA_LOB_TABLE_") && a.len() == 41,
+            "{a}"
+        );
+        assert_ne!(a, b);
+        // The Dagster template's `_safe` gives exactly this (checked by running it).
+        assert_eq!(a, "ADEMPIERE__CREATE_JAVA_LOB_TABLE_7c31827c");
+        // The Iceberg table: only `$` must go (Trino reads `t$x` as a metadata table). The
+        // template's `_iceberg_name` gives the same.
+        use ekos_lakehouse_bronze::iceberg_name;
+        assert_eq!(
+            iceberg_name("CREATE$JAVA$LOB$TABLE"),
+            "CREATE_JAVA_LOB_TABLE_5f05e67e"
+        );
+        assert_eq!(iceberg_name("C_ORDER"), "C_ORDER");
+        assert_eq!(iceberg_name("odd-name"), "odd-name");
+    }
+
+    #[test]
+    fn yaml_1_1_keys_are_quoted_where_they_are_values() {
+        let v: Value = serde_yaml::from_str("values: ['<<', '=', '==', '<=']\nk: '<<'").unwrap();
+        let text = yaml(&v);
+        assert!(
+            text.contains("- '<<'\n") && text.contains("- '='\n") && text.contains("k: '<<'"),
+            "{text}"
+        );
+        let back: Value = serde_yaml::from_str(&text).unwrap();
+        assert_eq!(back, v);
+        // YAML 1.1 booleans: iDempiere's `DocSubTypeSO` has a code `ON`.
+        let v: Value = serde_yaml::from_str("values: ['OB', 'ON', 'off', 'Yes']").unwrap();
+        let text = yaml(&v);
+        assert!(
+            text.contains("- 'ON'\n") && text.contains("- 'off'\n") && text.contains("- 'Yes'\n"),
+            "{text}"
+        );
+        assert!(text.contains("- OB\n"), "{text}");
+    }
+
+    #[test]
+    fn a_value_list_on_a_numeric_column_compares_numbers() {
+        let codes = ["1".to_string(), "3".to_string()];
+        let a = typed_values_arg(&codes, "bigint").unwrap();
+        assert_eq!(a["quote"], Value::Bool(false));
+        assert_eq!(a["values"][1], Value::from("3"));
+        assert!(typed_values_arg(&["1".into(), "X".into()], "decimal(10,0)").is_none());
+        assert!(
+            typed_values_arg(&codes, "varchar")
+                .unwrap()
+                .get("quote")
+                .is_none()
         );
     }
 }

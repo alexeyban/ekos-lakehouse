@@ -16,6 +16,7 @@ pub mod monitor;
 pub mod pentaho_cmd;
 pub mod plan_cmd;
 pub mod reconcile;
+pub mod run_cmd;
 pub mod settings;
 pub mod source;
 pub mod source_oracle;
@@ -393,6 +394,39 @@ impl EkosExtension for LakehouseExtension {
                             .help("With --uninstall: also delete the stack's data volumes")),
                 )
                 .subcommand(
+                    clap::Command::new("run")
+                        .about(
+                            "Launch the pipeline's Dagster job (default `bronze`: bronze, silver \
+                             and gold) through `dagster-url` (EKOS RFC 0227)",
+                        )
+                        .arg(
+                            clap::Arg::new("job")
+                                .long("job")
+                                .default_value("bronze")
+                                .help("The job"),
+                        )
+                        .arg(
+                            clap::Arg::new("location")
+                                .long("location")
+                                .help("The code location, when several have the job"),
+                        )
+                        .arg(
+                            clap::Arg::new("in-process")
+                                .long("in-process")
+                                .action(clap::ArgAction::SetTrue)
+                                .help(
+                                    "Run every step in the run's process, one after another \
+                                     (for pipelines of hundreds of tables)",
+                                ),
+                        )
+                        .arg(
+                            clap::Arg::new("wait")
+                                .long("wait")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Follow the run to its end; fail unless it succeeded"),
+                        ),
+                )
+                .subcommand(
                     clap::Command::new("extraction")
                         .about(
                             "Step 5: the extraction plan with step 3's decisions, the operator's \
@@ -668,6 +702,8 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse deletes", Class::Admin, false),
             ("lakehouse status", Class::Read, false),
             ("lakehouse tables", Class::Read, false),
+            // Starts a Dagster run: the source is read and bronze written (RFC 0227).
+            ("lakehouse run", Class::External, false),
             // RFC 0226: the state directory only. A change and an approval are a person's.
             ("lakehouse extraction show", Class::Read, false),
             ("lakehouse extraction change", Class::Review, false),
@@ -741,8 +777,21 @@ impl EkosExtension for LakehouseExtension {
                     silver.pii = f.masks.clone();
                     f.plan
                 };
+                let reload = match plan_cmd::read_lock(&out) {
+                    Ok(deployed) => sync::expression_changes(&deployed, &plan),
+                    Err(_) => Vec::new(),
+                };
                 let w = plan_cmd::write(&plan, &silver, &out)?;
                 sync::commit_generated(&out, "lakehouse: generate")?;
+                // RFC 0227: rows written by an old expression are never rewritten incrementally.
+                let reload = if reload.is_empty() {
+                    reload
+                } else {
+                    sync::request_reload(&out, &plan, &reload, false)?
+                };
+                for t in reload {
+                    println!("reload requested: {t} — a column's load expression changed");
+                }
                 let n = w.files;
                 print!("{}", plan_cmd::render_summary(&plan));
                 print!("{}", plan_cmd::render_silver_report(&w.silver));
@@ -757,6 +806,17 @@ impl EkosExtension for LakehouseExtension {
             }
             Some(("deletes", m)) => deletes_cmd(ctx, m),
             Some(("extraction", m)) => extraction_cmd(ctx, m),
+            Some(("run", m)) => {
+                let settings = settings::load(ctx.config)?;
+                let Some(url) = settings.dagster_url.clone() else {
+                    anyhow::bail!("no dagster-url in [extensions.lakehouse]");
+                };
+                let job = m.get_one::<String>("job").cloned().unwrap_or_default();
+                let location = m.get_one::<String>("location").cloned();
+                let wait = m.get_flag("wait");
+                let in_process = m.get_flag("in-process");
+                off_runtime(|| run_cmd::run(&url, &job, location.as_deref(), in_process, wait))
+            }
             Some(("reconcile", m)) => {
                 let settings = settings::load(ctx.config)?;
                 let plan = plan_cmd::read_lock(&pipeline_dir(&settings, ctx))?;
@@ -1356,7 +1416,8 @@ fn fresh(
     repo: &std::path::Path,
 ) -> anyhow::Result<extraction::Final> {
     let step3 = read_step3(ctx);
-    let mut wf = facts::plan_facts(settings, ctx)?;
+    let ledger = facts::plan_facts(settings, ctx)?;
+    let mut wf = ledger.write;
     step3.apply_facts(&mut wf);
     let mut plan = {
         let redaction = ctx.config.redaction_config();
@@ -1367,6 +1428,8 @@ fn fresh(
     if let Ok(deployed) = plan_cmd::read_lock(repo) {
         ekos_lakehouse_bronze::carry_renames(&mut plan, &deployed);
     }
+    // RFC 0227: what the application model says about each column, for silver.
+    ekos_lakehouse_bronze::attach_code(&mut plan, &ledger.code);
     let excluded = step3.apply_plan(&mut plan);
     let masks = step3.masks_for(&plan);
     let p = extraction::Proposal {

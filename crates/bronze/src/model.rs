@@ -95,6 +95,44 @@ pub struct UpdateTrigger {
     pub body_sha: String,
 }
 
+/// EKOS RFC 0227: a check constraint of the form `column IN ('a', 'b', …)` — the values the
+/// database accepts in that column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValueList {
+    pub constraint: String,
+    pub values: Vec<String>,
+}
+
+/// A [`ValueList`] and the column it constrains.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnCheck {
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub list: ValueList,
+}
+
+/// EKOS RFC 0227: what the application model's code says about a column (RFC 0209) — a claim
+/// of the code, which the database may not enforce.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeFacts {
+    /// A `boolean` accessor: the column holds `Y`/`N`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub boolean: bool,
+    /// The codes of the column's list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// The table a logical foreign key points at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<String>,
+}
+
+impl CodeFacts {
+    pub fn is_empty(&self) -> bool {
+        !self.boolean && self.values.is_empty() && self.references.is_none()
+    }
+}
+
 /// EKOS's write-behaviour facts for one table (RFC 0212), as the plan uses them (RFC 0225).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteFacts {

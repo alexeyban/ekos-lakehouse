@@ -29,6 +29,16 @@ pub trait Source {
 
     /// `true` when the server refuses this session's writes, as it must.
     fn writes_refused(&self) -> anyhow::Result<bool>;
+
+    /// EKOS RFC 0227: check constraints of the form `column IN ('a', …)` in `schemas`. None by
+    /// default: PostgreSQL states its value sets as enum types, which `read_tables` reads.
+    fn value_lists(
+        &self,
+        _schemas: &[String],
+        _redaction: &ekos_common::redaction::RedactionConfig,
+    ) -> anyhow::Result<Vec<ekos_lakehouse_bronze::ColumnCheck>> {
+        Ok(vec![])
+    }
 }
 
 /// PostgreSQL, through `ekos-pg-live`'s session.

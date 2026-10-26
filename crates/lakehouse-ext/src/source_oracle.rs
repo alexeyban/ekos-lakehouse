@@ -9,7 +9,8 @@
 use crate::source::{Source, assigned_new_columns};
 use ekos_lakehouse_bronze::typemap_oracle::NO_VALUES_SCALE;
 use ekos_lakehouse_bronze::{
-    ForeignKey, SourceColumn, SourceEngine, SourceTable, TypeKind, UpdateTrigger,
+    ColumnCheck, ForeignKey, SourceColumn, SourceEngine, SourceTable, TypeKind, UpdateTrigger,
+    ValueList,
 };
 use ekos_lakehouse_trino::TrinoReader;
 use ekos_migrate_validate::{Dialect, EngineReader, ReadError};
@@ -365,6 +366,51 @@ impl Source for Oracle {
         self
     }
 
+    fn value_lists(
+        &self,
+        schemas: &[String],
+        redaction: &ekos_common::redaction::RedactionConfig,
+    ) -> anyhow::Result<Vec<ColumnCheck>> {
+        let f = self.family.prefix();
+        self.source.begin_read_only()?;
+        let read: anyhow::Result<Vec<Vec<String>>> = schemas
+            .iter()
+            .map(|owner| {
+                self.rows(
+                    &format!(
+                        "SELECT c.owner, c.table_name, c.constraint_name, c.search_condition_vc                          FROM {f}_constraints c                          WHERE c.owner = :1 AND c.constraint_type = 'C' AND c.status = 'ENABLED'                          ORDER BY c.table_name, c.constraint_name"
+                    ),
+                    &[owner],
+                )
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map(|v| v.into_iter().flatten().collect());
+        self.source.end_transaction()?;
+        let mut out = vec![];
+        for r in read? {
+            let Some((column, values)) = parse_in_list(&r[3]) else {
+                continue;
+            };
+            // A literal the redaction would change is not a code: the list is left out whole.
+            if values
+                .iter()
+                .any(|v| ekos_common::redaction::redact(v, redaction) != *v)
+            {
+                continue;
+            }
+            out.push(ColumnCheck {
+                schema: r[0].clone(),
+                table: r[1].clone(),
+                column,
+                list: ValueList {
+                    constraint: r[2].clone(),
+                    values,
+                },
+            });
+        }
+        Ok(out)
+    }
+
     fn writes_refused(&self) -> anyhow::Result<bool> {
         // A zero-row insert into a table the user can read, always rolled back (RFC 0211).
         let probe = self.rows(
@@ -375,6 +421,63 @@ impl Source for Oracle {
             anyhow::bail!("this user can read no other schema's table to probe a write on");
         };
         Ok(self.source.check_write_refused(&r[0], &r[1])?.is_safe())
+    }
+}
+
+/// Pure: `column IN ('a', 'b')` (any case, one column, string literals only) → the column as
+/// the catalog spells it (unquoted names fold to upper case) and the values, in order. Anything
+/// else — `NOT IN`, a range, two columns, a number — is not a list of codes.
+pub fn parse_in_list(condition: &str) -> Option<(String, Vec<String>)> {
+    let s = condition.trim();
+    let (column, rest) = if let Some(q) = s.strip_prefix('"') {
+        let end = q.find('"')?;
+        (q[..end].to_string(), &q[end + 1..])
+    } else {
+        let end = s.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '#'))?;
+        (s[..end].to_uppercase(), &s[end..])
+    };
+    if column.is_empty() {
+        return None;
+    }
+    let rest = rest.trim_start();
+    if rest.len() < 2 || !rest[..2].eq_ignore_ascii_case("in") {
+        return None;
+    }
+    let rest = rest[2..].trim_start().strip_prefix('(')?;
+    let mut values = vec![];
+    let mut chars = rest.char_indices().peekable();
+    loop {
+        while chars.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.next()?.1 != '\'' {
+            return None;
+        }
+        let mut v = String::new();
+        loop {
+            let (_, c) = chars.next()?;
+            if c == '\'' {
+                if chars.peek().is_some_and(|(_, c)| *c == '\'') {
+                    chars.next();
+                    v.push('\'');
+                } else {
+                    break;
+                }
+            } else {
+                v.push(c);
+            }
+        }
+        values.push(v);
+        while chars.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+            chars.next();
+        }
+        match chars.next()? {
+            (_, ',') => continue,
+            (i, ')') => {
+                return rest[i + 1..].trim().is_empty().then_some((column, values));
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -403,5 +506,33 @@ impl EngineReader for Oracle {
             engine: self.label.clone(),
             message: e.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod value_list_tests {
+    use super::parse_in_list;
+
+    #[test]
+    fn only_a_one_column_list_of_literals_is_a_value_list() {
+        assert_eq!(
+            parse_in_list("IsActive in ('Y','N')"),
+            Some(("ISACTIVE".into(), vec!["Y".into(), "N".into()]))
+        );
+        assert_eq!(
+            parse_in_list(" \"DocStatus\" IN ( 'CO' , 'it''s' ) "),
+            Some(("DocStatus".into(), vec!["CO".into(), "it's".into()]))
+        );
+        for no in [
+            "IsActive NOT IN ('Y','N')",
+            "Qty in (1, 2)",
+            "a in ('Y') or b in ('N')",
+            "Amt > 0",
+            "\"X\" IS NOT NULL",
+            "IsActive in ('Y','N'",
+            "IsActive inside ('Y')",
+        ] {
+            assert_eq!(parse_in_list(no), None, "{no}");
+        }
     }
 }

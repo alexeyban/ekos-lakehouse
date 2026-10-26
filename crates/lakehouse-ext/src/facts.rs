@@ -345,14 +345,87 @@ pub fn translations(store: &dyn KnowledgeStore) -> anyhow::Result<Vec<serde_json
 /// EKOS's `WriteBehaviour` kind (RFC 0212).
 pub const WRITE_BEHAVIOUR_KIND: &str = "WriteBehaviour";
 
+/// EKOS's application model kind (RFC 0209).
+pub const MODEL_TABLE_KIND: &str = "ModelTable";
+
+/// Lowercase table → lowercase column → what the code says (RFC 0227).
+pub type CodeFactsByTable = std::collections::BTreeMap<
+    String,
+    std::collections::BTreeMap<String, ekos_lakehouse_bronze::CodeFacts>,
+>;
+
+/// What the plan reads from the ledger, in one pass over its objects.
+#[derive(Debug, Default)]
+pub struct LedgerFacts {
+    /// By `OWNER.TABLE` (RFC 0225).
+    pub write: std::collections::BTreeMap<String, ekos_lakehouse_bronze::WriteFacts>,
+    /// RFC 0227.
+    pub code: CodeFactsByTable,
+}
+
+/// Pure: one `ModelTable`'s columns as code facts.
+pub fn code_facts(
+    o: &KirObject,
+) -> Option<(
+    String,
+    std::collections::BTreeMap<String, ekos_lakehouse_bronze::CodeFacts>,
+)> {
+    let table = o
+        .properties
+        .get("table_name")?
+        .as_str()?
+        .to_ascii_lowercase();
+    let cols = o.properties.get("columns")?.as_object()?;
+    let mut out = std::collections::BTreeMap::new();
+    for (name, c) in cols {
+        let f = ekos_lakehouse_bronze::CodeFacts {
+            boolean: c.get("boolean").and_then(|v| v.as_bool()).unwrap_or(false),
+            values: c
+                .get("values")
+                .and_then(|v| v.as_object())
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default(),
+            references: c
+                .get("references")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        };
+        if !f.is_empty() {
+            out.insert(name.to_ascii_lowercase(), f);
+        }
+    }
+    Some((table, out))
+}
+
 /// The latest write-behaviour facts per table, keyed `OWNER.TABLE` as the catalog spells them
 /// (RFC 0225 §2.1). Only live tables (`origin: live`) have an owner the source schema matches.
 pub fn write_facts(
     store: &dyn ekos_ledger::KnowledgeReader,
 ) -> anyhow::Result<std::collections::BTreeMap<String, ekos_lakehouse_bronze::WriteFacts>> {
+    Ok(ledger_facts(store)?.write)
+}
+
+/// [`write_facts`] and the application model's code facts, from one pass.
+pub fn ledger_facts(store: &dyn ekos_ledger::KnowledgeReader) -> anyhow::Result<LedgerFacts> {
     let mut latest: std::collections::BTreeMap<String, (i64, ekos_lakehouse_bronze::WriteFacts)> =
         Default::default();
+    let mut code: std::collections::BTreeMap<
+        String,
+        (
+            i64,
+            std::collections::BTreeMap<String, ekos_lakehouse_bronze::CodeFacts>,
+        ),
+    > = Default::default();
     for o in store.all_objects()? {
+        if o.kind == ObjectKind::Custom(MODEL_TABLE_KIND.into()) {
+            if let Some((t, cols)) = code_facts(&o) {
+                let at = o.created_at.timestamp_micros();
+                if code.get(&t).is_none_or(|(x, _)| at >= *x) {
+                    code.insert(t, (at, cols));
+                }
+            }
+            continue;
+        }
         if o.kind != ObjectKind::Custom(WRITE_BEHAVIOUR_KIND.into()) {
             continue;
         }
@@ -382,26 +455,31 @@ pub fn write_facts(
             latest.insert(key, (at, facts));
         }
     }
-    Ok(latest.into_iter().map(|(k, (_, f))| (k, f)).collect())
+    Ok(LedgerFacts {
+        write: latest.into_iter().map(|(k, (_, f))| (k, f)).collect(),
+        code: code.into_iter().map(|(k, (_, c))| (k, c)).collect(),
+    })
 }
 
-/// The facts a plan uses: none unless `application-watermark` is set (reading the ledger costs a
-/// full pass over its objects, which a PostgreSQL plan does not need).
+/// The facts a plan uses from the ledger. Without one, none — an error only when
+/// `application-watermark` needs the write-behaviour facts (RFC 0225).
 pub fn plan_facts(
     s: &crate::settings::Settings,
     ctx: &ekos::extension::CommandContext,
-) -> anyhow::Result<std::collections::BTreeMap<String, ekos_lakehouse_bronze::WriteFacts>> {
-    if s.application_watermark.is_none() {
-        return Ok(Default::default());
-    }
-    let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd).map_err(|e| {
-        anyhow::anyhow!(
+) -> anyhow::Result<LedgerFacts> {
+    let store = match ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd) {
+        Ok(store) => store,
+        Err(e) if s.application_watermark.is_some() => anyhow::bail!(
             "application-watermark needs EKOS's write-behaviour facts: run `ekos commit` with a \
              [[databases]] entry first ({e})"
-        )
-    })?;
-    let facts = write_facts(store.as_ref())?;
-    if facts.is_empty() {
+        ),
+        Err(_) => return Ok(LedgerFacts::default()),
+    };
+    let mut facts = ledger_facts(store.as_ref())?;
+    if s.application_watermark.is_none() {
+        // Write behaviour chooses modes only with an application watermark.
+        facts.write.clear();
+    } else if facts.write.is_empty() {
         eprintln!(
             "note: the ledger holds no write-behaviour facts; every table is planned without them"
         );

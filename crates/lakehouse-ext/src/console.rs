@@ -135,6 +135,15 @@ pub fn pages() -> Vec<ConsolePage> {
                     command: vec!["lakehouse", "generate"],
                     ..Default::default()
                 },
+                Action {
+                    label: "Run the pipeline",
+                    command: vec!["lakehouse", "run"],
+                    confirm: Some(
+                        "Dagster runs the job now: every table is read from the source, loaded \
+                         into bronze, reconciled, and silver is built.",
+                    ),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         },

@@ -31,7 +31,9 @@ pub fn build_plan_with(
         redaction,
         ps.modes.full_refresh_max_rows,
     )?;
-    Ok(ekos_lakehouse_bronze::plan_with(&sources, &ps, facts))
+    let mut plan = ekos_lakehouse_bronze::plan_with(&sources, &ps, facts);
+    ekos_lakehouse_bronze::attach_checks(&mut plan, &src.value_lists(&s.schemas(), redaction)?);
+    Ok(plan)
 }
 
 /// The source engine, connected read-only (RFC 0216 §2.1).
@@ -190,6 +192,11 @@ pub fn write(
     let mut kept = Vec::new();
     let mut foreign = Vec::new();
     for (path, content) in &files {
+        // The lock records what the SQL beside it was rendered from: kept apart from that SQL
+        // it would describe another pipeline, so it is always rewritten (EKOS RFC 0227).
+        if path == "lakehouse.lock.json" {
+            continue;
+        }
         let Ok(have) = std::fs::read_to_string(out.join(path)) else {
             continue;
         };

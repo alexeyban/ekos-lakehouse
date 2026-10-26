@@ -1,0 +1,239 @@
+//! EKOS RFC 0227 §2.4: `lakehouse run` — launch the pipeline's Dagster job through Dagster's
+//! GraphQL API, and optionally follow it to the end. EKOS still moves no row: Dagster runs the
+//! job, which sends the generated SQL to Trino.
+
+use serde_json::{Value, json};
+use std::time::Duration;
+
+const REPOSITORIES: &str = "query { repositoriesOrError { __typename \
+    ... on RepositoryConnection { nodes { name location { name } jobs { name } } } \
+    ... on PythonError { message } } }";
+
+const LAUNCH: &str = "mutation Launch($p: ExecutionParams!) { launchRun(executionParams: $p) { \
+    __typename \
+    ... on LaunchRunSuccess { run { runId } } \
+    ... on PythonError { message } \
+    ... on RunConfigValidationInvalid { errors { message } } \
+    ... on PipelineNotFoundError { message } \
+    ... on InvalidSubsetError { message } \
+    ... on UnauthorizedError { message } \
+    ... on RunConflict { message } } }";
+
+const STATUS: &str = "query Status($id: ID!) { runOrError(runId: $id) { __typename \
+    ... on Run { status } ... on RunNotFoundError { message } ... on PythonError { message } } }";
+
+/// Where a job lives in Dagster's workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRef {
+    pub location: String,
+    pub repository: String,
+    pub job: String,
+}
+
+/// Pure: the one repository that has `job` (in `location`, when given), from the repositories
+/// query's answer.
+pub fn find_job(answer: &Value, job: &str, location: Option<&str>) -> anyhow::Result<JobRef> {
+    let r = &answer["data"]["repositoriesOrError"];
+    if r["__typename"] != "RepositoryConnection" {
+        anyhow::bail!(
+            "Dagster could not list its repositories: {}",
+            r["message"].as_str().unwrap_or("no answer")
+        );
+    }
+    let found: Vec<JobRef> = r["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|n| {
+            n["jobs"]
+                .as_array()
+                .is_some_and(|j| j.iter().any(|x| x["name"] == job))
+        })
+        .map(|n| JobRef {
+            location: n["location"]["name"].as_str().unwrap_or_default().into(),
+            repository: n["name"].as_str().unwrap_or_default().into(),
+            job: job.into(),
+        })
+        .filter(|j| location.is_none_or(|l| j.location == l))
+        .collect();
+    match found.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => anyhow::bail!(
+            "no code location in Dagster has a job `{job}`{}: is this project's pipeline loaded?",
+            location.map(|l| format!(" in {l}")).unwrap_or_default()
+        ),
+        many => anyhow::bail!(
+            "several code locations have a job `{job}` ({}): pass --location",
+            many.iter()
+                .map(|j| j.location.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Pure: the launch mutation's variables. `in_process` runs every step in the run's own process,
+/// one after another: no process per step, which on a pipeline of hundreds of tables costs more
+/// than the steps themselves.
+pub fn launch_variables(j: &JobRef, in_process: bool) -> Value {
+    let mut p = json!({"selector": {
+        "repositoryLocationName": j.location,
+        "repositoryName": j.repository,
+        "jobName": j.job,
+    }});
+    if in_process {
+        p["runConfigData"] = json!({"execution": {"config": {"in_process": {}}}});
+    }
+    json!({ "p": p })
+}
+
+/// Pure: the run id, or why Dagster refused.
+pub fn launched(answer: &Value) -> anyhow::Result<String> {
+    let r = &answer["data"]["launchRun"];
+    if let Some(id) = r["run"]["runId"].as_str() {
+        return Ok(id.to_string());
+    }
+    let mut why: Vec<String> = r["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["message"].as_str().map(str::to_string))
+        .collect();
+    if let Some(m) = r["message"].as_str() {
+        why.push(m.to_string());
+    }
+    if let Some(e) = answer["errors"].as_array() {
+        why.extend(
+            e.iter()
+                .filter_map(|e| e["message"].as_str().map(str::to_string)),
+        );
+    }
+    anyhow::bail!(
+        "Dagster did not launch the run ({}): {}",
+        r["__typename"].as_str().unwrap_or("no answer"),
+        why.join("; ")
+    )
+}
+
+/// Pure: a run's status, when it has one.
+pub fn status(answer: &Value) -> Option<String> {
+    answer["data"]["runOrError"]["status"]
+        .as_str()
+        .map(str::to_string)
+}
+
+pub const TERMINAL: &[&str] = &["SUCCESS", "FAILURE", "CANCELED"];
+
+fn post(base: &str, query: &str, variables: Value) -> anyhow::Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        // Launching a job of hundreds of assets plans the whole run first: minutes, not seconds.
+        .timeout(Duration::from_secs(600))
+        .build()?;
+    let r = client
+        .post(format!("{}/graphql", base.trim_end_matches('/')))
+        .json(&json!({"query": query, "variables": variables}))
+        .send()?;
+    if !r.status().is_success() {
+        anyhow::bail!("Dagster answered {}", r.status());
+    }
+    Ok(r.json()?)
+}
+
+/// Launch `job`, print where to follow it, and with `wait` poll until it ends. Blocking: the
+/// caller runs it off the async runtime.
+pub fn run(
+    base: &str,
+    job: &str,
+    location: Option<&str>,
+    in_process: bool,
+    wait: bool,
+) -> anyhow::Result<()> {
+    let j = find_job(&post(base, REPOSITORIES, json!({}))?, job, location)?;
+    let id = launched(&post(base, LAUNCH, launch_variables(&j, in_process))?)?;
+    println!(
+        "launched {} in {} as run {id}: {}/runs/{id}",
+        j.job,
+        j.location,
+        base.trim_end_matches('/')
+    );
+    if !wait {
+        return Ok(());
+    }
+    let started = std::time::Instant::now();
+    let mut last = String::new();
+    loop {
+        std::thread::sleep(Duration::from_secs(10));
+        let Some(s) = status(&post(base, STATUS, json!({"id": id}))?) else {
+            anyhow::bail!("Dagster no longer knows run {id}");
+        };
+        if s != last {
+            println!("{:>6}s  {s}", started.elapsed().as_secs());
+            last = s.clone();
+        }
+        if TERMINAL.contains(&s.as_str()) {
+            return if s == "SUCCESS" {
+                Ok(())
+            } else {
+                anyhow::bail!("run {id} ended {s}: see its page for the failed steps")
+            };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repos() -> Value {
+        json!({"data": {"repositoriesOrError": {"__typename": "RepositoryConnection", "nodes": [
+            {"name": "__repository__", "location": {"name": "idem"}, "jobs": [{"name": "bronze"}, {"name": "bronze_maintenance_job"}]},
+            {"name": "__repository__", "location": {"name": "pagila"}, "jobs": [{"name": "bronze"}]},
+            {"name": "__repository__", "location": {"name": "other"}, "jobs": [{"name": "x"}]}
+        ]}}})
+    }
+
+    #[test]
+    fn the_job_is_found_by_name_and_location() {
+        let e = find_job(&repos(), "bronze", None).unwrap_err().to_string();
+        assert!(e.contains("idem, pagila"), "{e}");
+        let j = find_job(&repos(), "bronze", Some("idem")).unwrap();
+        assert_eq!(j.repository, "__repository__");
+        assert_eq!(
+            launch_variables(&j, false)["p"]["selector"]["repositoryLocationName"],
+            "idem"
+        );
+        assert!(
+            launch_variables(&j, false)["p"]
+                .get("runConfigData")
+                .is_none()
+        );
+        assert_eq!(
+            launch_variables(&j, true)["p"]["runConfigData"]["execution"]["config"],
+            json!({"in_process": {}})
+        );
+        assert!(find_job(&repos(), "nope", None).is_err());
+        let broken = json!({"data": {"repositoriesOrError": {"__typename": "PythonError", "message": "boom"}}});
+        assert!(
+            find_job(&broken, "bronze", None)
+                .unwrap_err()
+                .to_string()
+                .contains("boom")
+        );
+    }
+
+    #[test]
+    fn a_launch_answers_with_a_run_id_or_the_reason() {
+        let ok = json!({"data": {"launchRun": {"__typename": "LaunchRunSuccess", "run": {"runId": "r1"}}}});
+        assert_eq!(launched(&ok).unwrap(), "r1");
+        let bad = json!({"data": {"launchRun": {"__typename": "RunConfigValidationInvalid", "errors": [{"message": "missing ops"}]}}});
+        let e = launched(&bad).unwrap_err().to_string();
+        assert!(
+            e.contains("RunConfigValidationInvalid") && e.contains("missing ops"),
+            "{e}"
+        );
+        assert_eq!(
+            status(&json!({"data": {"runOrError": {"__typename": "Run", "status": "STARTED"}}})),
+            Some("STARTED".into())
+        );
+    }
+}

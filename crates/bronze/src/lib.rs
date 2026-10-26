@@ -12,7 +12,11 @@ pub mod typemap_oracle;
 
 pub use mode::{Cadence, DeletePlan, LoadMode, ModeSettings, PurgePolicy};
 pub use model::{
-    ForeignKey, SourceColumn, SourceEngine, SourceTable, TypeKind, UpdateTrigger, WriteFacts,
+    CodeFacts, ColumnCheck, ForeignKey, SourceColumn, SourceEngine, SourceTable, TypeKind,
+    UpdateTrigger, ValueList, WriteFacts,
 };
-pub use plan::{ColumnRename, Plan, TablePlan, carry_renames, plan, plan_with};
+pub use plan::{
+    ColumnRename, Plan, TablePlan, attach_checks, attach_code, carry_renames, iceberg_name, plan,
+    plan_with, safe_name,
+};
 pub use typemap::{CompareRule, Lossiness, Mapping};

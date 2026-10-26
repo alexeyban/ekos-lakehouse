@@ -90,6 +90,85 @@ pub struct ColumnFacts {
     pub enum_labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pii_candidate: Option<String>,
+    /// RFC 0227: a check constraint listing the column's values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<crate::model::ValueList>,
+    /// RFC 0227: what the application model says about the column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<crate::model::CodeFacts>,
+}
+
+/// EKOS RFC 0227: the Iceberg table's name. Trino reads `t$x` as a metadata table of `t` (`t$files`),
+/// so a source table named with `$` (`CREATE$JAVA$LOB$TABLE`) could be created but never found again:
+/// it takes [`safe_name`]. Every other name is kept as it is. The Dagster template mirrors it.
+pub fn iceberg_name(name: &str) -> String {
+    if name.contains('$') {
+        safe_name(name)
+    } else {
+        name.to_string()
+    }
+}
+
+/// EKOS RFC 0227: `name` as Dagster and dbt accept it (`[A-Za-z0-9_]`). Oracle allows `$` and
+/// `#` (`CREATE$JAVA$LOB$TABLE`): each becomes `_`, and a changed name gets the FNV-1a hash of the
+/// original so two names cannot meet. The Dagster template mirrors it (`_safe`).
+pub fn safe_name(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe == name {
+        return safe;
+    }
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("{safe}_{h:08x}")
+}
+
+/// RFC 0227: each check list onto its column's facts (matched exactly: the catalog's names).
+pub fn attach_checks(plan: &mut Plan, checks: &[crate::model::ColumnCheck]) {
+    for c in checks {
+        let Some(t) = plan
+            .tables
+            .iter_mut()
+            .find(|t| t.schema == c.schema && t.table == c.table)
+        else {
+            continue;
+        };
+        if let Some(f) = t.facts.columns.iter_mut().find(|f| f.name == c.column) {
+            f.check = Some(c.list.clone());
+        }
+    }
+}
+
+/// RFC 0227: the application model's facts, by lowercase table then lowercase column, onto the
+/// plan's columns. The model names tables without a schema.
+pub fn attach_code(
+    plan: &mut Plan,
+    code: &BTreeMap<String, BTreeMap<String, crate::model::CodeFacts>>,
+) {
+    for t in &mut plan.tables {
+        let Some(cols) = code.get(&t.table.to_ascii_lowercase()) else {
+            continue;
+        };
+        for f in &mut t.facts.columns {
+            if let Some(c) = cols
+                .get(&f.name.to_ascii_lowercase())
+                .filter(|c| !c.is_empty())
+            {
+                f.code = Some(c.clone());
+            }
+        }
+    }
 }
 
 impl TablePlan {
@@ -229,6 +308,8 @@ pub fn plan_with(
                         comment: c.comment.clone(),
                         enum_labels: c.enum_labels.clone(),
                         pii_candidate: c.pii_candidate.clone(),
+                        check: None,
+                        code: None,
                     })
                     .collect(),
             },
