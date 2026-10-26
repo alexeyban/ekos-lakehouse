@@ -124,33 +124,6 @@ pub fn requirements_step(states: &[String]) -> Option<Step> {
     ))
 }
 
-/// Where `ekos docs generate --layout estate` records its latest run, under the state directory
-/// (EKOS RFC 0218).
-pub const ESTATE_RECORD: &str = "docs/estate.json";
-
-/// Pure: step 2 from the latest estate generation. Publishing is the operator's, outside EKOS
-/// (RFC 0214), so a generation leaves the step partial.
-pub fn docs_step(record: Option<&serde_json::Value>) -> Step {
-    let Some(r) = record else {
-        return Step::new(
-            2,
-            StepState::Todo,
-            "generate the source-estate documentation: `ekos docs generate --layout estate \
-             --output <dir>`",
-        );
-    };
-    Step::new(
-        2,
-        StepState::Partial,
-        format!(
-            "{} page(s) generated {} into {}; publishing is the operator's",
-            r["pages"].as_u64().unwrap_or(0),
-            r["at"].as_str().unwrap_or("?"),
-            r["output"].as_str().unwrap_or("?"),
-        ),
-    )
-}
-
 /// Pure: the steps from the counts, with step 2 from the latest estate generation, step 4 from
 /// the requirements when there are any (EKOS RFC 0215) and step 5 from the extraction plan (EKOS
 /// RFC 0226).
@@ -229,10 +202,9 @@ pub fn workflow_steps(ctx: &WorkflowContext<'_>) -> Vec<Step> {
     match ledger_counts(ctx) {
         Ok(c) => steps(
             &c,
-            docs_step(
-                std::fs::read_to_string(ctx.config.ekos_dir(ctx.cwd).join(ESTATE_RECORD))
-                    .ok()
-                    .and_then(|t| serde_json::from_str(&t).ok())
+            crate::docs::step(
+                crate::docs::read_record(ctx.config, ctx.cwd).as_ref(),
+                crate::docs::read_published(&crate::docs::state_dir(ctx.config, ctx.cwd), false)
                     .as_ref(),
             ),
             requirements_states(ctx),
@@ -423,7 +395,7 @@ mod tests {
         );
         let s = steps(
             &c,
-            docs_step(None),
+            crate::docs::step(None, None),
             None,
             Step::new(5, StepState::Done, "approved"),
             None,
@@ -436,25 +408,13 @@ mod tests {
         assert!(
             steps(
                 &Counts::default(),
-                docs_step(None),
+                crate::docs::step(None, None),
                 None,
                 Step::new(5, StepState::Todo, "plan"),
                 None
             )
             .iter()
             .all(|x| x.state == StepState::Todo)
-        );
-    }
-
-    #[test]
-    fn step_2_comes_from_the_latest_estate_generation() {
-        assert_eq!(docs_step(None).state, StepState::Todo);
-        let r = serde_json::json!({ "pages": 1060, "at": "2026-10-26T12:00:00Z", "output": "/d" });
-        let s = docs_step(Some(&r));
-        assert_eq!(s.state, StepState::Partial);
-        assert_eq!(
-            s.detail,
-            "1060 page(s) generated 2026-10-26T12:00:00Z into /d; publishing is the operator's"
         );
     }
 }

@@ -95,6 +95,9 @@ pub struct Settings {
     /// than `mass-delete-rows` keys, vanishing in one check is not applied. Defaults 5 and 10,000.
     pub mass_delete_percent: Option<u32>,
     pub mass_delete_rows: Option<u64>,
+    /// EKOS RFC 0230: `[extensions.lakehouse.docs]` — where step 2's documentation is written and
+    /// the store it is published to.
+    pub docs: crate::docs::DocsSettings,
     /// For `oracle`: the `[[databases]]` entry `source-database` names, filled in by [`load`].
     #[serde(skip)]
     pub database: Option<ekos_compiler_core::DatabaseConfig>,

@@ -147,11 +147,83 @@ pub fn pages() -> Vec<ConsolePage> {
             ],
             ..Default::default()
         },
+        docs_page(),
         requirements_page(),
         marts_page(),
         extraction_page(),
         pentaho_page(),
     ]
+}
+
+/// EKOS RFC 0230: step 2 — the source-estate documentation, generated and published.
+fn docs_page() -> ConsolePage {
+    let show = || vec!["lakehouse", "docs", "show", "--json"];
+    ConsolePage {
+        id: "docs",
+        title: "Documentation",
+        description: "Step 2: the source estate as wiki pages, written from the ledger alone — the data \
+                      model by area, one page per table and routine, the schema history, the \
+                      findings. No data value reaches a page, and text is taken only from sources \
+                      whose licence is known. Generate writes the pages; Preview publish shows what \
+                      would change in the documentation store set in ekos.toml \
+                      ([extensions.lakehouse.docs]); Publish sends them. Sections a person writes \
+                      in a page are kept on every regeneration.",
+        panels: vec![
+            Panel {
+                id: "state",
+                title: "Documentation",
+                command: show(),
+                view: View::Fields {
+                    fields: vec![
+                        Column::badge("/summary/state", "Step 2"),
+                        Column::new("/summary/pages", "Pages"),
+                        Column::new("/summary/generated_at", "Generated at"),
+                        Column::new("/summary/output", "Written to"),
+                        Column::new("/summary/target", "Store"),
+                        Column::new("/summary/destination", "Destination"),
+                        Column::new("/summary/credentials", "Credentials from"),
+                        Column::new("/summary/published", "Last publish"),
+                        Column::new("/summary/dry_run", "Last preview"),
+                        Column::new("/summary/publisher", "Publisher"),
+                    ],
+                },
+                empty: "",
+                ..Default::default()
+            },
+            Panel {
+                id: "home",
+                title: "Home page",
+                command: show(),
+                view: View::Markdown { pointer: "/home" },
+                empty: "Nothing generated yet: Generate.",
+                ..Default::default()
+            },
+        ],
+        actions: vec![
+            Action {
+                label: "Generate",
+                command: vec!["lakehouse", "docs", "generate"],
+                ..Default::default()
+            },
+            Action {
+                label: "Preview publish",
+                command: vec!["lakehouse", "docs", "publish"],
+                flags: vec!["dry-run"],
+                ..Default::default()
+            },
+            Action {
+                label: "Publish",
+                command: vec!["lakehouse", "docs", "publish"],
+                confirm: Some(
+                    "The generated pages are sent to the documentation store shown above and \
+                     replace the pages published there before. On a public wiki anyone can read \
+                     them.",
+                ),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
 }
 
 /// EKOS RFC 0228: step 7 — each approved requirement's mart from proposal to reconciliation.
@@ -977,6 +1049,7 @@ mod tests {
             ids,
             vec![
                 "lakehouse",
+                "docs",
                 "requirements",
                 "marts",
                 "extraction",

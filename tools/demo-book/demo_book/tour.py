@@ -170,19 +170,15 @@ class Tour:
         return run
 
 
-def pick_docs_generate(t: Tour, output: str = "docs/estate"):
-    t.page.locator('[aria-label="filter commands"]').fill("docs generate")
-    t.page.get_by_role("button", name="docs generate", exact=True).click()
-    t.page.locator("#arg-layout").fill("estate")
-    t.page.locator("#arg-output").fill(output)
-
-
 def act_docs(t: Tour) -> dict:
-    t.page.goto(t.url("/w/{ws}/commands"))
-    t.wait_for("Commands")
-    pick_docs_generate(t)
-    t.page.get_by_role("button", name="Run", exact=True).click()
-    return t.wait_run()
+    """Generate, then Preview publish, on the Documentation page (EKOS RFC 0230)."""
+    runs = []
+    for button in ("Generate", "Preview publish"):
+        t.page.goto(t.url("/w/{ws}/x/lakehouse/docs"))
+        t.wait_for("Home page")
+        runs.append(page_action(t, button))
+    ok = all(r.get("status") == "succeeded" for r in runs)
+    return {"status": "succeeded" if ok else "failed"}
 
 
 def act_reconcile(t: Tour, mart: str) -> dict:
@@ -317,7 +313,7 @@ def tour(*, console: str, token: str, ws: str, out: Path, binary: str, state: Pa
 
         for step in STEPS:
             for cp in step.checkpoints:
-                t.checkpoint(cp, prepare=pick_docs_generate if cp.id == "02-commands" else None)
+                t.checkpoint(cp)
         runs = console_runs(page, console.rstrip("/"), ws, out / "logs")
         browser.close()
     if state is not None:

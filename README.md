@@ -301,6 +301,28 @@ started. The console's **Marts** page shows the SQL beside the requirement, whic
 the totals and the lineage. Generated schedules are on by default: on a test machine, decide whether they should run
 before starting Dagster.
 
+### Documentation (EKOS RFC 0230)
+
+Step 2 publishes the source-estate documentation EKOS generates from the ledger (EKOS RFC 0214):
+
+```toml
+[extensions.lakehouse.docs]
+target = "github"            # github | azure-devops | confluence
+repo = "owner/name"          # github: whose wiki; prefix = "…" shares one wiki; sidebar = "keep"
+# azure-devops: org-url, project, wiki, root-path · confluence: space, parent-id, title-prefix
+```
+
+```bash
+ekos-lakehouse lakehouse docs generate           # pages into <project>/docs/estate (output = …)
+ekos-lakehouse lakehouse docs publish --dry-run  # what would change; nothing sent
+ekos-lakehouse lakehouse docs publish            # GITHUB_TOKEN / AZDO_PAT / CONFLUENCE_* from the environment
+ekos-lakehouse lakehouse docs show
+```
+
+The lakehouse-docs publishers are compiled into the binary and run with `python` (default `python3`, needs PyYAML;
+`requests` for Azure DevOps and Confluence, `markdown` for Confluence). Step 2 is done once the latest generation is
+published; the console's **Documentation** page has Generate, Preview publish and Publish.
+
 ### Run logs and the demo book (EKOS RFC 0218)
 
 Every `lakehouse` command that changes something writes an EKOS run log (`<state>/runs/`, or the console run's

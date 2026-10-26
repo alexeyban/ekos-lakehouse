@@ -37,7 +37,7 @@ from the same read commands (`workflow status`, `lakehouse requirements|extracti
 | `--act` | What it runs from the console |
 |---|---|
 | `test-db` | Sources → **Test connection** (step 1's screenshot then shows the census) |
-| `docs` | Commands → `docs generate --layout estate --output docs/estate` (step 2) |
+| `docs` | Documentation → **Generate**, then **Preview publish** (step 2; the preview sends nothing) |
 | `edit-undo` | Requirements: add a filter, remove it; Extraction: load a table in full, undo (steps 4 and 5; the approved requirement and plan are back, digests unchanged) |
 | `reconcile` | Marts → **Reconcile** one mart (`--mart`, default `sales_by_month`; step 7) |
 

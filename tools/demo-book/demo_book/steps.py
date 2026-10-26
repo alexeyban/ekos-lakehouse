@@ -68,16 +68,18 @@ STEPS: tuple[Step, ...] = (
         2,
         "docs",
         "Documentation",
-        (Checkpoint("02-commands", "The Commands page: `docs generate --layout estate`", "/w/{ws}/commands",
-                    "Commands"),),
-        ("docs generate",),
-        "The operator runs **docs generate** with the estate layout and an output folder.",
+        (Checkpoint("02-docs", "The Documentation page: the store, the latest generation and publish, the Home page",
+                    EXT + "/docs", "Home page"),),
+        ("docs generate", "lakehouse docs"),
+        "On **Documentation** the operator clicks **Generate**, then **Preview publish** to see what would change "
+        "in the documentation store the project names, then **Publish**.",
         "EKOS writes the source estate as wiki pages from the ledger alone: the data model by area, one page per "
         "table and routine, the history of schema changes, the findings. A profile contributes counts, never "
         "values; text from a source without a known licence is left out. Sections a person writes are kept on "
-        "every regeneration.",
-        "Publishing to a wiki (GitHub, Azure DevOps, Confluence) is done with the lakehouse-docs publishers and is "
-        "the operator's decision; the console has no Publish button yet.",
+        "every regeneration. Publishing runs the lakehouse-docs publisher for the store (GitHub wiki, Azure "
+        "DevOps wiki or Confluence) with the credentials the console's environment holds; a preview sends nothing.",
+        "Publishing to a public wiki is the operator's decision every time; until the latest generation is "
+        "published, step 2 stays partial.",
         ("workflow",),
     ),
     Step(

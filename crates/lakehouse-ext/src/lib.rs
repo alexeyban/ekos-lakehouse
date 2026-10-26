@@ -7,6 +7,7 @@
 pub mod check;
 pub mod console;
 pub mod deletes;
+pub mod docs;
 pub mod doctor;
 pub mod extraction;
 pub mod facts;
@@ -593,6 +594,38 @@ impl EkosExtension for LakehouseExtension {
                         ),
                 )
                 .subcommand(
+                    clap::Command::new("docs")
+                        .about(
+                            "Step 2: the source-estate documentation, generated from the ledger and \
+                             published to the project's documentation store (EKOS RFC 0230)",
+                        )
+                        .subcommand_required(true)
+                        .subcommand(
+                            clap::Command::new("show")
+                                .about("The latest generation, the store, the latest publish and dry run")
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output"),
+                                ),
+                        )
+                        .subcommand(
+                            clap::Command::new("generate")
+                                .about("Write the estate pages from the ledger into [docs] output"),
+                        )
+                        .subcommand(
+                            clap::Command::new("publish")
+                                .about("Publish the generated pages to the documentation store")
+                                .arg(
+                                    clap::Arg::new("dry-run")
+                                        .long("dry-run")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Show what would change; send nothing"),
+                                ),
+                        ),
+                )
+                .subcommand(
                     clap::Command::new("extraction")
                         .about(
                             "Step 5: the extraction plan with step 3's decisions, the operator's \
@@ -885,6 +918,9 @@ impl EkosExtension for LakehouseExtension {
             // RFC 0228: show reads the repository and the state dir; propose plans on Trino (and
             // may call the local model for a prose term); merging the proposal is the approval;
             // build launches Dagster; reconcile reads aggregates on Trino.
+            ("lakehouse docs show", Class::Read, false),
+            ("lakehouse docs generate", Class::Write, false),
+            ("lakehouse docs publish", Class::External, false),
             ("lakehouse marts show", Class::Read, false),
             ("lakehouse marts propose", Class::External, true),
             ("lakehouse marts merge", Class::Review, false),
@@ -988,6 +1024,7 @@ impl EkosExtension for LakehouseExtension {
             }
             Some(("deletes", m)) => deletes_cmd(ctx, m),
             Some(("extraction", m)) => extraction_cmd(ctx, m),
+            Some(("docs", m)) => docs::cmd(ctx, m),
             Some(("requirements", m)) => requirements_cmd(ctx, m).await,
             Some(("marts", m)) => marts_cmd(ctx, m).await,
             Some(("run", m)) => {
