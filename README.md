@@ -301,6 +301,18 @@ started. The console's **Marts** page shows the SQL beside the requirement, whic
 the totals and the lineage. Generated schedules are on by default: on a test machine, decide whether they should run
 before starting Dagster.
 
+### Run logs and the demo book (EKOS RFC 0218)
+
+Every `lakehouse` command that changes something writes an EKOS run log (`<state>/runs/`, or the console run's
+events) with its own stage lines — a requirement resolved or approved, an extraction change, a mart merged, a build
+launched, each measure's two totals — and the model calls it made. Step 2 on the bar reads the latest
+`ekos docs generate --layout estate` run.
+
+[`tools/demo-book`](tools/demo-book/README.md) walks the console through the seven steps and renders a book from what
+it saw: per step the screen, the run log behind it and the numbers, with the narration a person wrote kept in manual
+sections. The iDempiere book is in
+[ekos-lakehouse-oracle](https://github.com/alexeyban/ekos-lakehouse-oracle/tree/main/book).
+
 ## Try it on the sandbox
 
 ```bash

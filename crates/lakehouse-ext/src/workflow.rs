@@ -124,15 +124,45 @@ pub fn requirements_step(states: &[String]) -> Option<Step> {
     ))
 }
 
-/// Pure: the steps from the counts, with step 4 from the requirements when there are any
-/// (EKOS RFC 0215) and step 5 from the extraction plan (EKOS RFC 0226).
-pub fn steps(c: &Counts, step4: Option<Step>, step5: Step, step7: Option<Step>) -> Vec<Step> {
-    vec![
-        Step::new(
+/// Where `ekos docs generate --layout estate` records its latest run, under the state directory
+/// (EKOS RFC 0218).
+pub const ESTATE_RECORD: &str = "docs/estate.json";
+
+/// Pure: step 2 from the latest estate generation. Publishing is the operator's, outside EKOS
+/// (RFC 0214), so a generation leaves the step partial.
+pub fn docs_step(record: Option<&serde_json::Value>) -> Step {
+    let Some(r) = record else {
+        return Step::new(
             2,
             StepState::Todo,
-            "source-estate documentation (EKOS RFC 0214) is not built yet",
+            "generate the source-estate documentation: `ekos docs generate --layout estate \
+             --output <dir>`",
+        );
+    };
+    Step::new(
+        2,
+        StepState::Partial,
+        format!(
+            "{} page(s) generated {} into {}; publishing is the operator's",
+            r["pages"].as_u64().unwrap_or(0),
+            r["at"].as_str().unwrap_or("?"),
+            r["output"].as_str().unwrap_or("?"),
         ),
+    )
+}
+
+/// Pure: the steps from the counts, with step 2 from the latest estate generation, step 4 from
+/// the requirements when there are any (EKOS RFC 0215) and step 5 from the extraction plan (EKOS
+/// RFC 0226).
+pub fn steps(
+    c: &Counts,
+    step2: Step,
+    step4: Option<Step>,
+    step5: Step,
+    step7: Option<Step>,
+) -> Vec<Step> {
+    vec![
+        step2,
         step4.unwrap_or_else(|| match (c.marts_proposed, c.marts_with_questions) {
             (0, 0) => Step::new(
                 4,
@@ -199,6 +229,12 @@ pub fn workflow_steps(ctx: &WorkflowContext<'_>) -> Vec<Step> {
     match ledger_counts(ctx) {
         Ok(c) => steps(
             &c,
+            docs_step(
+                std::fs::read_to_string(ctx.config.ekos_dir(ctx.cwd).join(ESTATE_RECORD))
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .as_ref(),
+            ),
             requirements_states(ctx),
             extraction_step(ctx),
             marts_step(ctx),
@@ -385,7 +421,13 @@ mod tests {
                 gold_failing: 0,
             }
         );
-        let s = steps(&c, None, Step::new(5, StepState::Done, "approved"), None);
+        let s = steps(
+            &c,
+            docs_step(None),
+            None,
+            Step::new(5, StepState::Done, "approved"),
+            None,
+        );
         assert_eq!(s.iter().map(|x| x.n).collect::<Vec<_>>(), [2, 4, 5, 6, 7]);
         assert_eq!(s[1].state, StepState::Partial);
         assert_eq!(s[2].state, StepState::Done);
@@ -394,12 +436,25 @@ mod tests {
         assert!(
             steps(
                 &Counts::default(),
+                docs_step(None),
                 None,
                 Step::new(5, StepState::Todo, "plan"),
                 None
             )
             .iter()
             .all(|x| x.state == StepState::Todo)
+        );
+    }
+
+    #[test]
+    fn step_2_comes_from_the_latest_estate_generation() {
+        assert_eq!(docs_step(None).state, StepState::Todo);
+        let r = serde_json::json!({ "pages": 1060, "at": "2026-10-26T12:00:00Z", "output": "/d" });
+        let s = docs_step(Some(&r));
+        assert_eq!(s.state, StepState::Partial);
+        assert_eq!(
+            s.detail,
+            "1060 page(s) generated 2026-10-26T12:00:00Z into /d; publishing is the operator's"
         );
     }
 }

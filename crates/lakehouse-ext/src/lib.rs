@@ -1493,6 +1493,17 @@ async fn gold_draft(
     let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
     facts::record_mart(store.as_ref(), &run, &outcome)?;
     let questions_path = description.with_extension("questions.md");
+    ekos_common::run_log::emit(
+        "gold",
+        "drafted",
+        &serde_json::json!({
+            "mart": outcome.mart,
+            "branch": outcome.branch,
+            "atoms_checked": outcome.checked_atoms,
+            "drafted_terms": outcome.drafts.len(),
+            "questions": outcome.questions.len(),
+        }),
+    );
     if outcome.questions.is_empty() {
         let _ = std::fs::remove_file(&questions_path);
         println!(
@@ -1591,6 +1602,11 @@ async fn marts_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Re
             let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
             facts::record_mart_merge(store.as_ref(), &a)?;
             sync::git(&repo, &["branch", "-D", &branch])?;
+            ekos_common::run_log::emit(
+                "marts",
+                "merged",
+                &serde_json::json!({ "mart": mart, "branch": branch, "commit": commit }),
+            );
             println!(
                 "{mart} merged by {by} ({}): build it with `lakehouse marts build --mart {mart}`",
                 &commit[..12.min(commit.len())]
@@ -1610,6 +1626,11 @@ async fn marts_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Re
             let wait = m.get_flag("wait");
             let asset = format!("gold__{mart}");
             let id = off_runtime(|| run_cmd::run(&url, "bronze", None, true, wait, Some(&asset)))?;
+            ekos_common::run_log::emit(
+                "marts",
+                if wait { "built" } else { "build launched" },
+                &serde_json::json!({ "mart": mart, "asset": asset, "dagster_run": id }),
+            );
             if wait {
                 println!(
                     "{mart} built: `lakehouse marts reconcile --mart {mart}` checks its totals"
@@ -1671,6 +1692,17 @@ async fn marts_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Re
             facts::record_mart_reconciliation(store.as_ref(), &r)?;
             marts::write_reconciliation(&dir, &r)?;
             for t in &r.measures {
+                ekos_common::run_log::emit(
+                    "marts",
+                    "reconciled",
+                    &serde_json::json!({
+                        "mart": mart,
+                        "measure": t.measure,
+                        "mart_total": t.mart_total,
+                        "silver_total": t.silver_total,
+                        "equal": t.equal,
+                    }),
+                );
                 println!(
                     "{mart}.{}: mart {} / silver {} — {}",
                     t.measure,
@@ -1987,6 +2019,11 @@ fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Res
                 let before = next.len();
                 next.retain(|c| c.table != table);
                 extraction::write_changes(&dir, &next)?;
+                ekos_common::run_log::emit(
+                    "extraction",
+                    "changes undone",
+                    &serde_json::json!({ "table": table, "removed": before - next.len() }),
+                );
                 println!("{table}: {} change(s) removed", before - next.len());
                 return Ok(());
             }
@@ -2024,6 +2061,11 @@ fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Res
                 anyhow::bail!("{table}: cannot {}: {why}", new.change.describe());
             }
             extraction::write_changes(&dir, &next)?;
+            ekos_common::run_log::emit(
+                "extraction",
+                "changed",
+                &serde_json::json!({ "table": table, "change": new.change.describe() }),
+            );
             let approved = extraction::read_approved(&dir)?;
             println!(
                 "{table}: {} (by {}). {}",
@@ -2051,6 +2093,11 @@ fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Res
             let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
             facts::record_plan_approval(store.as_ref(), &a)?;
             extraction::write_approved(&dir, &a)?;
+            ekos_common::run_log::emit(
+                "extraction",
+                "approved",
+                &serde_json::json!({ "digest": a.digest, "counts": a.counts }),
+            );
             let c = &a.counts;
             println!(
                 "extraction plan approved by {by}: digest {}\n  incremental {} (deletes every \
@@ -2105,6 +2152,17 @@ async fn requirements_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> any
         record.state = st.to_string();
         record.questions = ev.questions.len();
         rq::write(&dir, spec, record)?;
+        ekos_common::run_log::emit(
+            "requirements",
+            "resolved",
+            &serde_json::json!({
+                "mart": spec.mart,
+                "state": st.to_string(),
+                "terms": ev.resolved.len(),
+                "questions": ev.questions.len(),
+                "reads": ev.needs,
+            }),
+        );
         println!(
             "{}: {st} — {} term(s), {} question(s){}",
             spec.mart,
@@ -2308,6 +2366,11 @@ async fn requirements_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> any
             let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
             facts::record_requirement_approval(store.as_ref(), &a)?;
             rq::write_approval(&dir, &a)?;
+            ekos_common::run_log::emit(
+                "requirements",
+                "approved",
+                &serde_json::json!({ "mart": mart, "digest": a.digest }),
+            );
             d.record.log.push(rq::Logged {
                 at: a.at.clone(),
                 by: by.clone(),
