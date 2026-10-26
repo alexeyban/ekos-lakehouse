@@ -138,8 +138,218 @@ pub fn pages() -> Vec<ConsolePage> {
             ],
             ..Default::default()
         },
+        extraction_page(),
         pentaho_page(),
     ]
+}
+
+/// EKOS RFC 0226: step 5 — the proposed extraction plan with its evidence, the operator's changes
+/// per table (with a reason) and the approval. Panels read the state directory only.
+fn extraction_page() -> ConsolePage {
+    let show = || vec!["lakehouse", "extraction", "show", "--json"];
+    let change = |label: &'static str, flag: &'static str| Action {
+        label,
+        command: vec!["lakehouse", "extraction", "change"],
+        binds: vec![("table", "table")],
+        flags: vec![flag],
+        inputs: vec![("reason", "Why (kept with the change)")],
+        ..Default::default()
+    };
+    ConsolePage {
+        id: "extraction",
+        title: "Extraction",
+        description: "Step 5: how each table lands in bronze, with the evidence for it — the load \
+                      mode, how deletes are found, type mappings, masks — and step 3's decisions \
+                      applied (scope, PII masks, write-behaviour overrides; only subjects with a \
+                      valid sign-off). Pick a table to change it; a change keeps its reason and \
+                      who made it. Approve the plan to build it: with require-plan-approval, \
+                      Generate builds only the approved plan.",
+        params: vec![PageParam {
+            name: "table",
+            label: "Table",
+            source: "tables",
+            rows: "/tables",
+            key: "/table",
+        }],
+        panels: vec![
+            Panel {
+                id: "summary",
+                title: "The plan",
+                command: show(),
+                view: View::Fields {
+                    fields: vec![
+                        Column::badge("/summary/state", "State"),
+                        Column::new("/summary/approved_by", "Approved by"),
+                        Column::new("/summary/approved_at", "Approved at"),
+                        Column::new("/summary/planned_at", "Planned at"),
+                        Column::new("/summary/digest", "Digest"),
+                        Column::new(
+                            "/summary/incremental_every_run",
+                            "Incremental, deletes every run",
+                        ),
+                        Column::new(
+                            "/summary/incremental_audited",
+                            "Incremental, deletes audited",
+                        ),
+                        Column::new("/summary/incremental_other", "Incremental, other"),
+                        Column::new("/summary/full", "Full"),
+                        Column::new("/summary/refused", "Refused"),
+                        Column::new("/summary/excluded", "Out of scope"),
+                        Column::new("/summary/masked_columns", "Masked columns"),
+                        Column::new("/summary/changes", "Changes"),
+                        Column::new("/summary/stale_changes", "Changes not applied"),
+                        Column::new("/summary/notes", "Notes"),
+                    ],
+                },
+                empty: "No plan yet: run Plan (it reads the source).",
+                ..Default::default()
+            },
+            Panel {
+                id: "step3",
+                title: "Step 3 decisions used",
+                command: show(),
+                view: View::Table {
+                    rows: "/step3",
+                    columns: vec![
+                        Column::new("/subject", "Subject"),
+                        Column::badge("/used", "Used"),
+                        Column::new("/why", "Why"),
+                    ],
+                },
+                empty: "No plan yet.",
+                ..Default::default()
+            },
+            Panel {
+                id: "tables",
+                title: "Tables (click one)",
+                command: show(),
+                view: View::Table {
+                    rows: "/tables",
+                    columns: vec![
+                        Column::new("/table", "Table"),
+                        Column::badge("/mode", "Mode"),
+                        Column::new("/watermark", "Watermark"),
+                        Column::new("/deletes", "Deletes checked"),
+                        Column::new("/kind", "A found delete is"),
+                        Column::new("/purge_policy", "Purged rows"),
+                        Column::badge("/contradicts_code", "Would contradict the code"),
+                        Column::new("/not_exact", "Columns not exact"),
+                        Column::new("/masked", "Masked"),
+                        Column::new("/change", "Changed by the operator"),
+                        Column::badge("/since_approval", "Since the approval"),
+                    ],
+                },
+                empty: "No plan yet: run Plan.",
+                ..Default::default()
+            },
+            Panel {
+                id: "table",
+                title: "Table: evidence and changes",
+                command: show(),
+                params: vec!["table"],
+                view: View::Markdown {
+                    pointer: "/selected/markdown",
+                },
+                empty: "",
+            },
+            Panel {
+                id: "columns",
+                title: "Table: columns",
+                command: show(),
+                params: vec!["table"],
+                view: View::Table {
+                    rows: "/selected/columns",
+                    columns: vec![
+                        Column::new("/column", "Column"),
+                        Column::new("/source", "Source type"),
+                        Column::new("/iceberg", "Iceberg type"),
+                        Column::badge("/lossiness", "Lossiness"),
+                        Column::new("/rule", "Rule"),
+                        Column::badge("/mask", "Mask"),
+                    ],
+                },
+                empty: "",
+            },
+            Panel {
+                id: "changes",
+                title: "Changes",
+                command: show(),
+                view: View::Table {
+                    rows: "/changes",
+                    columns: vec![
+                        Column::new("/table", "Table"),
+                        Column::new("/change", "Change"),
+                        Column::new("/reason", "Why"),
+                        Column::new("/by", "By"),
+                        Column::new("/at", "At"),
+                        Column::badge("/state", "State"),
+                        Column::new("/why_stale", "Not applied because"),
+                    ],
+                },
+                empty: "No changes: the plan is as proposed.",
+                ..Default::default()
+            },
+            Panel {
+                id: "refused",
+                title: "Refused",
+                command: show(),
+                view: View::Table {
+                    rows: "/refused",
+                    columns: vec![
+                        Column::new("/table", "Table"),
+                        Column::new("/reasons", "Why"),
+                    ],
+                },
+                empty: "No table is refused.",
+                ..Default::default()
+            },
+            Panel {
+                id: "excluded",
+                title: "Out of scope (step 3)",
+                command: show(),
+                view: View::Table {
+                    rows: "/excluded",
+                    columns: vec![
+                        Column::new("/table", "Table"),
+                        Column::new("/reason", "Why"),
+                    ],
+                },
+                empty: "Nothing out of scope, or the scope is not signed off.",
+                ..Default::default()
+            },
+        ],
+        actions: vec![
+            Action {
+                label: "Plan",
+                command: vec!["lakehouse", "plan"],
+                ..Default::default()
+            },
+            change("Load in full", "full"),
+            change("Load incrementally", "incremental"),
+            change("Look for deletes every run", "deletes-every-run"),
+            change("Audit deletes", "deletes-audit"),
+            change("Keep purged rows", "keep-purged"),
+            change("Remove purged rows", "remove-purged"),
+            Action {
+                label: "Undo changes",
+                command: vec!["lakehouse", "extraction", "change"],
+                binds: vec![("table", "table")],
+                flags: vec!["undo"],
+                ..Default::default()
+            },
+            Action {
+                label: "Approve plan",
+                command: vec!["lakehouse", "extraction", "approve"],
+                inputs: vec![("note", "Note (optional)")],
+                confirm: Some(
+                    "You approve the plan as shown, every table and change, under your name. \
+                     The approval is recorded in the ledger with the plan's digest; with \
+                     require-plan-approval, Generate builds only this plan.",
+                ),
+                ..Default::default()
+            },
+        ],
+    }
 }
 
 /// RFC 0207: the Pentaho tab — packages, then one translation's graph, models, steps, a step's
@@ -345,6 +555,7 @@ fn pentaho_page() -> ConsolePage {
                      allow metered calls. Drafts are checked, labelled llm-drafted, and proposed \
                      for review like everything else.",
                 ),
+                ..Default::default()
             },
         ],
     }
@@ -466,7 +677,7 @@ mod tests {
             .iter()
             .map(|p| p["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, vec!["lakehouse", "pentaho"]);
+        assert_eq!(ids, vec!["lakehouse", "extraction", "pentaho"]);
     }
 
     #[test]

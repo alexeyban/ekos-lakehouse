@@ -86,8 +86,8 @@ fn built(n: u8, ok: usize, failing: usize, what: &str, todo: &str) -> Step {
     }
 }
 
-/// Pure: the steps from the counts.
-pub fn steps(c: &Counts) -> Vec<Step> {
+/// Pure: the steps from the counts, with step 5 from the extraction plan (EKOS RFC 0226).
+pub fn steps(c: &Counts, step5: Step) -> Vec<Step> {
     vec![
         Step::new(
             2,
@@ -107,19 +107,7 @@ pub fn steps(c: &Counts) -> Vec<Step> {
                 format!("{p} mart(s) proposed, {q} with open questions"),
             ),
         },
-        if c.tables_synced == 0 {
-            Step::new(
-                5,
-                StepState::Todo,
-                "plan and land the tables: `lakehouse sync`",
-            )
-        } else {
-            Step::new(
-                5,
-                StepState::Done,
-                format!("{} table(s) planned and synced", c.tables_synced),
-            )
-        },
+        step5,
         built(
             6,
             c.built_ok,
@@ -168,7 +156,7 @@ fn ledger_counts(ctx: &WorkflowContext<'_>) -> anyhow::Result<Counts> {
 /// [`ekos::extension::EkosExtension::workflow_steps`].
 pub fn workflow_steps(ctx: &WorkflowContext<'_>) -> Vec<Step> {
     match ledger_counts(ctx) {
-        Ok(c) => steps(&c),
+        Ok(c) => steps(&c, extraction_step(ctx)),
         Err(e) => ekos_semantic::workflow::EXTENSION_STEPS
             .iter()
             .map(|n| {
@@ -180,6 +168,30 @@ pub fn workflow_steps(ctx: &WorkflowContext<'_>) -> Vec<Step> {
             })
             .collect(),
     }
+}
+
+/// Step 5 from the state directory: the proposal with the changes, against the approval.
+fn extraction_step(ctx: &WorkflowContext<'_>) -> Step {
+    let read = || -> anyhow::Result<Step> {
+        let dir = crate::extraction::state_dir(ctx.config, ctx.cwd);
+        let configured = crate::settings::load(ctx.config)
+            .map(|s| s.pii)
+            .unwrap_or_default();
+        let p = crate::extraction::read_proposal(&dir)?;
+        let changes = crate::extraction::read_changes(&dir)?;
+        let f = p
+            .as_ref()
+            .map(|p| crate::extraction::finalize(p, &changes, &configured));
+        let a = crate::extraction::read_approved(&dir)?;
+        Ok(crate::extraction::step(p.as_ref(), f.as_ref(), a.as_ref()))
+    };
+    read().unwrap_or_else(|e| {
+        Step::new(
+            5,
+            StepState::Todo,
+            format!("could not read the extraction plan: {e}"),
+        )
+    })
 }
 
 /// With `require-signoff = true`, refuse unless the source model is signed off (EKOS RFC 0213).
@@ -256,14 +268,14 @@ mod tests {
                 gold_failing: 0,
             }
         );
-        let s = steps(&c);
+        let s = steps(&c, Step::new(5, StepState::Done, "approved"));
         assert_eq!(s.iter().map(|x| x.n).collect::<Vec<_>>(), [2, 4, 5, 6, 7]);
         assert_eq!(s[1].state, StepState::Partial);
         assert_eq!(s[2].state, StepState::Done);
         assert_eq!(s[3].detail, "1 bronze/silver table(s) built, 1 failing");
         assert_eq!(s[4].state, StepState::Done);
         assert!(
-            steps(&Counts::default())
+            steps(&Counts::default(), Step::new(5, StepState::Todo, "plan"))
                 .iter()
                 .all(|x| x.state == StepState::Todo)
         );

@@ -15,6 +15,8 @@ pub const METRIC_KIND: &str = "LakehouseMetric";
 pub const CHANGE_KIND: &str = "LakehouseChange";
 pub const MART_KIND: &str = "LakehouseMart";
 pub const TRANSLATION_KIND: &str = "PentahoTranslation";
+/// EKOS's registry row `LakehouseApproval`: here, the approved extraction plan (RFC 0226).
+pub const APPROVAL_KIND: &str = "LakehouseApproval";
 
 fn det_id(seed: &str) -> KirId {
     KirId(Uuid::new_v5(&Uuid::NAMESPACE_URL, seed.as_bytes()))
@@ -405,6 +407,35 @@ pub fn plan_facts(
         );
     }
     Ok(facts)
+}
+
+/// The approved extraction plan: one id per project, so its latest version is the approval in
+/// force and the earlier ones its history.
+pub fn plan_approval_id() -> KirId {
+    det_id("lakehouse-approval:extraction-plan")
+}
+
+/// RFC 0226 §2.4: who approved which plan — the digest, counts, changes with their reasons and
+/// the step 3 digests used. No key or value is in it.
+pub fn record_plan_approval(
+    store: &dyn KnowledgeStore,
+    a: &crate::extraction::Approval,
+) -> anyhow::Result<KirId> {
+    with_context(store, &format!("approve-{}", a.at), "extraction", || {
+        let mut obj = KirObject::new("extraction plan", ObjectKind::Custom(APPROVAL_KIND.into()));
+        obj.id = plan_approval_id();
+        obj.properties
+            .insert("subject".into(), json!("extraction plan"));
+        if let serde_json::Value::Object(m) = serde_json::to_value(a)? {
+            for (k, v) in m {
+                if k != "tables" {
+                    obj.properties.insert(k, v);
+                }
+            }
+        }
+        store.append_object(&obj)?;
+        Ok(obj.id)
+    })
 }
 
 /// One delete check (RFC 0225 §2.4): counts, method, guard and times — never a key value.

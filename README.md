@@ -213,6 +213,33 @@ counts in the ledger. When more than the guard's share of keys vanishes at once 
 until `lakehouse deletes --table T --accept`. Tables the code never hard-deletes are audited every `delete-audit-days`
 instead of every run.
 
+### The extraction plan, reviewed and approved (EKOS RFC 0226)
+
+`lakehouse plan` applies the decisions of EKOS's review (step 3) from every subject with a valid sign-off: tables out
+of scope are not planned, confirmed PII columns are masked in silver (`hash` → HMAC, `redact` → NULL; `ekos.toml`'s
+`pii` entries win), and write-behaviour overrides change a table's mode and delete plan. The result is saved as the
+proposal in the project's state directory.
+
+```bash
+ekos-lakehouse lakehouse extraction show [--table ADEMPIERE.C_ORDER] [--json]
+ekos-lakehouse lakehouse extraction change --table C_BPARTNER --full --reason "reload nightly for now"
+ekos-lakehouse lakehouse extraction change --table A_ASSET --incremental --reason "the raw update is an upgrade script"
+ekos-lakehouse lakehouse extraction change --table C_BPARTNER --undo
+ekos-lakehouse lakehouse extraction approve --note "first review"
+```
+
+A change (mode, `--deletes-every-run`/`--deletes-audit`, `--keep-purged`/`--remove-purged`) keeps who made it and why,
+and is applied to every later plan; one that no longer fits is shown as stale. Loading incrementally against the facts
+needs a reason. Approval records a `LakehouseApproval` fact with the plan's digest. With
+
+```toml
+[extensions.lakehouse]
+require-plan-approval = true
+```
+
+`generate` builds only the approved plan; when the source, step 3 or a change has moved since, it refuses and names the
+tables. The console's **Extraction** page does all of this, with a reason typed beside each change.
+
 ## Try it on the sandbox
 
 ```bash

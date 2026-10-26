@@ -76,6 +76,9 @@ pub struct Settings {
     /// EKOS RFC 0213: `generate`, `sync` and `gold draft` refuse to run until every review
     /// subject of the source model has a valid sign-off. Default false.
     pub require_signoff: Option<bool>,
+    /// EKOS RFC 0226: `generate` builds only the extraction plan an operator approved (step 5).
+    /// Default false.
+    pub require_plan_approval: Option<bool>,
     /// RFC 0225: the column the application sets on every write it makes (iDempiere `UPDATED`).
     /// A table loads incrementally on it where EKOS's write-behaviour facts say the code keeps it.
     pub application_watermark: Option<String>,

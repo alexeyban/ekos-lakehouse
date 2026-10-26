@@ -8,6 +8,7 @@ pub mod check;
 pub mod console;
 pub mod deletes;
 pub mod doctor;
+pub mod extraction;
 pub mod facts;
 pub mod gold_cmd;
 pub mod install;
@@ -392,6 +393,119 @@ impl EkosExtension for LakehouseExtension {
                             .help("With --uninstall: also delete the stack's data volumes")),
                 )
                 .subcommand(
+                    clap::Command::new("extraction")
+                        .about(
+                            "Step 5: the extraction plan with step 3's decisions, the operator's \
+                             changes per table, and its approval (EKOS RFC 0226)",
+                        )
+                        .subcommand_required(true)
+                        .subcommand(
+                            clap::Command::new("show")
+                                .about(
+                                    "The proposed plan as it would be built, the changes and the \
+                                     approval, from the state directory (no source read)",
+                                )
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output"),
+                                )
+                                .arg(
+                                    clap::Arg::new("table")
+                                        .long("table")
+                                        .help("Also show this table's evidence and columns"),
+                                ),
+                        )
+                        .subcommand(
+                            clap::Command::new("change")
+                                .about(
+                                    "Change how one table is extracted; applied to every later \
+                                     plan until undone, used once the plan is approved",
+                                )
+                                .arg(
+                                    clap::Arg::new("table")
+                                        .long("table")
+                                        .required(true)
+                                        .help("`schema.table`, or the table's name when it is unique"),
+                                )
+                                .arg(
+                                    clap::Arg::new("full")
+                                        .long("full")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Load the table in full"),
+                                )
+                                .arg(
+                                    clap::Arg::new("incremental")
+                                        .long("incremental")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Load it incrementally on the application watermark (needs --reason when the facts keep it full)"),
+                                )
+                                .arg(
+                                    clap::Arg::new("deletes-every-run")
+                                        .long("deletes-every-run")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Look for its deletes on every run"),
+                                )
+                                .arg(
+                                    clap::Arg::new("deletes-audit")
+                                        .long("deletes-audit")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Audit its deletes periodically"),
+                                )
+                                .arg(
+                                    clap::Arg::new("keep-purged")
+                                        .long("keep-purged")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Keep rows the source purges"),
+                                )
+                                .arg(
+                                    clap::Arg::new("remove-purged")
+                                        .long("remove-purged")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Remove rows the source purges"),
+                                )
+                                .arg(
+                                    clap::Arg::new("undo")
+                                        .long("undo")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Remove every change to the table"),
+                                )
+                                .group(
+                                    clap::ArgGroup::new("what")
+                                        .args([
+                                            "full",
+                                            "incremental",
+                                            "deletes-every-run",
+                                            "deletes-audit",
+                                            "keep-purged",
+                                            "remove-purged",
+                                            "undo",
+                                        ])
+                                        .required(true),
+                                )
+                                .arg(clap::Arg::new("reason").long("reason").help("Why"))
+                                .arg(
+                                    clap::Arg::new("by")
+                                        .long("as")
+                                        .help("Who decides (default: $USER; the console sets it)"),
+                                ),
+                        )
+                        .subcommand(
+                            clap::Command::new("approve")
+                                .about(
+                                    "Approve the plan as it would be built now: a ledger fact with \
+                                     its digest; `generate` under require-plan-approval builds only it",
+                                )
+                                .arg(clap::Arg::new("note").long("note").help("A note kept with it"))
+                                .arg(
+                                    clap::Arg::new("by")
+                                        .long("as")
+                                        .help("Who approves (default: $USER; the console sets it)"),
+                                ),
+                        ),
+                )
+                .subcommand(
                     clap::Command::new("tables")
                         .about(
                             "The deployed plan: each table's load mode, watermark and columns not \
@@ -554,6 +668,10 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse deletes", Class::Admin, false),
             ("lakehouse status", Class::Read, false),
             ("lakehouse tables", Class::Read, false),
+            // RFC 0226: the state directory only. A change and an approval are a person's.
+            ("lakehouse extraction show", Class::Read, false),
+            ("lakehouse extraction change", Class::Review, false),
+            ("lakehouse extraction approve", Class::Review, false),
             ("lakehouse install", Class::Local, false),
             ("lakehouse proposals", Class::Read, false),
             // Reach a webhook / a collector outside the home.
@@ -597,15 +715,12 @@ impl EkosExtension for LakehouseExtension {
             }
             Some(("plan", m)) => {
                 let settings = settings::load(ctx.config)?;
-                let wf = facts::plan_facts(&settings, ctx)?;
-                let plan = {
-                    let redaction = ctx.config.redaction_config();
-                    off_runtime(|| plan_cmd::build_plan_with(&settings, &redaction, &wf))?
-                };
+                let f = fresh(&settings, ctx, &pipeline_dir(&settings, ctx))?;
                 if m.get_flag("json") {
-                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                    println!("{}", serde_json::to_string_pretty(&f.plan)?);
                 } else {
-                    print!("{}", plan_cmd::render_summary(&plan));
+                    print!("{}", plan_cmd::render_summary(&f.plan));
+                    print_final(&f);
                 }
                 Ok(())
             }
@@ -616,21 +731,17 @@ impl EkosExtension for LakehouseExtension {
                     Some(o) => ctx.invoked_from.join(o),
                     None => pipeline_dir(&settings, ctx),
                 };
+                let mut silver = settings.silver_settings();
                 let plan = if m.get_flag("from-lock") {
                     plan_cmd::read_lock(&out)?
                 } else {
-                    let redaction = ctx.config.redaction_config();
-                    let wf = facts::plan_facts(&settings, ctx)?;
-                    let mut plan =
-                        off_runtime(|| plan_cmd::build_plan_with(&settings, &redaction, &wf))?;
-                    // Over a deployed plan: keep its approved renames, and rename in place what
-                    // the source renamed since, rather than add an empty column.
-                    if let Ok(deployed) = plan_cmd::read_lock(&out) {
-                        ekos_lakehouse_bronze::carry_renames(&mut plan, &deployed);
-                    }
-                    plan
+                    let f = fresh(&settings, ctx, &out)?;
+                    print_final(&f);
+                    plan_gate(&settings, ctx, &f)?;
+                    silver.pii = f.masks.clone();
+                    f.plan
                 };
-                let w = plan_cmd::write(&plan, &settings.silver_settings(), &out)?;
+                let w = plan_cmd::write(&plan, &silver, &out)?;
                 sync::commit_generated(&out, "lakehouse: generate")?;
                 let n = w.files;
                 print!("{}", plan_cmd::render_summary(&plan));
@@ -645,6 +756,7 @@ impl EkosExtension for LakehouseExtension {
                 Ok(())
             }
             Some(("deletes", m)) => deletes_cmd(ctx, m),
+            Some(("extraction", m)) => extraction_cmd(ctx, m),
             Some(("reconcile", m)) => {
                 let settings = settings::load(ctx.config)?;
                 let plan = plan_cmd::read_lock(&pipeline_dir(&settings, ctx))?;
@@ -738,11 +850,12 @@ impl EkosExtension for LakehouseExtension {
                 let settings = settings::load(ctx.config)?;
                 workflow::gate(&settings, ctx)?;
                 let repo = pipeline_dir(&settings, ctx);
-                let wf = facts::plan_facts(&settings, ctx)?;
-                let live = {
-                    let redaction = ctx.config.redaction_config();
-                    off_runtime(|| plan_cmd::build_plan_with(&settings, &redaction, &wf))?
-                };
+                // RFC 0226: step 3 and the operator's changes apply; sync's own rules (RFC 0194)
+                // decide what a source change does, so the plan approval does not gate it.
+                let f = fresh(&settings, ctx, &repo)?;
+                let mut silver = settings.silver_settings();
+                silver.pii = f.masks.clone();
+                let live = f.plan;
                 let run = format!(
                     "sync-{}",
                     std::time::SystemTime::now()
@@ -754,7 +867,7 @@ impl EkosExtension for LakehouseExtension {
                 let outcome = sync::sync(sync::SyncInputs {
                     repo: &repo,
                     live: &live,
-                    silver: &settings.silver_settings(),
+                    silver: &silver,
                     policy: &settings.policy,
                     store: store.as_ref(),
                     git_remote: settings.git_remote.as_deref(),
@@ -1233,6 +1346,276 @@ fn deletes_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result
     }
     state.insert(name.clone(), check.detected_at.clone());
     deletes::write_state(&state_path, &state)
+}
+
+/// RFC 0226: the plan read fresh from the source with step 3 in and the deployed renames
+/// carried, saved as the proposal, then with the operator's changes applied.
+fn fresh(
+    settings: &settings::Settings,
+    ctx: &CommandContext<'_>,
+    repo: &std::path::Path,
+) -> anyhow::Result<extraction::Final> {
+    let step3 = read_step3(ctx);
+    let mut wf = facts::plan_facts(settings, ctx)?;
+    step3.apply_facts(&mut wf);
+    let mut plan = {
+        let redaction = ctx.config.redaction_config();
+        off_runtime(|| plan_cmd::build_plan_with(settings, &redaction, &wf))?
+    };
+    // Over a deployed plan: keep its approved renames, and rename in place what the source
+    // renamed since, rather than add an empty column.
+    if let Ok(deployed) = plan_cmd::read_lock(repo) {
+        ekos_lakehouse_bronze::carry_renames(&mut plan, &deployed);
+    }
+    let excluded = step3.apply_plan(&mut plan);
+    let masks = step3.masks_for(&plan);
+    let p = extraction::Proposal {
+        at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        plan,
+        facts: wf,
+        masks,
+        excluded,
+        step3: step3.subjects,
+    };
+    let dir = extraction::state_dir(ctx.config, ctx.cwd);
+    extraction::write_proposal(&dir, &p)?;
+    let changes = extraction::read_changes(&dir)?;
+    Ok(extraction::finalize(&p, &changes, &settings.pii))
+}
+
+/// Step 3 from the review; without a ledger or a review, nothing (and the plan says why).
+fn read_step3(ctx: &CommandContext<'_>) -> extraction::Step3 {
+    let read = || -> anyhow::Result<extraction::Step3> {
+        let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+        let r = ekos::commands::review::review_state(ctx.config, ctx.cwd, store.as_ref())?;
+        Ok(extraction::step3(&r.statuses, &r.items))
+    };
+    read().unwrap_or_else(|e| extraction::Step3::unavailable(&format!("no review to read ({e})")))
+}
+
+fn print_final(f: &extraction::Final) {
+    for a in &f.applied {
+        match &a.stale {
+            None => println!(
+                "change applied: {} — {}",
+                a.change.table,
+                a.change.change.describe()
+            ),
+            Some(why) => println!(
+                "change NOT applied: {} — {}: {why}",
+                a.change.table,
+                a.change.change.describe()
+            ),
+        }
+    }
+    if !f.excluded.is_empty() {
+        println!("{} table(s) out of scope (step 3)", f.excluded.len());
+    }
+    for n in &f.notes {
+        println!("note: {n}");
+    }
+}
+
+/// RFC 0226 §2.5: under `require-plan-approval`, only the approved plan is built.
+fn plan_gate(
+    settings: &settings::Settings,
+    ctx: &CommandContext<'_>,
+    f: &extraction::Final,
+) -> anyhow::Result<()> {
+    if !settings.require_plan_approval.unwrap_or(false) {
+        return Ok(());
+    }
+    let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+    let Some(o) = store.get_object(&facts::plan_approval_id())? else {
+        anyhow::bail!(
+            "require-plan-approval: the extraction plan is not approved. Review it (the console's \
+             Extraction page, or `lakehouse extraction show`) and approve it"
+        );
+    };
+    let approved = o
+        .properties
+        .get("digest")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if approved == f.digest {
+        return Ok(());
+    }
+    let by = o
+        .properties
+        .get("by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let at = o
+        .properties
+        .get("at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let dir = extraction::state_dir(ctx.config, ctx.cwd);
+    let diff = match extraction::read_approved(&dir)?.filter(|a| a.digest == approved) {
+        Some(a) => extraction::differences(&a.tables, &f.tables),
+        None => "the approved plan's tables are not recorded here".into(),
+    };
+    anyhow::bail!(
+        "the plan differs from the one {by} approved at {at} ({diff}): the source, step 3 or a \
+         change moved since. Review the plan and approve it again"
+    )
+}
+
+fn reviewer(by: Option<&String>) -> anyhow::Result<String> {
+    by.cloned()
+        .or_else(|| std::env::var("USER").ok())
+        .filter(|b| !b.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("who is deciding? Pass --as <you>"))
+}
+
+/// `lakehouse extraction show|change|approve` (RFC 0226).
+fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result<()> {
+    use ekos_lakehouse_bronze::extraction::{CadenceChoice, Change, ModeChoice, TableChange};
+    let settings = settings::load(ctx.config)?;
+    let dir = extraction::state_dir(ctx.config, ctx.cwd);
+    let proposal = extraction::read_proposal(&dir)?;
+    let changes = extraction::read_changes(&dir)?;
+    let need = || {
+        proposal
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no proposed plan yet: run `lakehouse plan` first"))
+    };
+    let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    match m.subcommand() {
+        Some(("show", m)) => {
+            let f = proposal
+                .as_ref()
+                .map(|p| extraction::finalize(p, &changes, &settings.pii));
+            let a = extraction::read_approved(&dir)?;
+            let v = extraction::show(
+                proposal.as_ref(),
+                f.as_ref(),
+                a.as_ref(),
+                m.get_one::<String>("table").map(String::as_str),
+            );
+            if m.get_flag("json") {
+                println!("{v}");
+            } else {
+                print!("{}", extraction::render(&v));
+            }
+            Ok(())
+        }
+        Some(("change", m)) => {
+            let p = need()?;
+            let wanted = m.get_one::<String>("table").cloned().unwrap_or_default();
+            let names: Vec<String> = p
+                .plan
+                .tables
+                .iter()
+                .map(|t| format!("{}.{}", t.schema, t.table))
+                .chain(changes.iter().map(|c| c.table.clone()))
+                .collect();
+            let exact: Vec<&String> = names
+                .iter()
+                .filter(|n| n.eq_ignore_ascii_case(&wanted))
+                .collect();
+            let by_name: std::collections::BTreeSet<&String> = names
+                .iter()
+                .filter(|n| {
+                    n.rsplit_once('.')
+                        .is_some_and(|(_, t)| t.eq_ignore_ascii_case(&wanted))
+                })
+                .collect();
+            let table = match (exact.first(), by_name.len()) {
+                (Some(t), _) => (*t).clone(),
+                (None, 1) => (*by_name.iter().next().unwrap_or(&&wanted)).clone(),
+                (None, 0) => anyhow::bail!("{wanted} is not in the proposed plan"),
+                (None, _) => anyhow::bail!("{wanted} names several tables: give `schema.table`"),
+            };
+            let mut next = changes.clone();
+            if m.get_flag("undo") {
+                let before = next.len();
+                next.retain(|c| c.table != table);
+                extraction::write_changes(&dir, &next)?;
+                println!("{table}: {} change(s) removed", before - next.len());
+                return Ok(());
+            }
+            let change = if m.get_flag("full") {
+                Change::Mode(ModeChoice::Full)
+            } else if m.get_flag("incremental") {
+                Change::Mode(ModeChoice::Incremental)
+            } else if m.get_flag("deletes-every-run") {
+                Change::Deletes(CadenceChoice::Run)
+            } else if m.get_flag("deletes-audit") {
+                Change::Deletes(CadenceChoice::Audit)
+            } else if m.get_flag("keep-purged") {
+                Change::Purge(ekos_lakehouse_bronze::PurgePolicy::Retain)
+            } else {
+                Change::Purge(ekos_lakehouse_bronze::PurgePolicy::Propagate)
+            };
+            let new = TableChange {
+                table: table.clone(),
+                change,
+                reason: m
+                    .get_one::<String>("reason")
+                    .map(|r| r.trim().to_string())
+                    .filter(|r| !r.is_empty()),
+                by: reviewer(m.get_one::<String>("by"))?,
+                at: now(),
+            };
+            ekos_lakehouse_bronze::extraction::record(&mut next, new.clone());
+            let f = extraction::finalize(&p, &next, &settings.pii);
+            if let Some(why) = f
+                .applied
+                .iter()
+                .find(|a| a.change == new)
+                .and_then(|a| a.stale.clone())
+            {
+                anyhow::bail!("{table}: cannot {}: {why}", new.change.describe());
+            }
+            extraction::write_changes(&dir, &next)?;
+            let approved = extraction::read_approved(&dir)?;
+            println!(
+                "{table}: {} (by {}). {}",
+                new.change.describe(),
+                new.by,
+                match approved {
+                    Some(a) if a.digest == f.digest => "The plan is the approved one again.",
+                    _ => "The plan needs approving before it is built.",
+                }
+            );
+            Ok(())
+        }
+        Some(("approve", m)) => {
+            let p = need()?;
+            let f = extraction::finalize(&p, &changes, &settings.pii);
+            let by = reviewer(m.get_one::<String>("by"))?;
+            let a = extraction::approve(
+                &p,
+                &f,
+                &changes,
+                &by,
+                &now(),
+                m.get_one::<String>("note").cloned(),
+            )?;
+            let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+            facts::record_plan_approval(store.as_ref(), &a)?;
+            extraction::write_approved(&dir, &a)?;
+            let c = &a.counts;
+            println!(
+                "extraction plan approved by {by}: digest {}\n  incremental {} (deletes every \
+                 run {}, audited {}, other {}), full {}, refused {}, out of scope {}, masked \
+                 columns {}, changes {}",
+                &a.digest[..16],
+                c.incremental_every_run + c.incremental_audited + c.incremental_other,
+                c.incremental_every_run,
+                c.incremental_audited,
+                c.incremental_other,
+                c.full,
+                c.refused,
+                c.excluded,
+                c.masked_columns,
+                a.changes.len()
+            );
+            Ok(())
+        }
+        _ => anyhow::bail!("lakehouse extraction: show, change or approve"),
+    }
 }
 
 /// The pipeline repository: `--out`, else `pipeline-dir` relative to the project.

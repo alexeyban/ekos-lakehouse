@@ -2,6 +2,7 @@
 //! loaded, and the SQL that does it. Pure functions over source facts — no connection, no clock,
 //! no randomness — so the same facts always generate the same files.
 
+pub mod extraction;
 pub mod mode;
 pub mod model;
 pub mod plan;

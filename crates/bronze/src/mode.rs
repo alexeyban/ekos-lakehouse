@@ -150,7 +150,7 @@ pub struct ModeDecision {
 }
 
 /// Types a watermark can be compared on.
-fn orderable(engine: SourceEngine, source_type: &str) -> bool {
+pub fn orderable(engine: SourceEngine, source_type: &str) -> bool {
     match engine {
         SourceEngine::Postgres => {
             source_type.starts_with("timestamp")
