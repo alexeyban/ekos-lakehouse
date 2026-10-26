@@ -516,6 +516,40 @@ pub fn record_plan_approval(
     })
 }
 
+/// EKOS RFC 0215: one id per mart; its versions are the requirement's approvals.
+pub fn requirement_approval_id(mart: &str) -> KirId {
+    det_id(&format!("lakehouse-approval:mart:{mart}"))
+}
+
+/// EKOS RFC 0215 §2.4: who approved which requirement — its digest and the silver tables it
+/// reads. The description itself is in the pipeline repository.
+pub fn record_requirement_approval(
+    store: &dyn KnowledgeStore,
+    a: &crate::requirements::Approval,
+) -> anyhow::Result<KirId> {
+    with_context(
+        store,
+        &format!("approve-{}-{}", a.mart, a.at),
+        "requirements",
+        || {
+            let mut obj = KirObject::new(
+                format!("mart requirement {}", a.mart),
+                ObjectKind::Custom(APPROVAL_KIND.into()),
+            );
+            obj.id = requirement_approval_id(&a.mart);
+            obj.properties
+                .insert("subject".into(), json!("mart requirement"));
+            if let serde_json::Value::Object(m) = serde_json::to_value(a)? {
+                for (k, v) in m {
+                    obj.properties.insert(k, v);
+                }
+            }
+            store.append_object(&obj)?;
+            Ok(obj.id)
+        },
+    )
+}
+
 /// One delete check (RFC 0225 §2.4): counts, method, guard and times — never a key value.
 pub fn record_delete_check(
     store: &dyn KnowledgeStore,

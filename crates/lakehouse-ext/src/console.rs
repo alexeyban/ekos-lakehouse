@@ -147,9 +147,148 @@ pub fn pages() -> Vec<ConsolePage> {
             ],
             ..Default::default()
         },
+        requirements_page(),
         extraction_page(),
         pentaho_page(),
     ]
+}
+
+/// EKOS RFC 0215: step 4 — mart requirements, drafted from text by the configured model or
+/// written as descriptions, resolved by EKOS against the deployed plan, changed and approved.
+fn requirements_page() -> ConsolePage {
+    let show = || vec!["lakehouse", "requirements", "show", "--json"];
+    let edit = |label: &'static str, inputs: Vec<(&'static str, &'static str)>, flags| Action {
+        label,
+        command: vec!["lakehouse", "requirements", "edit"],
+        binds: vec![("mart", "mart")],
+        inputs,
+        flags,
+        ..Default::default()
+    };
+    ConsolePage {
+        id: "requirements",
+        title: "Requirements",
+        description: "Step 4: describe a mart in plain words and the configured model drafts its \
+                      metadata (grain, dimensions, measures, filters); EKOS then resolves every \
+                      term against the approved plan. What does not resolve, or could mean more \
+                      than one thing, is a question for you, never for the model: answer it by \
+                      changing the term. Drafts can be wrong; nothing is built until every term \
+                      resolves and you approve the requirement.",
+        params: vec![PageParam {
+            name: "mart",
+            label: "Mart",
+            source: "marts",
+            rows: "/marts",
+            key: "/mart",
+        }],
+        panels: vec![
+            Panel {
+                id: "marts",
+                title: "Requirements (click one)",
+                command: show(),
+                view: View::Table {
+                    rows: "/marts",
+                    columns: vec![
+                        Column::new("/mart", "Mart"),
+                        Column::badge("/state", "State"),
+                        Column::new("/source", "From"),
+                        Column::new("/terms", "Terms"),
+                        Column::new("/questions", "Questions"),
+                        Column::new("/needs", "Silver tables"),
+                        Column::new("/approved_by", "Approved by"),
+                        Column::new("/approved_at", "Approved at"),
+                    ],
+                },
+                empty: "No requirement yet: Draft from text.",
+                ..Default::default()
+            },
+            Panel {
+                id: "mart",
+                title: "Requirement",
+                command: show(),
+                params: vec!["mart"],
+                view: View::Markdown {
+                    pointer: "/selected/markdown",
+                },
+                empty: "",
+            },
+            Panel {
+                id: "terms",
+                title: "Terms: what each resolved to",
+                command: show(),
+                params: vec!["mart"],
+                view: View::Table {
+                    rows: "/selected/terms",
+                    columns: vec![
+                        Column::new("/section", "Section"),
+                        Column::new("/term", "Term"),
+                        Column::new("/written", "Written"),
+                        Column::badge("/resolved", "Resolved"),
+                        Column::new("/how", "How"),
+                        Column::new("/question", "Question"),
+                        Column::new("/candidates", "Candidates"),
+                    ],
+                },
+                empty: "",
+            },
+            Panel {
+                id: "needs",
+                title: "Silver tables the requirements read",
+                command: show(),
+                view: View::Table {
+                    rows: "/needs_rows",
+                    columns: vec![Column::new("/table", "Table")],
+                },
+                empty: "None yet: a requirement reads tables once every term resolves.",
+                ..Default::default()
+            },
+        ],
+        actions: vec![
+            Action {
+                label: "Draft from text",
+                command: vec!["lakehouse", "requirements", "draft"],
+                inputs: vec![
+                    ("mart", "Mart name (lowercase letters, digits, _)"),
+                    ("text", "What should it show? (plain words)"),
+                ],
+                ..Default::default()
+            },
+            edit(
+                "Change a term",
+                vec![("term", "Term"), ("value", "New definition")],
+                vec![],
+            ),
+            edit(
+                "Add a dimension",
+                vec![("term", "Name"), ("value", "Definition")],
+                vec!["dimension"],
+            ),
+            edit(
+                "Add a measure",
+                vec![("term", "Name"), ("value", "Definition")],
+                vec!["measure"],
+            ),
+            edit("Remove a term", vec![("drop-term", "Term")], vec![]),
+            edit("Add a filter", vec![("filter", "Filter")], vec![]),
+            edit(
+                "Remove a filter",
+                vec![("drop-filter", "Filter, as written")],
+                vec![],
+            ),
+            Action {
+                label: "Approve",
+                command: vec!["lakehouse", "requirements", "approve"],
+                binds: vec![("mart", "mart")],
+                inputs: vec![("note", "Note (optional)")],
+                confirm: Some(
+                    "You approve this requirement as shown, under your name: it is committed to \
+                     the pipeline repository as marts/<mart>.md and recorded in the ledger with \
+                     its digest. Gold is built only from approved requirements.",
+                ),
+                ..Default::default()
+            },
+        ],
+    }
 }
 
 /// EKOS RFC 0226: step 5 — the proposed extraction plan with its evidence, the operator's changes
@@ -686,7 +825,10 @@ mod tests {
             .iter()
             .map(|p| p["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, vec!["lakehouse", "extraction", "pentaho"]);
+        assert_eq!(
+            ids,
+            vec!["lakehouse", "requirements", "extraction", "pentaho"]
+        );
     }
 
     #[test]

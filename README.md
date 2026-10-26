@@ -265,6 +265,25 @@ reload of every incremental table it affects, since an incremental load never re
 table whose source name has a `$` (Oracle's `CREATE$JAVA$LOB$TABLE`) is named without it: Trino reads `t$x` as a
 metadata table of `t`.
 
+### Mart requirements (EKOS RFC 0215)
+
+Step 4 turns a request into an approved requirement before any gold is built:
+
+```bash
+ekos-lakehouse lakehouse requirements draft --mart sales_by_region --text "monthly sales by product category and region"
+ekos-lakehouse lakehouse requirements show --mart sales_by_region          # terms, questions, silver tables
+ekos-lakehouse lakehouse requirements edit --mart sales_by_region \
+    --term region --value "c_region.name via c_orderline.c_bpartner_location_id, c_location.c_region_id"
+ekos-lakehouse lakehouse requirements approve --mart sales_by_region       # commits marts/sales_by_region.md
+ekos-lakehouse lakehouse gold draft pipeline/marts/sales_by_region.md
+```
+
+`--text` uses the model routed to the `requirements` task (`[llm.tasks.requirements]`; a metered route needs
+`--allow-metered`), and `--file` takes a description as written. EKOS resolves every term against the deployed plan,
+and the model never answers a question. `… via table.column` chooses among several join paths; a join is at most four
+keys long. With `require-plan-approval`, `gold draft` builds only approved requirements. The console's
+**Requirements** page does all of it.
+
 ## Try it on the sandbox
 
 ```bash

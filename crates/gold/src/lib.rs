@@ -11,6 +11,8 @@ use ekos_migrate_logic::invention::{AtomKind, InventionReport, check_candidate_w
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+pub mod requirements;
+
 // ─────────────────────────────── the description ───────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -79,8 +81,10 @@ pub fn parse(text: &str) -> Result<MartSpec, String> {
     Ok(MartSpec {
         mart,
         grain: list("grain"),
-        dimensions: pairs(doc.get("dimensions"))?,
-        measures: pairs(doc.get("measures"))?,
+        dimensions: pairs(doc.get("dimensions"))
+            .map_err(|e| format!("dimensions: {e} (e.g. `month: month of orders.ordered_at`)"))?,
+        measures: pairs(doc.get("measures"))
+            .map_err(|e| format!("measures: {e} (e.g. `orders: count of orders`)"))?,
         filters: list("filters"),
         prose: prose.trim_start_matches('\n').trim().to_string(),
     })
@@ -95,8 +99,23 @@ struct Model<'a> {
 }
 
 impl Model<'_> {
-    fn has(&self, col: &str) -> bool {
-        self.plan.columns.iter().any(|m| m.column == col)
+    /// The column so named: exactly, or (EKOS RFC 0215: Oracle's names are upper case, people
+    /// write lower case) the one column whose name differs only in case.
+    fn find(&self, col: &str) -> Result<String, Vec<String>> {
+        if self.plan.columns.iter().any(|m| m.column == col) {
+            return Ok(col.to_string());
+        }
+        let near: Vec<String> = self
+            .plan
+            .columns
+            .iter()
+            .filter(|m| m.column.eq_ignore_ascii_case(col))
+            .map(|m| m.column.clone())
+            .collect();
+        match near.as_slice() {
+            [one] => Ok(one.clone()),
+            _ => Err(near),
+        }
     }
 }
 
@@ -143,6 +162,10 @@ pub struct Resolved {
     pub resolution: Result<Term, Question>,
     /// How it resolved, for the proposal's table.
     pub how: String,
+    /// EKOS RFC 0215: `… via table.column`: the foreign keys the joins to this term's tables
+    /// must pass through, when there are several paths.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub via: Vec<ColRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -180,12 +203,21 @@ impl<'a> Catalog<'a> {
             Some((s, t)) => (Some(s), t),
             None => (None, name),
         };
+        // Exactly, or else regardless of case (EKOS RFC 0215); several that differ only in case
+        // are listed below as a question.
+        let exact = self.by_table.contains_key(table);
         let found: Vec<&Model> = self
             .by_table
-            .get(table)
-            .into_iter()
-            .flatten()
-            .filter(|m| schema.is_none_or(|s| m.plan.schema == s))
+            .iter()
+            .filter(|(k, _)| {
+                if exact {
+                    k.as_str() == table
+                } else {
+                    k.eq_ignore_ascii_case(table)
+                }
+            })
+            .flat_map(|(_, ms)| ms)
+            .filter(|m| schema.is_none_or(|s| m.plan.schema.eq_ignore_ascii_case(s)))
             .collect();
         match found.as_slice() {
             [one] => Ok(one),
@@ -204,13 +236,15 @@ impl<'a> Catalog<'a> {
 
     fn near(&self, word: &str) -> Vec<String> {
         let mut out: Vec<String> = vec![];
+        let word = word.to_ascii_lowercase();
+        let word = word.as_str();
         for (t, ms) in &self.by_table {
-            if t.contains(word) {
+            if t.to_ascii_lowercase().contains(word) {
                 out.push(t.clone());
             }
             for m in ms {
                 for c in &m.plan.columns {
-                    if c.column.contains(word) {
+                    if c.column.to_ascii_lowercase().contains(word) {
                         out.push(format!("{t}.{}", c.column));
                     }
                 }
@@ -226,29 +260,36 @@ impl<'a> Catalog<'a> {
         let w = written.trim();
         if let Some((t, c)) = w.rsplit_once('.') {
             let m = self.table(t)?;
-            return if m.has(c) {
-                Ok(ColRef {
+            return match m.find(c) {
+                Ok(column) => Ok(ColRef {
                     table: m.plan.table.clone(),
-                    column: c.to_string(),
-                })
-            } else {
-                Err(q(
-                    format!("`{}` has no column `{c}`", m.plan.table),
-                    m.plan
-                        .columns
-                        .iter()
-                        .map(|x| format!("{}.{}", m.plan.table, x.column))
+                    column,
+                }),
+                Err(same) if !same.is_empty() => Err(q(
+                    format!(
+                        "`{}` has columns differing only in case: which one?",
+                        m.plan.table
+                    ),
+                    same.iter()
+                        .map(|x| format!("{}.{x}", m.plan.table))
                         .collect(),
-                ))
+                )),
+                Err(_) => Err(q(
+                    format!("`{}` has no column `{c}`", m.plan.table),
+                    similar(c, m.plan.columns.iter().map(|x| x.column.as_str()))
+                        .into_iter()
+                        .map(|x| format!("{}.{x}", m.plan.table))
+                        .collect(),
+                )),
             };
         }
         let mut hits = vec![];
         for (t, ms) in &self.by_table {
             for m in ms {
-                if m.has(w) {
+                if let Ok(column) = m.find(w) {
                     hits.push(ColRef {
                         table: t.clone(),
-                        column: w.to_string(),
+                        column,
                     });
                 }
             }
@@ -264,6 +305,31 @@ impl<'a> Catalog<'a> {
             )),
         }
     }
+}
+
+/// EKOS RFC 0215: the names like `word` (one contains the other, ignoring case and a leading
+/// `is`): `total` → `GRANDTOTAL`, `TOTALLINES`; `isprocessed` → `PROCESSED`. At most twelve; a
+/// table's every column is no help to the person asked.
+fn similar<'a>(word: &str, names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let norm = |s: &str| {
+        let l = s.to_ascii_lowercase().replace('_', "");
+        match l.strip_prefix("is") {
+            Some(r) if r.len() >= 3 => r.to_string(),
+            _ => l,
+        }
+    };
+    let w = norm(word);
+    if w.len() < 3 {
+        return vec![];
+    }
+    names
+        .filter(|n| {
+            let n = norm(n);
+            n.len() >= 3 && (n.contains(&w) || w.contains(&n))
+        })
+        .take(12)
+        .map(str::to_string)
+        .collect()
 }
 
 const AGGREGATES: &[(&str, &str)] = &[
@@ -366,7 +432,16 @@ fn resolve_value(
         for op in ["<>", "<=", ">=", "=", "<", ">"] {
             if let Some((l, r)) = w.split_once(&format!(" {op} ")) {
                 let lit = r.trim();
+                // EKOS RFC 0215: `= true` reads as `is true` (silver flags are booleans).
+                let lit = if matches!(op, "=" | "<>") && lit.eq_ignore_ascii_case("true") {
+                    "true"
+                } else if matches!(op, "=" | "<>") && lit.eq_ignore_ascii_case("false") {
+                    "false"
+                } else {
+                    lit
+                };
                 let literal_ok = lit.parse::<f64>().is_ok()
+                    || matches!(lit, "true" | "false")
                     || (lit.starts_with('\'') && lit.ends_with('\'') && lit.len() >= 2);
                 if !literal_ok {
                     return (
@@ -411,6 +486,73 @@ fn resolve_value(
     )
 }
 
+/// `value via t.c[, t2.c2]`: the value, and the foreign-key columns that choose the join path.
+fn resolve_term(cat: &Catalog, section: &'static str, name: &str, written: &str) -> Resolved {
+    let lower = written.to_ascii_lowercase();
+    let (value, via_text) = match lower.rfind(" via ") {
+        Some(i) => (&written[..i], Some(&written[i + 5..])),
+        None => (written, None),
+    };
+    let mut via = vec![];
+    let mut via_question = None;
+    for v in via_text
+        .into_iter()
+        .flat_map(|t| t.split(','))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        match cat.column(v) {
+            Ok(c) => {
+                let is_key = cat.table(&c.table).is_ok_and(|m| {
+                    m.plan
+                        .facts
+                        .foreign_keys
+                        .iter()
+                        .any(|fk| fk.columns.len() == 1 && fk.columns[0] == c.column)
+                });
+                if is_key {
+                    via.push(c);
+                } else {
+                    via_question = Some(q(
+                        format!(
+                            "`via {v}`: `{}.{}` is not a foreign key, so it chooses no join",
+                            c.table, c.column
+                        ),
+                        vec![],
+                    ));
+                }
+            }
+            Err(e) => via_question = Some(e),
+        }
+    }
+    let (resolution, how) = match via_question {
+        Some(e) => (Err(e), String::new()),
+        None => {
+            let (r, how) = resolve_value(cat, section, value);
+            let how = if via.is_empty() {
+                how
+            } else {
+                format!(
+                    "{how}, joined via {}",
+                    via.iter()
+                        .map(|c| format!("`{}.{}`", c.table, c.column))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            (r, how)
+        }
+    };
+    Resolved {
+        term: name.to_string(),
+        section,
+        written: written.to_string(),
+        resolution,
+        how,
+        via,
+    }
+}
+
 /// Resolve every term of a description against the deployed plan.
 pub fn resolve(spec: &MartSpec, plan: &Plan) -> Vec<Resolved> {
     let cat = Catalog::new(plan);
@@ -426,6 +568,7 @@ pub fn resolve(spec: &MartSpec, plan: &Plan) -> Vec<Resolved> {
                     spec.dimensions.iter().map(|(n, _)| n.clone()).collect(),
                 )),
                 how: String::new(),
+                via: vec![],
             });
         }
     }
@@ -434,25 +577,11 @@ pub fn resolve(spec: &MartSpec, plan: &Plan) -> Vec<Resolved> {
         ("measures", &spec.measures),
     ] {
         for (name, written) in items {
-            let (resolution, how) = resolve_value(&cat, section, written);
-            out.push(Resolved {
-                term: name.clone(),
-                section,
-                written: written.clone(),
-                resolution,
-                how,
-            });
+            out.push(resolve_term(&cat, section, name, written));
         }
     }
     for f in &spec.filters {
-        let (resolution, how) = resolve_value(&cat, "filters", f);
-        out.push(Resolved {
-            term: f.clone(),
-            section: "filters",
-            written: f.clone(),
-            resolution,
-            how,
-        });
+        out.push(resolve_term(&cat, "filters", f, f));
     }
     // Prose may name exact columns of the tables the mart reads: those are allowed to the draft.
     let tables: BTreeSet<String> = out
@@ -574,90 +703,128 @@ pub fn questions(r: &[Resolved]) -> Vec<(&Resolved, &Question)> {
 
 // ─────────────────────────────── compilation ───────────────────────────────
 
+type Step = (String, String, String, String);
+
+/// EKOS RFC 0215: a join path longer than this means something nobody wrote, and in a dense key
+/// graph (every iDempiere table points at `AD_Client` and `AD_Org`) the search over all simple
+/// paths does not finish without a bound.
+pub const MAX_HOPS: usize = 4;
+
 /// The many-to-one join path from `base` to every table in `need`, along declared single-column
 /// foreign keys (child → parent only: a parent → child join would repeat the base's rows and
-/// inflate every total).
+/// inflate every total). `via` (EKOS RFC 0215): per table, the `(table, column)` keys its path
+/// must pass through.
 fn joins(
     plan: &Plan,
     base: &str,
     need: &BTreeSet<String>,
-) -> Result<Vec<(String, String, String, String)>, Question> {
+    via: &BTreeMap<String, Vec<(String, String)>>,
+) -> Result<Vec<Step>, Question> {
     let cat = Catalog::new(plan);
     // child table → [(child col, parent table, parent col)]
     let mut edges: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
     for t in &plan.tables {
         for fk in &t.facts.foreign_keys {
             if let ([c], [rc]) = (fk.columns.as_slice(), fk.ref_columns.as_slice())
-                && cat.table(&fk.ref_table).is_ok()
+                && let Ok(parent) = cat.table(&fk.ref_table)
             {
                 edges.entry(t.table.clone()).or_default().push((
                     c.clone(),
-                    fk.ref_table.clone(),
+                    parent.plan.table.clone(),
                     rc.clone(),
                 ));
             }
         }
     }
-    let mut prev: BTreeMap<String, (String, String, String)> = BTreeMap::new(); // table → (from, from col, col)
-    let mut seen = BTreeSet::from([base.to_string()]);
-    let mut queue = VecDeque::from([base.to_string()]);
-    while let Some(t) = queue.pop_front() {
-        for (c, parent, rc) in edges.get(&t).into_iter().flatten() {
-            if seen.insert(parent.clone()) {
-                prev.insert(parent.clone(), (t.clone(), c.clone(), rc.clone()));
-                queue.push_back(parent.clone());
-            }
-        }
-    }
-    let mut out: Vec<(String, String, String, String)> = vec![];
+    let mut out: Vec<Step> = vec![];
     for t in need {
         if t == base {
             continue;
         }
-        // More than one foreign-key path to a table is more than one meaning (the customer's
-        // store, the rented copy's store, the clerk's store): the author picks, by naming a
-        // column on the path they mean.
-        let paths = paths_to(&edges, base, t, 8);
-        if paths.len() > 1 {
-            let show = |p: &Vec<(String, String, String, String)>| {
-                p.iter()
-                    .map(|(c, cc, parent, _)| format!("{c}.{cc} → {parent}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let mut via: Vec<String> = paths
-                .iter()
-                .filter_map(|p| p.last().map(|(c, cc, ..)| format!("{c}.{cc}")))
-                .collect();
-            via.sort();
-            via.dedup();
-            return Err(q(
-                format!(
-                    "`{t}` is reached from `{base}` along {} foreign-key paths, each a different \
-                     meaning ({}): name the column that says which, e.g. `{}`",
-                    paths.len(),
-                    paths.iter().map(show).collect::<Vec<_>>().join("; "),
-                    via[0]
-                ),
-                via,
-            ));
+        let mut paths = paths_to(&edges, base, t, 64);
+        if let Some(keys) = via.get(t) {
+            paths.retain(|p| {
+                keys.iter()
+                    .all(|(vt, vc)| p.iter().any(|(c, cc, ..)| c == vt && cc == vc))
+            });
+            if paths.is_empty() {
+                return Err(q(
+                    format!(
+                        "no foreign-key path from `{base}` to `{t}` passes through {}",
+                        keys.iter()
+                            .map(|(a, b)| format!("`{a}.{b}`"))
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    ),
+                    vec![],
+                ));
+            }
         }
-        if !prev.contains_key(t) {
-            return Err(q(
-                format!(
-                    "`{t}` cannot be joined to `{base}` along a foreign key from `{base}` towards it; \
-                     joining the other way would repeat rows of `{base}`"
-                ),
-                vec![],
-            ));
-        }
-        let mut cur = t.clone();
-        let mut path = vec![];
-        while let Some((from, fc, tc)) = prev.get(&cur) {
-            path.push((from.clone(), fc.clone(), cur.clone(), tc.clone()));
-            cur = from.clone();
-        }
-        for step in path.into_iter().rev() {
+        let path = match paths.as_slice() {
+            [] => {
+                return Err(q(
+                    format!(
+                        "`{t}` cannot be joined to `{base}` along at most {MAX_HOPS} foreign keys \
+                         from `{base}` towards it; joining the other way would repeat rows of `{base}`"
+                    ),
+                    vec![],
+                ));
+            }
+            [one] => one.clone(),
+            many => {
+                // More than one foreign-key path to a table is more than one meaning (the
+                // customer's store, the rented copy's store, the clerk's store): the author picks
+                // with `via`, naming a key on the path they mean.
+                let show = |p: &Vec<Step>| {
+                    p.iter()
+                        .map(|(c, cc, parent, _)| format!("{c}.{cc} → {parent}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                // Per path, its last key the other paths do not all share: the one that says which.
+                let shared = |st: &Step| many.iter().all(|p| p.contains(st));
+                let mut keys: Vec<String> = many
+                    .iter()
+                    .filter_map(|p| {
+                        p.iter()
+                            .rev()
+                            .find(|st| !shared(st))
+                            .map(|(c, cc, ..)| format!("{c}.{cc}"))
+                    })
+                    .collect();
+                keys.sort();
+                keys.dedup();
+                let shown: Vec<String> = many.iter().take(6).map(show).collect();
+                return Err(q(
+                    format!(
+                        "`{t}` is reached from `{base}` along {}{} foreign-key paths, each a \
+                         different meaning ({}{}): add `via` and the key that says which, e.g. \
+                         `… via {}`",
+                        if many.len() >= 64 { "at least " } else { "" },
+                        many.len(),
+                        shown.join("; "),
+                        if many.len() > 6 { "; …" } else { "" },
+                        keys[0]
+                    ),
+                    keys,
+                ));
+            }
+        };
+        for step in path {
+            // One table joined along two paths would be two meanings under one name.
+            if let Some(other) = out.iter().find(|o| o.2 == step.2 && **o != step) {
+                return Err(q(
+                    format!(
+                        "`{}` would be joined twice, from `{}.{}` and from `{}.{}`: one mart \
+                         reads a table along one path; choose one with `via`",
+                        step.2, other.0, other.1, step.0, step.1
+                    ),
+                    vec![
+                        format!("{}.{}", other.0, other.1),
+                        format!("{}.{}", step.0, step.1),
+                    ],
+                ));
+            }
             if !out.contains(&step) {
                 out.push(step);
             }
@@ -666,51 +833,81 @@ fn joins(
     Ok(out)
 }
 
-/// Every simple many-to-one path from `base` to `target` (up to `limit` of them).
+/// Every simple many-to-one path from `base` to `target` of at most [`MAX_HOPS`] keys (up to
+/// `limit` of them). Only tables that can still reach `target` in the hops left are walked.
 fn paths_to(
     edges: &BTreeMap<String, Vec<(String, String, String)>>,
     base: &str,
     target: &str,
     limit: usize,
-) -> Vec<Vec<(String, String, String, String)>> {
-    fn walk(
-        edges: &BTreeMap<String, Vec<(String, String, String)>>,
-        at: &str,
-        target: &str,
-        limit: usize,
-        on_path: &mut Vec<String>,
-        path: &mut Vec<(String, String, String, String)>,
-        out: &mut Vec<Vec<(String, String, String, String)>>,
-    ) {
-        if out.len() >= limit {
-            return;
-        }
-        if at == target {
-            out.push(path.clone());
-            return;
-        }
-        for (c, parent, rc) in edges.get(at).into_iter().flatten() {
-            if on_path.contains(parent) {
-                continue;
-            }
-            on_path.push(parent.clone());
-            path.push((at.to_string(), c.clone(), parent.clone(), rc.clone()));
-            walk(edges, parent, target, limit, on_path, path, out);
-            path.pop();
-            on_path.pop();
+) -> Vec<Vec<Step>> {
+    // Hops from each table to `target`, walking the keys backwards.
+    let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (child, es) in edges {
+        for (_, parent, _) in es {
+            children
+                .entry(parent.as_str())
+                .or_default()
+                .push(child.as_str());
         }
     }
-    let mut out = vec![];
-    walk(
+    let mut dist: BTreeMap<&str, usize> = BTreeMap::from([(target, 0)]);
+    let mut queue = VecDeque::from([target]);
+    while let Some(t) = queue.pop_front() {
+        let d = dist[t];
+        if d == MAX_HOPS {
+            continue;
+        }
+        for c in children.get(t).into_iter().flatten() {
+            if !dist.contains_key(c) {
+                dist.insert(c, d + 1);
+                queue.push_back(c);
+            }
+        }
+    }
+    struct Walk<'a> {
+        edges: &'a BTreeMap<String, Vec<(String, String, String)>>,
+        dist: &'a BTreeMap<&'a str, usize>,
+        target: &'a str,
+        limit: usize,
+        on_path: Vec<String>,
+        path: Vec<Step>,
+        out: Vec<Vec<Step>>,
+    }
+    fn walk(w: &mut Walk, at: &str) {
+        if w.out.len() >= w.limit {
+            return;
+        }
+        if at == w.target {
+            w.out.push(w.path.clone());
+            return;
+        }
+        for (c, parent, rc) in w.edges.get(at).into_iter().flatten() {
+            let Some(d) = w.dist.get(parent.as_str()) else {
+                continue;
+            };
+            if w.path.len() + 1 + d > MAX_HOPS || w.on_path.contains(parent) {
+                continue;
+            }
+            w.on_path.push(parent.clone());
+            w.path
+                .push((at.to_string(), c.clone(), parent.clone(), rc.clone()));
+            walk(w, parent);
+            w.path.pop();
+            w.on_path.pop();
+        }
+    }
+    let mut w = Walk {
         edges,
-        base,
+        dist: &dist,
         target,
         limit,
-        &mut vec![base.to_string()],
-        &mut vec![],
-        &mut out,
-    );
-    out
+        on_path: vec![base.to_string()],
+        path: vec![],
+        out: vec![],
+    };
+    walk(&mut w, base);
+    w.out
 }
 
 fn col(c: &ColRef) -> String {
@@ -778,7 +975,22 @@ pub fn compile(
     for r in resolved {
         need.extend(term_tables(r.resolution.as_ref().expect("no questions")));
     }
-    let path = joins(plan, &base, &need).map_err(|e| vec![e])?;
+    let mut via: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for r in resolved {
+        if r.via.is_empty() {
+            continue;
+        }
+        for t in term_tables(r.resolution.as_ref().expect("no questions")) {
+            let keys = via.entry(t).or_default();
+            for c in &r.via {
+                let k = (c.table.clone(), c.column.clone());
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+        }
+    }
+    let path = joins(plan, &base, &need, &via).map_err(|e| vec![e])?;
     let cat = Catalog::new(plan);
     let model_of = |t: &str| cat.table(t).map(|m| model_name(m.plan)).unwrap_or_default();
 

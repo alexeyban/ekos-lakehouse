@@ -16,6 +16,7 @@ pub mod monitor;
 pub mod pentaho_cmd;
 pub mod plan_cmd;
 pub mod reconcile;
+pub mod requirements;
 pub mod run_cmd;
 pub mod settings;
 pub mod source;
@@ -255,6 +256,108 @@ impl EkosExtension for LakehouseExtension {
                                 .long("json")
                                 .action(clap::ArgAction::SetTrue)
                                 .help("Machine-readable output"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("requirements")
+                        .about(
+                            "Step 4: mart requirements — drafted from text by the configured model \
+                             or written as a description, resolved against the deployed plan, \
+                             changed by the operator, approved (EKOS RFC 0215)",
+                        )
+                        .subcommand_required(true)
+                        .subcommand(
+                            clap::Command::new("show")
+                                .about("Every requirement with its state, and one in full")
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output"),
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").help("Show this mart in full")),
+                        )
+                        .subcommand(
+                            clap::Command::new("draft")
+                                .about(
+                                    "A requirement from text (drafted by the `requirements` model \
+                                     task, then resolved by EKOS) or from a description file; \
+                                     replaces the mart's draft",
+                                )
+                                .arg(
+                                    clap::Arg::new("mart")
+                                        .long("mart")
+                                        .required(true)
+                                        .help("The mart's name: lowercase letters, digits and _"),
+                                )
+                                .arg(clap::Arg::new("text").long("text").help("What the mart should show, in plain words"))
+                                .arg(
+                                    clap::Arg::new("file")
+                                        .long("file")
+                                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                                        .help("A description in RFC 0195's format, used as written"),
+                                )
+                                .group(
+                                    clap::ArgGroup::new("from")
+                                        .args(["text", "file"])
+                                        .required(true),
+                                )
+                                .arg(
+                                    clap::Arg::new("allow-metered")
+                                        .long("allow-metered")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Allow a metered model route for the `requirements` task"),
+                                )
+                                .arg(
+                                    clap::Arg::new("by")
+                                        .long("as")
+                                        .help("Who (default: $USER; the console sets it)"),
+                                ),
+                        )
+                        .subcommand(
+                            clap::Command::new("edit")
+                                .about(
+                                    "Change a requirement: a term's definition (an answer to its \
+                                     question), a new dimension or measure, a filter added or removed",
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart"))
+                                .arg(clap::Arg::new("term").long("term").help("The dimension or measure"))
+                                .arg(clap::Arg::new("value").long("value").help("Its new definition"))
+                                .arg(
+                                    clap::Arg::new("dimension")
+                                        .long("dimension")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Add the term as a dimension (and to the grain)"),
+                                )
+                                .arg(
+                                    clap::Arg::new("measure")
+                                        .long("measure")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Add the term as a measure"),
+                                )
+                                .arg(clap::Arg::new("drop-term").long("drop-term").help("A dimension or measure to remove"))
+                                .arg(clap::Arg::new("filter").long("filter").help("A filter to add"))
+                                .arg(clap::Arg::new("drop-filter").long("drop-filter").help("A filter to remove, as written"))
+                                .arg(
+                                    clap::Arg::new("by")
+                                        .long("as")
+                                        .help("Who (default: $USER; the console sets it)"),
+                                ),
+                        )
+                        .subcommand(
+                            clap::Command::new("approve")
+                                .about(
+                                    "Approve a requirement whose every term resolves: committed to \
+                                     marts/<mart>.md and recorded in the ledger; `gold draft` under \
+                                     require-plan-approval builds only an approved one",
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart"))
+                                .arg(clap::Arg::new("note").long("note").help("A note kept with it"))
+                                .arg(
+                                    clap::Arg::new("by")
+                                        .long("as")
+                                        .help("Who approves (default: $USER; the console sets it)"),
+                                ),
                         ),
                 )
                 .subcommand(
@@ -708,6 +811,14 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse extraction show", Class::Read, false),
             ("lakehouse extraction change", Class::Review, false),
             ("lakehouse extraction approve", Class::Review, false),
+            // RFC 0215: the state directory and the deployed plan. A draft from text calls the
+            // `requirements` model task, which may be metered. A change (an answer to a
+            // question) and an approval are a person's, as in step 5; an approval commits
+            // marts/<mart>.md to the pipeline repository.
+            ("lakehouse requirements show", Class::Read, false),
+            ("lakehouse requirements draft", Class::External, true),
+            ("lakehouse requirements edit", Class::Review, false),
+            ("lakehouse requirements approve", Class::Review, false),
             ("lakehouse install", Class::Local, false),
             ("lakehouse proposals", Class::Read, false),
             // Reach a webhook / a collector outside the home.
@@ -806,6 +917,7 @@ impl EkosExtension for LakehouseExtension {
             }
             Some(("deletes", m)) => deletes_cmd(ctx, m),
             Some(("extraction", m)) => extraction_cmd(ctx, m),
+            Some(("requirements", m)) => requirements_cmd(ctx, m).await,
             Some(("run", m)) => {
                 let settings = settings::load(ctx.config)?;
                 let Some(url) = settings.dagster_url.clone() else {
@@ -1008,6 +1120,15 @@ impl EkosExtension for LakehouseExtension {
                     m.get_one::<std::path::PathBuf>("description")
                         .expect("required"),
                 );
+                // RFC 0215 §2.4: under require-plan-approval, only an approved requirement.
+                if settings.require_plan_approval.unwrap_or(false) {
+                    let text = std::fs::read_to_string(&description)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", description.display()))?;
+                    requirements::require_approved(
+                        &requirements::state_dir(ctx.config, ctx.cwd),
+                        &text,
+                    )?;
+                }
                 let (outcome, _) = gold_cmd::draft(
                     &repo,
                     &description,
@@ -1679,6 +1800,274 @@ fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Res
         }
         _ => anyhow::bail!("lakehouse extraction: show, change or approve"),
     }
+}
+
+/// `lakehouse requirements show|draft|edit|approve` (EKOS RFC 0215).
+async fn requirements_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result<()> {
+    use requirements as rq;
+    let settings = settings::load(ctx.config)?;
+    let dir = rq::state_dir(ctx.config, ctx.cwd);
+    let repo = pipeline_dir(&settings, ctx);
+    let plan = plan_cmd::read_lock(&repo).ok();
+    let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let need_plan = || {
+        plan.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no deployed plan: requirements resolve against it (`lakehouse generate`)"
+            )
+        })
+    };
+    // After every change: the draft's state, for the workflow bar, and a summary line.
+    let report = |spec: &ekos_lakehouse_gold::MartSpec,
+                  record: &mut rq::Record,
+                  p: &ekos_lakehouse_bronze::plan::Plan|
+     -> anyhow::Result<()> {
+        let ev = rq::evaluate(spec, p);
+        let text = ekos_lakehouse_gold::requirements::render(spec);
+        let a = rq::read_approval(&dir, &spec.mart)?;
+        let st = rq::state(
+            &text,
+            &ev,
+            a.as_ref(),
+            rq::committed(&repo, &spec.mart).as_deref(),
+        );
+        record.state = st.to_string();
+        record.questions = ev.questions.len();
+        rq::write(&dir, spec, record)?;
+        println!(
+            "{}: {st} — {} term(s), {} question(s){}",
+            spec.mart,
+            ev.resolved.len(),
+            ev.questions.len(),
+            if ev.needs.is_empty() {
+                String::new()
+            } else {
+                format!(", reads {}", ev.needs.join(", "))
+            }
+        );
+        for (t, q) in &ev.questions {
+            println!("  ? {t}: {}", q.text);
+            if !q.candidates.is_empty() {
+                println!("    candidates: {}", q.candidates.join(", "));
+            }
+        }
+        Ok(())
+    };
+    match m.subcommand() {
+        Some(("show", m)) => {
+            let v = rq::show(
+                &dir,
+                &repo,
+                plan.as_ref(),
+                m.get_one::<String>("mart").map(String::as_str),
+            )?;
+            if m.get_flag("json") {
+                println!("{v}");
+            } else {
+                print!("{}", rq::render(&v));
+            }
+            Ok(())
+        }
+        Some(("draft", m)) => {
+            workflow::gate(&settings, ctx)?;
+            let mart = m.get_one::<String>("mart").expect("required").clone();
+            rq::valid_name(&mart)?;
+            let p = need_plan()?;
+            let by = reviewer(m.get_one::<String>("by"))?;
+            let (spec, mut record) = if let Some(file) = m.get_one::<std::path::PathBuf>("file") {
+                let path = ctx.invoked_from.join(file);
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+                let mut spec = ekos_lakehouse_gold::parse(&text)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+                spec.mart = mart.clone();
+                let record = rq::Record {
+                    mart: mart.clone(),
+                    source: "file".into(),
+                    request: None,
+                    model: None,
+                    attempts: vec![],
+                    log: vec![rq::Logged {
+                        at: now(),
+                        by: by.clone(),
+                        change: format!("written from {}", file.display()),
+                    }],
+                    state: String::new(),
+                    questions: 0,
+                };
+                (spec, record)
+            } else {
+                let request = m
+                    .get_one::<String>("text")
+                    .expect("grouped")
+                    .trim()
+                    .to_string();
+                anyhow::ensure!(!request.is_empty(), "say what the mart should show");
+                let router =
+                    ekos_recovery::LlmRouter::new(&ctx.config.llm, &ctx.config.ekos_dir(ctx.cwd));
+                let route = router.route(ekos_recovery::Task::Requirements);
+                if route.provider != "ollama" && !m.get_flag("allow-metered") {
+                    anyhow::bail!(
+                        "the `requirements` task is routed to {} ({}, metered): rerun with \
+                         --allow-metered, or route it to a local model with \
+                         [llm.tasks.requirements] provider = \"ollama\"",
+                        route.models.join(" → "),
+                        route.provider
+                    );
+                }
+                let provider = router
+                    .provider(ekos_recovery::Task::Requirements)
+                    .map_err(|e| anyhow::anyhow!("the requirements model: {e}"))?;
+                let excerpt = ekos_lakehouse_gold::requirements::excerpt(
+                    &p,
+                    &request,
+                    8,
+                    &settings.silver_settings(),
+                );
+                let (spec, attempts) =
+                    rq::draft_text(provider.as_ref(), &mart, &request, &excerpt.text).await?;
+                let model = provider.model_name().to_string();
+                let Some(spec) = spec else {
+                    // Kept for the operator: what the model said, three times.
+                    write_failed_draft(&dir, &mart, &request, &model, &attempts)?;
+                    anyhow::bail!(
+                        "{model} gave no readable header in {} attempts (kept in {}): write the \
+                         description yourself (`--file`), or rephrase the request",
+                        attempts.len(),
+                        dir.join(format!("{mart}.failed.json")).display()
+                    );
+                };
+                println!(
+                    "drafted by {model} from {} table(s) of the plan ({}), in {} attempt(s)",
+                    excerpt.tables.len(),
+                    excerpt.tables.join(", "),
+                    attempts.len()
+                );
+                let record = rq::Record {
+                    mart: mart.clone(),
+                    source: "text".into(),
+                    request: Some(request),
+                    model: Some(model.clone()),
+                    attempts,
+                    log: vec![rq::Logged {
+                        at: now(),
+                        by: by.clone(),
+                        change: format!("drafted by {model}"),
+                    }],
+                    state: String::new(),
+                    questions: 0,
+                };
+                (spec, record)
+            };
+            report(&spec, &mut record, &p)
+        }
+        Some(("edit", m)) => {
+            workflow::gate(&settings, ctx)?;
+            let mart = m.get_one::<String>("mart").expect("required");
+            let p = need_plan()?;
+            let Some(mut d) = rq::read(&dir, mart)? else {
+                anyhow::bail!("no requirement {mart}: draft it first");
+            };
+            let e = rq::edit_from(rq::EditArgs {
+                term: m.get_one::<String>("term"),
+                value: m.get_one::<String>("value"),
+                dimension: m.get_flag("dimension"),
+                measure: m.get_flag("measure"),
+                drop_term: m.get_one::<String>("drop-term"),
+                filter: m.get_one::<String>("filter"),
+                drop_filter: m.get_one::<String>("drop-filter"),
+            })?;
+            let said = ekos_lakehouse_gold::requirements::apply(&mut d.spec, &e)
+                .map_err(|e| anyhow::anyhow!("{mart}: {e}"))?;
+            d.record.log.push(rq::Logged {
+                at: now(),
+                by: reviewer(m.get_one::<String>("by"))?,
+                change: said.clone(),
+            });
+            println!("{said}");
+            report(&d.spec, &mut d.record, &p)
+        }
+        Some(("approve", m)) => {
+            workflow::gate(&settings, ctx)?;
+            let mart = m.get_one::<String>("mart").expect("required");
+            let p = need_plan()?;
+            let Some(mut d) = rq::read(&dir, mart)? else {
+                anyhow::bail!("no requirement {mart}: draft it first");
+            };
+            let ev = rq::evaluate(&d.spec, &p);
+            if !ev.questions.is_empty() {
+                anyhow::bail!(
+                    "{mart} has {} open question(s) ({}): answer them with `lakehouse \
+                     requirements edit` first",
+                    ev.questions.len(),
+                    ev.questions
+                        .iter()
+                        .map(|(t, _)| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            let by = reviewer(m.get_one::<String>("by"))?;
+            // Into the pipeline repository: RFC 0195 drafts gold from a committed description.
+            let rel = format!("marts/{mart}.md");
+            std::fs::create_dir_all(repo.join("marts"))?;
+            std::fs::write(repo.join(&rel), &d.text)?;
+            sync::git(&repo, &["add", &rel])?;
+            if sync::git(&repo, &["diff", "--cached", "--quiet", "--", &rel]).is_err() {
+                sync::git(
+                    &repo,
+                    &[
+                        "commit",
+                        "-q",
+                        "-m",
+                        &format!("lakehouse: approve the requirement for mart {mart} (RFC 0215)"),
+                        "--",
+                        &rel,
+                    ],
+                )?;
+            }
+            let a = rq::Approval {
+                mart: mart.clone(),
+                by: by.clone(),
+                at: now(),
+                note: m.get_one::<String>("note").cloned(),
+                digest: rq::sha256(&d.text),
+                needs: ev.needs.clone(),
+            };
+            let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+            facts::record_requirement_approval(store.as_ref(), &a)?;
+            rq::write_approval(&dir, &a)?;
+            d.record.log.push(rq::Logged {
+                at: a.at.clone(),
+                by: by.clone(),
+                change: format!("approved (digest {})", &a.digest[..16]),
+            });
+            println!(
+                "{mart} approved by {by}: {rel} committed, digest {}; it reads {}",
+                &a.digest[..16],
+                a.needs.join(", ")
+            );
+            report(&d.spec, &mut d.record, &p)
+        }
+        _ => anyhow::bail!("lakehouse requirements: show, draft, edit or approve"),
+    }
+}
+
+fn write_failed_draft(
+    dir: &std::path::Path,
+    mart: &str,
+    request: &str,
+    model: &str,
+    attempts: &[requirements::Attempt],
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(
+        dir.join(format!("{mart}.failed.json")),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mart": mart, "request": request, "model": model, "attempts": attempts,
+        }))? + "\n",
+    )?;
+    Ok(())
 }
 
 /// The pipeline repository: `--out`, else `pipeline-dir` relative to the project.

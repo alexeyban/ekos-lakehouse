@@ -86,19 +86,58 @@ fn built(n: u8, ok: usize, failing: usize, what: &str, todo: &str) -> Step {
     }
 }
 
-/// Pure: the steps from the counts, with step 5 from the extraction plan (EKOS RFC 0226).
-pub fn steps(c: &Counts, step5: Step) -> Vec<Step> {
+/// Pure: step 4 from the requirements' states (EKOS RFC 0215), or `None` without any.
+pub fn requirements_step(states: &[String]) -> Option<Step> {
+    if states.is_empty() {
+        return None;
+    }
+    let n = |s: &str| states.iter().filter(|x| x.as_str() == s).count();
+    let (approved, questions, ready) = (n("approved"), n("questions"), n("resolved"));
+    let other = states.len() - approved - questions - ready;
+    let text = format!(
+        "{approved} of {} requirement(s) approved{}{}{}",
+        states.len(),
+        if questions > 0 {
+            format!(", {questions} with questions")
+        } else {
+            String::new()
+        },
+        if ready > 0 {
+            format!(", {ready} ready to approve")
+        } else {
+            String::new()
+        },
+        if other > 0 {
+            format!(", {other} changed since approval")
+        } else {
+            String::new()
+        },
+    );
+    Some(Step::new(
+        4,
+        if approved == states.len() {
+            StepState::Done
+        } else {
+            StepState::Partial
+        },
+        text,
+    ))
+}
+
+/// Pure: the steps from the counts, with step 4 from the requirements when there are any
+/// (EKOS RFC 0215) and step 5 from the extraction plan (EKOS RFC 0226).
+pub fn steps(c: &Counts, step4: Option<Step>, step5: Step) -> Vec<Step> {
     vec![
         Step::new(
             2,
             StepState::Todo,
             "source-estate documentation (EKOS RFC 0214) is not built yet",
         ),
-        match (c.marts_proposed, c.marts_with_questions) {
+        step4.unwrap_or_else(|| match (c.marts_proposed, c.marts_with_questions) {
             (0, 0) => Step::new(
                 4,
                 StepState::Todo,
-                "describe a mart: `lakehouse gold draft`",
+                "describe a mart: `lakehouse requirements draft`",
             ),
             (p, 0) => Step::new(4, StepState::Done, format!("{p} mart(s) proposed")),
             (p, q) => Step::new(
@@ -106,7 +145,7 @@ pub fn steps(c: &Counts, step5: Step) -> Vec<Step> {
                 StepState::Partial,
                 format!("{p} mart(s) proposed, {q} with open questions"),
             ),
-        },
+        }),
         step5,
         built(
             6,
@@ -156,7 +195,7 @@ fn ledger_counts(ctx: &WorkflowContext<'_>) -> anyhow::Result<Counts> {
 /// [`ekos::extension::EkosExtension::workflow_steps`].
 pub fn workflow_steps(ctx: &WorkflowContext<'_>) -> Vec<Step> {
     match ledger_counts(ctx) {
-        Ok(c) => steps(&c, extraction_step(ctx)),
+        Ok(c) => steps(&c, requirements_states(ctx), extraction_step(ctx)),
         Err(e) => ekos_semantic::workflow::EXTENSION_STEPS
             .iter()
             .map(|n| {
@@ -168,6 +207,23 @@ pub fn workflow_steps(ctx: &WorkflowContext<'_>) -> Vec<Step> {
             })
             .collect(),
     }
+}
+
+/// Step 4 from each requirement's state as of the last command that touched it.
+fn requirements_states(ctx: &WorkflowContext<'_>) -> Option<Step> {
+    let dir = crate::requirements::state_dir(ctx.config, ctx.cwd);
+    let states: Vec<String> = crate::requirements::list(&dir)
+        .iter()
+        .filter_map(|m| crate::requirements::read(&dir, m).ok().flatten())
+        .map(|d| {
+            if d.record.state.is_empty() {
+                "questions".to_string()
+            } else {
+                d.record.state
+            }
+        })
+        .collect();
+    requirements_step(&states)
 }
 
 /// Step 5 from the state directory: the proposal with the changes, against the approval.
@@ -220,6 +276,21 @@ mod tests {
     }
 
     #[test]
+    fn step_4_comes_from_the_requirements() {
+        assert!(requirements_step(&[]).is_none());
+        let s = |v: &[&str]| {
+            requirements_step(&v.iter().map(|x| x.to_string()).collect::<Vec<_>>()).unwrap()
+        };
+        assert_eq!(s(&["approved", "approved"]).state, StepState::Done);
+        let p = s(&["approved", "questions", "resolved"]);
+        assert_eq!(p.state, StepState::Partial);
+        assert_eq!(
+            p.detail,
+            "1 of 3 requirement(s) approved, 1 with questions, 1 ready to approve"
+        );
+    }
+
+    #[test]
     fn steps_come_from_the_latest_run_per_table() {
         let objects = vec![
             obj(
@@ -268,16 +339,20 @@ mod tests {
                 gold_failing: 0,
             }
         );
-        let s = steps(&c, Step::new(5, StepState::Done, "approved"));
+        let s = steps(&c, None, Step::new(5, StepState::Done, "approved"));
         assert_eq!(s.iter().map(|x| x.n).collect::<Vec<_>>(), [2, 4, 5, 6, 7]);
         assert_eq!(s[1].state, StepState::Partial);
         assert_eq!(s[2].state, StepState::Done);
         assert_eq!(s[3].detail, "1 bronze/silver table(s) built, 1 failing");
         assert_eq!(s[4].state, StepState::Done);
         assert!(
-            steps(&Counts::default(), Step::new(5, StepState::Todo, "plan"))
-                .iter()
-                .all(|x| x.state == StepState::Todo)
+            steps(
+                &Counts::default(),
+                None,
+                Step::new(5, StepState::Todo, "plan")
+            )
+            .iter()
+            .all(|x| x.state == StepState::Todo)
         );
     }
 }

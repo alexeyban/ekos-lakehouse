@@ -407,3 +407,338 @@ fn a_table_reached_along_several_paths_is_asked_and_a_column_picks_one() {
     assert_eq!(c.joins.len(), 1, "{:?}", c.joins);
     assert!(check(&c).accepted());
 }
+
+/// iDempiere's shape (EKOS RFC 0215): upper-case names, an order pointing at its partner along
+/// two keys (customer, bill-to) and at a location that has a region, and a long chain.
+fn orders() -> Plan {
+    let mut p = plan(
+        &[
+            table(
+                "C_ORDER",
+                vec![
+                    col("id", "NUMBER(10,0)", "decimal(10,0)"),
+                    col("C_BPARTNER_ID", "NUMBER(10,0)", "decimal(10,0)"),
+                    col("BILL_BPARTNER_ID", "NUMBER(10,0)", "decimal(10,0)"),
+                    col("C_LOCATION_ID", "NUMBER(10,0)", "decimal(10,0)"),
+                    col("A_ID", "NUMBER(10,0)", "decimal(10,0)"),
+                    col("GRANDTOTAL", "NUMBER", "decimal(38,10)"),
+                    col("DOCSTATUS", "VARCHAR2(2)", "varchar(2)"),
+                    col("DATEORDERED", "DATE", "timestamp(0)"),
+                ],
+                vec![
+                    ("C_BPARTNER_ID", "C_BPARTNER", "id"),
+                    ("BILL_BPARTNER_ID", "C_BPARTNER", "id"),
+                    ("C_LOCATION_ID", "C_LOCATION", "id"),
+                    ("A_ID", "A", "id"),
+                ],
+            ),
+            table(
+                "C_BPARTNER",
+                vec![
+                    col("id", "NUMBER(10,0)", "decimal(10,0)"),
+                    col("NAME", "VARCHAR2(60)", "varchar(60)"),
+                ],
+                vec![],
+            ),
+            table(
+                "C_LOCATION",
+                vec![
+                    col("id", "NUMBER(10,0)", "decimal(10,0)"),
+                    col("C_REGION_ID", "NUMBER(10,0)", "decimal(10,0)"),
+                ],
+                vec![("C_REGION_ID", "C_REGION", "id")],
+            ),
+            table(
+                "C_REGION",
+                vec![
+                    col("id", "NUMBER(10,0)", "decimal(10,0)"),
+                    col("NAME", "VARCHAR2(60)", "varchar(60)"),
+                ],
+                vec![],
+            ),
+            table(
+                "A",
+                vec![col("id", "x", "integer"), col("B_ID", "x", "integer")],
+                vec![("B_ID", "B", "id")],
+            ),
+            table(
+                "B",
+                vec![col("id", "x", "integer"), col("C_ID", "x", "integer")],
+                vec![("C_ID", "C", "id")],
+            ),
+            table(
+                "C",
+                vec![col("id", "x", "integer"), col("D_ID", "x", "integer")],
+                vec![("D_ID", "D", "id")],
+            ),
+            table(
+                "D",
+                vec![col("id", "x", "integer"), col("E_ID", "x", "integer")],
+                vec![("E_ID", "E", "id")],
+            ),
+            table(
+                "E",
+                vec![col("id", "x", "integer"), col("LABEL", "x", "varchar")],
+                vec![],
+            ),
+        ],
+        &PlanSettings::default(),
+    );
+    for t in &mut p.tables {
+        if t.table == "C_ORDER" {
+            t.facts.comment = Some("Sales & Purchase Order".into());
+        }
+        if t.table == "C_REGION" {
+            t.facts.comment = Some("Identifies a geographical Region".into());
+        }
+    }
+    p
+}
+
+fn spec(body: &str) -> MartSpec {
+    parse(&format!("---\nmart: m\n{body}---\n")).unwrap()
+}
+
+#[test]
+fn oracle_names_resolve_whatever_their_case() {
+    let s = spec(
+        "grain: [status]\ndimensions:\n  status: c_order.docstatus\n\
+         measures:\n  total: sum of c_order.grandtotal\nfilters:\n  - c_order.docstatus = 'CO'\n",
+    );
+    let r = resolve(&s, &orders());
+    assert!(questions(&r).is_empty(), "{r:?}");
+    let c = compile(&s, &orders(), &r, &BTreeMap::new()).unwrap();
+    assert!(
+        c.plain_sql.contains("\"C_ORDER\".\"GRANDTOTAL\""),
+        "{}",
+        c.plain_sql
+    );
+    assert!(check(&c).accepted());
+}
+
+#[test]
+fn via_chooses_one_of_several_paths_and_one_table_is_joined_once() {
+    let s = spec(
+        "grain: [customer]\ndimensions:\n  customer: c_bpartner.name\n\
+         measures:\n  total: sum of c_order.grandtotal\n",
+    );
+    let r = resolve(&s, &orders());
+    let qs = compile(&s, &orders(), &r, &BTreeMap::new()).unwrap_err();
+    assert!(qs[0].text.contains("2 foreign-key paths"), "{qs:?}");
+    assert_eq!(
+        qs[0].candidates,
+        ["C_ORDER.BILL_BPARTNER_ID", "C_ORDER.C_BPARTNER_ID"]
+    );
+    let s = spec(
+        "grain: [customer]\ndimensions:\n  customer: c_bpartner.name via c_order.c_bpartner_id\n\
+         measures:\n  total: sum of c_order.grandtotal\n",
+    );
+    let r = resolve(&s, &orders());
+    assert!(
+        r[0].how.contains("joined via `C_ORDER.C_BPARTNER_ID`"),
+        "{r:?}"
+    );
+    let c = compile(&s, &orders(), &r, &BTreeMap::new()).unwrap();
+    assert_eq!(c.joins.len(), 1);
+    assert_eq!(c.joins[0].1, "C_BPARTNER_ID");
+    assert!(check(&c).accepted());
+    // A `via` that is not a key is a question, not ignored.
+    let s = spec(
+        "grain: [customer]\ndimensions:\n  customer: c_bpartner.name via c_order.grandtotal\n\
+         measures:\n  total: sum of c_order.grandtotal\n",
+    );
+    let r = resolve(&s, &orders());
+    assert!(
+        questions(&r)[0].1.text.contains("is not a foreign key"),
+        "{r:?}"
+    );
+    // Two terms reading one table along two paths: one mart, one path per table.
+    let s = spec(
+        "grain: [customer, bill_to]\ndimensions:\n  customer: c_bpartner.name via c_order.c_bpartner_id\n  \
+         bill_to: c_bpartner.name via c_order.bill_bpartner_id\n\
+         measures:\n  total: sum of c_order.grandtotal\n",
+    );
+    let r = resolve(&s, &orders());
+    let qs = compile(&s, &orders(), &r, &BTreeMap::new()).unwrap_err();
+    assert!(qs[0].text.contains("passes through"), "{qs:?}");
+}
+
+#[test]
+fn a_join_longer_than_four_keys_is_a_question() {
+    let s =
+        spec("grain: [d]\ndimensions:\n  d: d.id\nmeasures:\n  total: sum of c_order.grandtotal\n");
+    let r = resolve(&s, &orders());
+    assert!(
+        compile(&s, &orders(), &r, &BTreeMap::new()).is_ok(),
+        "four keys: A, B, C, D"
+    );
+    let s = spec(
+        "grain: [e]\ndimensions:\n  e: e.label\nmeasures:\n  total: sum of c_order.grandtotal\n",
+    );
+    let r = resolve(&s, &orders());
+    let qs = compile(&s, &orders(), &r, &BTreeMap::new()).unwrap_err();
+    assert!(qs[0].text.contains("at most 4 foreign keys"), "{qs:?}");
+}
+
+#[test]
+fn a_requirement_is_edited_and_written_back_as_it_reads() {
+    use crate::requirements::{Edit, apply, render};
+    let mut s = spec(
+        "grain: [customer]\ndimensions:\n  customer: c_bpartner.name\n\
+         measures:\n  total: sum of c_order.grandtotal\nfilters:\n  - c_order.docstatus = 'CO'\n",
+    );
+    s.prose = "Sales per customer.".into();
+    apply(
+        &mut s,
+        &Edit::Term {
+            name: "customer".into(),
+            value: "c_bpartner.name via c_order.c_bpartner_id".into(),
+            section: None,
+        },
+    )
+    .unwrap();
+    apply(
+        &mut s,
+        &Edit::Term {
+            name: "month".into(),
+            value: "month of c_order.dateordered".into(),
+            section: Some("dimensions".into()),
+        },
+    )
+    .unwrap();
+    assert_eq!(s.grain, ["customer", "month"]);
+    assert!(
+        apply(
+            &mut s,
+            &Edit::Term {
+                name: "x".into(),
+                value: "y".into(),
+                section: None
+            }
+        )
+        .is_err()
+    );
+    apply(&mut s, &Edit::DropFilter("c_order.docstatus = 'CO'".into())).unwrap();
+    apply(&mut s, &Edit::AddFilter("c_order.docstatus <> 'VO'".into())).unwrap();
+    let text = render(&s);
+    assert_eq!(parse(&text).unwrap(), s, "{text}");
+    let r = resolve(&s, &orders());
+    assert!(questions(&r).is_empty(), "{r:?}");
+}
+
+#[test]
+fn the_excerpt_ranks_tables_by_the_request_words_and_answers_are_cleaned() {
+    use crate::requirements::{excerpt, from_answer, rank};
+    let p = orders();
+    let ranked = rank(&p, "Total of sales orders per region");
+    assert_eq!(ranked[0].0, "C_ORDER", "{ranked:?}");
+    assert!(ranked.iter().any(|(t, _)| t == "C_REGION"), "{ranked:?}");
+    let e = excerpt(
+        &p,
+        "Total of sales orders per region",
+        2,
+        &Default::default(),
+    );
+    assert_eq!(e.tables.len(), 2);
+    assert!(
+        e.text.contains("## C_ORDER — Sales & Purchase Order"),
+        "{}",
+        e.text
+    );
+    let answer = "Here is the mart:\n```yaml\n---\nmart: sales_by_region\ngrain: [region]\n\
+                  dimensions:\n  region: c_region.name\nmeasures:\n  total: sum of c_order.grandtotal\n---\n```\n";
+    let s = from_answer(answer, "regional_sales", "Total of sales orders per region").unwrap();
+    assert_eq!(s.mart, "regional_sales");
+    assert_eq!(s.prose, "Total of sales orders per region");
+    assert_eq!(
+        s.dimensions,
+        [("region".to_string(), "c_region.name".to_string())]
+    );
+    assert!(from_answer("no header here", "m", "x").is_err());
+}
+
+#[test]
+fn every_word_of_the_request_gets_its_table_before_the_rest() {
+    use crate::requirements::{choose, from_answer};
+    let mut p = orders();
+    let extra = |n: &str| {
+        table(
+            n,
+            vec![col("id", "x", "integer"), col("NAME", "x", "varchar")],
+            vec![],
+        )
+    };
+    for n in ["C_ORDER_TRL", "C_ORDER_ACCT", "C_ORDERLINE_ORDER"] {
+        p.tables
+            .extend(plan(&[extra(n)], &PlanSettings::default()).tables);
+    }
+    let t = choose(&p, "sales orders by region", 2);
+    assert_eq!(
+        t,
+        ["C_ORDER", "C_REGION"],
+        "the plain name first, and region not crowded out"
+    );
+    // A header without its `---` lines, inside a code fence.
+    let s = from_answer(
+        "```\nmart: x\ngrain: [region]\ndimensions:\n  region: c_region.name\nmeasures:\n  n: count of c_order\n```",
+        "m",
+        "r",
+    )
+    .unwrap();
+    assert_eq!(s.measures.len(), 1);
+}
+
+#[test]
+fn a_missing_column_is_asked_with_the_similar_ones_only() {
+    let s = spec(
+        "grain: [m]\ndimensions:\n  m: month of c_order.dateordered\nmeasures:\n  t: sum of c_order.total\n",
+    );
+    let r = resolve(&s, &orders());
+    let (_, q) = questions(&r)[0];
+    assert!(q.text.contains("has no column `total`"), "{q:?}");
+    assert_eq!(q.candidates, ["C_ORDER.GRANDTOTAL"]);
+}
+
+#[test]
+fn a_model_listing_terms_without_names_gets_names_from_their_definitions() {
+    let s = crate::requirements::from_answer(
+        "---\nmart: x\ngrain: [month]\ndimensions:\n  month: month of c_order.dateordered\n\
+         measures:\n  - count of c_order\n  - sum of c_order.grandtotal\n---\n",
+        "m",
+        "r",
+    )
+    .unwrap();
+    assert_eq!(
+        s.measures,
+        [
+            (
+                "count_of_c_order".to_string(),
+                "count of c_order".to_string()
+            ),
+            (
+                "sum_of_c_order_grandtotal".to_string(),
+                "sum of c_order.grandtotal".to_string()
+            )
+        ]
+    );
+    let e = parse("---\nmart: m\nmeasures:\n  - count of c_order\n---\n").unwrap_err();
+    assert!(
+        e.starts_with("measures:") && e.contains("orders: count of orders"),
+        "{e}"
+    );
+}
+
+#[test]
+fn equals_true_reads_as_is_true() {
+    let s = spec(
+        "grain: [m]\ndimensions:\n  m: month of c_order.dateordered\nmeasures:\n  t: sum of c_order.grandtotal\nfilters:\n  - c_order.docstatus = TRUE\n",
+    );
+    let r = resolve(&s, &orders());
+    assert!(questions(&r).is_empty(), "{r:?}");
+    let c = compile(&s, &orders(), &r, &BTreeMap::new()).unwrap();
+    assert!(
+        c.plain_sql.contains("\"DOCSTATUS\" = true"),
+        "{}",
+        c.plain_sql
+    );
+}
