@@ -126,7 +126,7 @@ pub fn requirements_step(states: &[String]) -> Option<Step> {
 
 /// Pure: the steps from the counts, with step 4 from the requirements when there are any
 /// (EKOS RFC 0215) and step 5 from the extraction plan (EKOS RFC 0226).
-pub fn steps(c: &Counts, step4: Option<Step>, step5: Step) -> Vec<Step> {
+pub fn steps(c: &Counts, step4: Option<Step>, step5: Step, step7: Option<Step>) -> Vec<Step> {
     vec![
         Step::new(
             2,
@@ -154,13 +154,15 @@ pub fn steps(c: &Counts, step4: Option<Step>, step5: Step) -> Vec<Step> {
             "bronze/silver table(s)",
             "no bronze or silver run recorded",
         ),
-        built(
-            7,
-            c.gold_ok,
-            c.gold_failing,
-            "mart(s)",
-            "no gold run recorded",
-        ),
+        step7.unwrap_or_else(|| {
+            built(
+                7,
+                c.gold_ok,
+                c.gold_failing,
+                "mart(s)",
+                "no gold run recorded",
+            )
+        }),
     ]
 }
 
@@ -195,7 +197,12 @@ fn ledger_counts(ctx: &WorkflowContext<'_>) -> anyhow::Result<Counts> {
 /// [`ekos::extension::EkosExtension::workflow_steps`].
 pub fn workflow_steps(ctx: &WorkflowContext<'_>) -> Vec<Step> {
     match ledger_counts(ctx) {
-        Ok(c) => steps(&c, requirements_states(ctx), extraction_step(ctx)),
+        Ok(c) => steps(
+            &c,
+            requirements_states(ctx),
+            extraction_step(ctx),
+            marts_step(ctx),
+        ),
         Err(e) => ekos_semantic::workflow::EXTENSION_STEPS
             .iter()
             .map(|n| {
@@ -224,6 +231,45 @@ fn requirements_states(ctx: &WorkflowContext<'_>) -> Option<Step> {
         })
         .collect();
     requirements_step(&states)
+}
+
+/// Step 7 from the marts' states (EKOS RFC 0228), when a requirement has been approved.
+fn marts_step(ctx: &WorkflowContext<'_>) -> Option<Step> {
+    let settings = crate::settings::load(ctx.config).ok()?;
+    // A home project's config sits in its directory; otherwise beside the source.
+    let config_path = ctx
+        .config
+        .location
+        .as_ref()
+        .map(|l| l.dir().join("ekos.toml"))
+        .unwrap_or_else(|| ctx.cwd.join("ekos.toml"));
+    let repo = crate::settings::pipeline_base(ctx.cwd, &config_path)
+        .join(settings.pipeline_dir.as_deref().unwrap_or("pipeline"));
+    let req_dir = crate::requirements::state_dir(ctx.config, ctx.cwd);
+    let dir = crate::marts::state_dir(ctx.config, ctx.cwd);
+    let plan = crate::plan_cmd::read_lock(&repo).ok();
+    let states: Vec<&str> = crate::marts::list(&req_dir, &repo)
+        .iter()
+        .map(|m| {
+            crate::marts::state(&crate::marts::facts(
+                &req_dir,
+                &dir,
+                &repo,
+                plan.as_ref(),
+                m,
+            ))
+        })
+        .collect();
+    let (done, text) = crate::marts::step(&states)?;
+    Some(Step::new(
+        7,
+        if done {
+            StepState::Done
+        } else {
+            StepState::Partial
+        },
+        text,
+    ))
 }
 
 /// Step 5 from the state directory: the proposal with the changes, against the approval.
@@ -339,7 +385,7 @@ mod tests {
                 gold_failing: 0,
             }
         );
-        let s = steps(&c, None, Step::new(5, StepState::Done, "approved"));
+        let s = steps(&c, None, Step::new(5, StepState::Done, "approved"), None);
         assert_eq!(s.iter().map(|x| x.n).collect::<Vec<_>>(), [2, 4, 5, 6, 7]);
         assert_eq!(s[1].state, StepState::Partial);
         assert_eq!(s[2].state, StepState::Done);
@@ -349,7 +395,8 @@ mod tests {
             steps(
                 &Counts::default(),
                 None,
-                Step::new(5, StepState::Todo, "plan")
+                Step::new(5, StepState::Todo, "plan"),
+                None
             )
             .iter()
             .all(|x| x.state == StepState::Todo)

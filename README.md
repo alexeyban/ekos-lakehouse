@@ -284,6 +284,23 @@ and the model never answers a question. `… via table.column` chooses among sev
 keys long. With `require-plan-approval`, `gold draft` builds only approved requirements. The console's
 **Requirements** page does all of it.
 
+### Marts (EKOS RFC 0228)
+
+Step 7 takes each approved requirement to a reconciled gold table:
+
+```bash
+ekos-lakehouse lakehouse marts propose --mart sales_by_region     # a branch ekos/gold/<mart>/<id>
+ekos-lakehouse lakehouse marts merge --mart sales_by_region       # the approval, recorded in the ledger
+ekos-lakehouse lakehouse marts build --mart sales_by_region --wait   # only this mart, through Dagster
+ekos-lakehouse lakehouse marts reconcile --mart sales_by_region   # each measure: mart total vs silver
+ekos-lakehouse lakehouse marts show --mart sales_by_region
+```
+
+`lakehouse run --asset <name>` launches one asset, reloading Dagster's code location when the asset was added after it
+started. The console's **Marts** page shows the SQL beside the requirement, which terms a model drafted, the tests,
+the totals and the lineage. Generated schedules are on by default: on a test machine, decide whether they should run
+before starting Dagster.
+
 ## Try it on the sandbox
 
 ```bash

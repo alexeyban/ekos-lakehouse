@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 const REPOSITORIES: &str = "query { repositoriesOrError { __typename \
-    ... on RepositoryConnection { nodes { name location { name } jobs { name } } } \
+    ... on RepositoryConnection { nodes { name location { name } jobs { name } \
+    assetNodes { assetKey { path } } } } \
     ... on PythonError { message } } }";
 
 const LAUNCH: &str = "mutation Launch($p: ExecutionParams!) { launchRun(executionParams: $p) { \
@@ -18,6 +19,10 @@ const LAUNCH: &str = "mutation Launch($p: ExecutionParams!) { launchRun(executio
     ... on InvalidSubsetError { message } \
     ... on UnauthorizedError { message } \
     ... on RunConflict { message } } }";
+
+const RELOAD: &str = "mutation Reload($l: String!) { reloadRepositoryLocation(repositoryLocationName: $l) { \
+    __typename ... on WorkspaceLocationEntry { loadStatus } ... on PythonError { message } \
+    ... on RepositoryLocationNotFound { message } ... on UnauthorizedError { message } } }";
 
 const STATUS: &str = "query Status($id: ID!) { runOrError(runId: $id) { __typename \
     ... on Run { status } ... on RunNotFoundError { message } ... on PythonError { message } } }";
@@ -72,15 +77,44 @@ pub fn find_job(answer: &Value, job: &str, location: Option<&str>) -> anyhow::Re
     }
 }
 
+/// Pure: the key of the asset named `name` (its last path part, e.g. a dbt model `gold__sales`)
+/// in the job's repository (EKOS RFC 0228). None when there is none, or several.
+pub fn find_asset(answer: &Value, j: &JobRef, name: &str) -> Option<Vec<String>> {
+    let nodes = answer["data"]["repositoriesOrError"]["nodes"].as_array()?;
+    let repo = nodes.iter().find(|n| {
+        n["name"] == j.repository.as_str() && n["location"]["name"] == j.location.as_str()
+    })?;
+    let keys: Vec<Vec<String>> = repo["assetNodes"]
+        .as_array()?
+        .iter()
+        .filter_map(|a| {
+            let path: Vec<String> = a["assetKey"]["path"]
+                .as_array()?
+                .iter()
+                .filter_map(|p| p.as_str().map(str::to_string))
+                .collect();
+            (path.last().map(String::as_str) == Some(name)).then_some(path)
+        })
+        .collect();
+    match keys.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
 /// Pure: the launch mutation's variables. `in_process` runs every step in the run's own process,
 /// one after another: no process per step, which on a pipeline of hundreds of tables costs more
 /// than the steps themselves.
-pub fn launch_variables(j: &JobRef, in_process: bool) -> Value {
+pub fn launch_variables(j: &JobRef, in_process: bool, assets: &[Vec<String>]) -> Value {
     let mut p = json!({"selector": {
         "repositoryLocationName": j.location,
         "repositoryName": j.repository,
         "jobName": j.job,
     }});
+    // EKOS RFC 0228: only these assets (a mart), not the whole job.
+    if !assets.is_empty() {
+        p["selector"]["assetSelection"] = assets.iter().map(|k| json!({"path": k})).collect();
+    }
     if in_process {
         p["runConfigData"] = json!({"execution": {"config": {"in_process": {}}}});
     }
@@ -147,9 +181,48 @@ pub fn run(
     location: Option<&str>,
     in_process: bool,
     wait: bool,
-) -> anyhow::Result<()> {
-    let j = find_job(&post(base, REPOSITORIES, json!({}))?, job, location)?;
-    let id = launched(&post(base, LAUNCH, launch_variables(&j, in_process))?)?;
+    asset: Option<&str>,
+) -> anyhow::Result<String> {
+    let repos = post(base, REPOSITORIES, json!({}))?;
+    let j = find_job(&repos, job, location)?;
+    let assets = match asset {
+        Some(a) => match find_asset(&repos, &j, a) {
+            Some(k) => vec![k],
+            // A mart merged since Dagster loaded the code: reload the location, then look again
+            // (EKOS RFC 0228; loading a large project, its dbt manifest included, takes minutes).
+            None => {
+                let r = post(base, RELOAD, json!({"l": j.location}))?;
+                let t = &r["data"]["reloadRepositoryLocation"];
+                if t["__typename"] != "WorkspaceLocationEntry" {
+                    anyhow::bail!(
+                        "Dagster could not reload {}: {}",
+                        j.location,
+                        t["message"].as_str().unwrap_or("no answer")
+                    );
+                }
+                let started = std::time::Instant::now();
+                loop {
+                    if let Some(k) = find_asset(&post(base, REPOSITORIES, json!({}))?, &j, a) {
+                        break vec![k];
+                    }
+                    if started.elapsed() > Duration::from_secs(600) {
+                        anyhow::bail!(
+                            "no single asset `{a}` in {} after reloading it: is the mart merged and \
+                             the pipeline generated?",
+                            j.location
+                        );
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            }
+        },
+        None => vec![],
+    };
+    let id = launched(&post(
+        base,
+        LAUNCH,
+        launch_variables(&j, in_process, &assets),
+    )?)?;
     println!(
         "launched {} in {} as run {id}: {}/runs/{id}",
         j.job,
@@ -157,7 +230,7 @@ pub fn run(
         base.trim_end_matches('/')
     );
     if !wait {
-        return Ok(());
+        return Ok(id);
     }
     let started = std::time::Instant::now();
     let mut last = String::new();
@@ -172,7 +245,7 @@ pub fn run(
         }
         if TERMINAL.contains(&s.as_str()) {
             return if s == "SUCCESS" {
-                Ok(())
+                Ok(id)
             } else {
                 anyhow::bail!("run {id} ended {s}: see its page for the failed steps")
             };
@@ -199,16 +272,16 @@ mod tests {
         let j = find_job(&repos(), "bronze", Some("idem")).unwrap();
         assert_eq!(j.repository, "__repository__");
         assert_eq!(
-            launch_variables(&j, false)["p"]["selector"]["repositoryLocationName"],
+            launch_variables(&j, false, &[])["p"]["selector"]["repositoryLocationName"],
             "idem"
         );
         assert!(
-            launch_variables(&j, false)["p"]
+            launch_variables(&j, false, &[])["p"]
                 .get("runConfigData")
                 .is_none()
         );
         assert_eq!(
-            launch_variables(&j, true)["p"]["runConfigData"]["execution"]["config"],
+            launch_variables(&j, true, &[])["p"]["runConfigData"]["execution"]["config"],
             json!({"in_process": {}})
         );
         assert!(find_job(&repos(), "nope", None).is_err());
@@ -218,6 +291,23 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("boom")
+        );
+    }
+
+    #[test]
+    fn one_asset_is_found_by_its_name_and_selected() {
+        let r = json!({"data": {"repositoriesOrError": {"__typename": "RepositoryConnection", "nodes": [
+            {"name": "__repository__", "location": {"name": "idem"}, "jobs": [{"name": "bronze"}],
+             "assetNodes": [{"assetKey": {"path": ["gold__sales"]}}, {"assetKey": {"path": ["silver", "ADEMPIERE__C_ORDER"]}}]}
+        ]}}});
+        let j = find_job(&r, "bronze", None).unwrap();
+        let k = find_asset(&r, &j, "gold__sales").unwrap();
+        assert_eq!(k, ["gold__sales"]);
+        assert!(find_asset(&r, &j, "gold__nope").is_none());
+        let v = launch_variables(&j, true, &[k]);
+        assert_eq!(
+            v["p"]["selector"]["assetSelection"],
+            json!([{"path": ["gold__sales"]}])
         );
     }
 

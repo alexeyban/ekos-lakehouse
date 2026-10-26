@@ -12,6 +12,7 @@ pub mod extraction;
 pub mod facts;
 pub mod gold_cmd;
 pub mod install;
+pub mod marts;
 pub mod monitor;
 pub mod pentaho_cmd;
 pub mod plan_cmd;
@@ -527,6 +528,68 @@ impl EkosExtension for LakehouseExtension {
                                 .long("wait")
                                 .action(clap::ArgAction::SetTrue)
                                 .help("Follow the run to its end; fail unless it succeeded"),
+                        )
+                        .arg(
+                            clap::Arg::new("asset")
+                                .long("asset")
+                                .help("Only this asset, by its name (a dbt model, e.g. gold__sales) — EKOS RFC 0228"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("marts")
+                        .about(
+                            "Step 7: each approved requirement's mart — proposed, merged, built \
+                             through Dagster and reconciled with silver (EKOS RFC 0228)",
+                        )
+                        .subcommand_required(true)
+                        .subcommand(
+                            clap::Command::new("show")
+                                .about("Every mart with its state, and one in full")
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output"),
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").help("Show this mart in full")),
+                        )
+                        .subcommand(
+                            clap::Command::new("propose")
+                                .about("Draft the mart from its approved requirement onto a proposal branch")
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart")),
+                        )
+                        .subcommand(
+                            clap::Command::new("merge")
+                                .about(
+                                    "Merge the mart's proposal into the pipeline: the approval of the \
+                                     generated model (a ledger fact)",
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart"))
+                                .arg(clap::Arg::new("note").long("note").help("A note kept with it"))
+                                .arg(
+                                    clap::Arg::new("by")
+                                        .long("as")
+                                        .help("Who approves (default: $USER; the console sets it)"),
+                                ),
+                        )
+                        .subcommand(
+                            clap::Command::new("build")
+                                .about("Build the mart and run its tests through Dagster")
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart"))
+                                .arg(
+                                    clap::Arg::new("wait")
+                                        .long("wait")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Follow the run to its end"),
+                                ),
+                        )
+                        .subcommand(
+                            clap::Command::new("reconcile")
+                                .about(
+                                    "Each additive measure's total in the mart and the same aggregate \
+                                     over silver, read on Trino and recorded",
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart")),
                         ),
                 )
                 .subcommand(
@@ -819,6 +882,14 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse requirements draft", Class::External, true),
             ("lakehouse requirements edit", Class::Review, false),
             ("lakehouse requirements approve", Class::Review, false),
+            // RFC 0228: show reads the repository and the state dir; propose plans on Trino (and
+            // may call the local model for a prose term); merging the proposal is the approval;
+            // build launches Dagster; reconcile reads aggregates on Trino.
+            ("lakehouse marts show", Class::Read, false),
+            ("lakehouse marts propose", Class::External, true),
+            ("lakehouse marts merge", Class::Review, false),
+            ("lakehouse marts build", Class::External, false),
+            ("lakehouse marts reconcile", Class::External, false),
             ("lakehouse install", Class::Local, false),
             ("lakehouse proposals", Class::Read, false),
             // Reach a webhook / a collector outside the home.
@@ -918,6 +989,7 @@ impl EkosExtension for LakehouseExtension {
             Some(("deletes", m)) => deletes_cmd(ctx, m),
             Some(("extraction", m)) => extraction_cmd(ctx, m),
             Some(("requirements", m)) => requirements_cmd(ctx, m).await,
+            Some(("marts", m)) => marts_cmd(ctx, m).await,
             Some(("run", m)) => {
                 let settings = settings::load(ctx.config)?;
                 let Some(url) = settings.dagster_url.clone() else {
@@ -927,7 +999,18 @@ impl EkosExtension for LakehouseExtension {
                 let location = m.get_one::<String>("location").cloned();
                 let wait = m.get_flag("wait");
                 let in_process = m.get_flag("in-process");
-                off_runtime(|| run_cmd::run(&url, &job, location.as_deref(), in_process, wait))
+                let asset = m.get_one::<String>("asset").cloned();
+                off_runtime(|| {
+                    run_cmd::run(
+                        &url,
+                        &job,
+                        location.as_deref(),
+                        in_process,
+                        wait,
+                        asset.as_deref(),
+                    )
+                })
+                .map(|_| ())
             }
             Some(("reconcile", m)) => {
                 let settings = settings::load(ctx.config)?;
@@ -1115,69 +1198,11 @@ impl EkosExtension for LakehouseExtension {
                 };
                 let settings = settings::load(ctx.config)?;
                 workflow::gate(&settings, ctx)?;
-                let repo = pipeline_dir(&settings, ctx);
                 let description = ctx.invoked_from.join(
                     m.get_one::<std::path::PathBuf>("description")
                         .expect("required"),
                 );
-                // RFC 0215 §2.4: under require-plan-approval, only an approved requirement.
-                if settings.require_plan_approval.unwrap_or(false) {
-                    let text = std::fs::read_to_string(&description)
-                        .map_err(|e| anyhow::anyhow!("{}: {e}", description.display()))?;
-                    requirements::require_approved(
-                        &requirements::state_dir(ctx.config, ctx.cwd),
-                        &text,
-                    )?;
-                }
-                let (outcome, _) = gold_cmd::draft(
-                    &repo,
-                    &description,
-                    settings.gold_model.as_deref().unwrap_or("llama3"),
-                    settings
-                        .ollama_url
-                        .as_deref()
-                        .unwrap_or("http://127.0.0.1:11434"),
-                    &settings.trino_connection()?,
-                )
-                .await?;
-                let run = format!(
-                    "gold-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0)
-                );
-                let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
-                facts::record_mart(store.as_ref(), &run, &outcome)?;
-                let questions_path = description.with_extension("questions.md");
-                if outcome.questions.is_empty() {
-                    let _ = std::fs::remove_file(&questions_path);
-                    println!(
-                        "proposed gold mart {} on {} ({} atoms checked, nothing invented)",
-                        outcome.mart,
-                        outcome.branch.as_deref().unwrap_or("?"),
-                        outcome.checked_atoms
-                    );
-                    for (term, n) in &outcome.drafts {
-                        println!("  {term}: drafted by the model in {n} attempt(s)");
-                    }
-                    Ok(())
-                } else {
-                    let spec = ekos_lakehouse_gold::parse(&std::fs::read_to_string(&description)?)
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                    std::fs::write(
-                        &questions_path,
-                        ekos_lakehouse_gold::questions_markdown(&spec, &outcome.questions),
-                    )?;
-                    for (term, q) in &outcome.questions {
-                        println!("question about `{term}`: {}", q.text);
-                    }
-                    anyhow::bail!(
-                        "{} question(s) for the author, written to {}",
-                        outcome.questions.len(),
-                        questions_path.display()
-                    )
-                }
+                gold_draft(ctx, &settings, &description).await
             }
             Some(("pentaho", p)) => {
                 let settings = settings::load(ctx.config)?;
@@ -1384,9 +1409,25 @@ impl EkosExtension for LakehouseExtension {
                 let reports = monitor::dbt_results(&target)?;
                 let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
                 let failed = reports.iter().filter(|r| r.status != "ok").count();
+                let marts_dir = marts::state_dir(ctx.config, ctx.cwd);
+                let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 for mut r in reports.clone() {
                     r.run_id = run.clone();
                     facts::record_run(store.as_ref(), &r)?;
+                    // RFC 0228: the Marts page reads each mart's latest build without a ledger scan.
+                    if let Some(mart) = marts::mart_of(&r.table) {
+                        marts::write_run(
+                            &marts_dir,
+                            mart,
+                            &marts::LastRun {
+                                run_id: r.run_id.clone(),
+                                at: at.clone(),
+                                status: r.status.clone(),
+                                rows: r.rows,
+                                message: r.message.clone(),
+                            },
+                        )?;
+                    }
                 }
                 println!(
                     "recorded {} dbt model results ({failed} failing) for run {run}",
@@ -1415,6 +1456,236 @@ impl EkosExtension for LakehouseExtension {
             }
             other => anyhow::bail!("unknown lakehouse command {other:?}"),
         }
+    }
+}
+
+/// `lakehouse gold draft <description>`: RFC 0195's proposal (also `marts propose`, RFC 0228).
+async fn gold_draft(
+    ctx: &CommandContext<'_>,
+    settings: &settings::Settings,
+    description: &std::path::Path,
+) -> anyhow::Result<()> {
+    let repo = pipeline_dir(settings, ctx);
+    // RFC 0215 §2.4: under require-plan-approval, only an approved requirement.
+    if settings.require_plan_approval.unwrap_or(false) {
+        let text = std::fs::read_to_string(description)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", description.display()))?;
+        requirements::require_approved(&requirements::state_dir(ctx.config, ctx.cwd), &text)?;
+    }
+    let (outcome, _) = gold_cmd::draft(
+        &repo,
+        description,
+        settings.gold_model.as_deref().unwrap_or("llama3"),
+        settings
+            .ollama_url
+            .as_deref()
+            .unwrap_or("http://127.0.0.1:11434"),
+        &settings.trino_connection()?,
+    )
+    .await?;
+    let run = format!(
+        "gold-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+    facts::record_mart(store.as_ref(), &run, &outcome)?;
+    let questions_path = description.with_extension("questions.md");
+    if outcome.questions.is_empty() {
+        let _ = std::fs::remove_file(&questions_path);
+        println!(
+            "proposed gold mart {} on {} ({} atoms checked, nothing invented)",
+            outcome.mart,
+            outcome.branch.as_deref().unwrap_or("?"),
+            outcome.checked_atoms
+        );
+        for (term, n) in &outcome.drafts {
+            println!("  {term}: drafted by the model in {n} attempt(s)");
+        }
+        Ok(())
+    } else {
+        let spec = ekos_lakehouse_gold::parse(&std::fs::read_to_string(description)?)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        std::fs::write(
+            &questions_path,
+            ekos_lakehouse_gold::questions_markdown(&spec, &outcome.questions),
+        )?;
+        for (term, q) in &outcome.questions {
+            println!("question about `{term}`: {}", q.text);
+        }
+        anyhow::bail!(
+            "{} question(s) for the author, written to {}",
+            outcome.questions.len(),
+            questions_path.display()
+        )
+    }
+}
+
+/// `lakehouse marts show|propose|merge|build|reconcile` (EKOS RFC 0228).
+async fn marts_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result<()> {
+    let settings = settings::load(ctx.config)?;
+    let repo = pipeline_dir(&settings, ctx);
+    let req_dir = requirements::state_dir(ctx.config, ctx.cwd);
+    let dir = marts::state_dir(ctx.config, ctx.cwd);
+    let plan = plan_cmd::read_lock(&repo).ok();
+    let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let need = |mart: &Option<String>| -> anyhow::Result<(String, marts::Facts)> {
+        let mart = mart.clone().expect("required");
+        let f = marts::facts(&req_dir, &dir, &repo, plan.as_ref(), &mart);
+        anyhow::ensure!(
+            f.approved.is_some(),
+            "{mart}: its requirement is not approved, or the approval is no longer valid \
+             (`lakehouse requirements show --mart {mart}`)"
+        );
+        Ok((mart, f))
+    };
+    match m.subcommand() {
+        Some(("show", m)) => {
+            let v = marts::show(
+                &req_dir,
+                &dir,
+                &repo,
+                plan.as_ref(),
+                m.get_one::<String>("mart").map(String::as_str),
+            );
+            if m.get_flag("json") {
+                println!("{v}");
+            } else {
+                print!("{}", marts::render(&v));
+            }
+            Ok(())
+        }
+        Some(("propose", m)) => {
+            workflow::gate(&settings, ctx)?;
+            let (mart, _) = need(&m.get_one::<String>("mart").cloned())?;
+            gold_draft(ctx, &settings, &repo.join(marts::description_path(&mart))).await
+        }
+        Some(("merge", m)) => {
+            workflow::gate(&settings, ctx)?;
+            let (mart, f) = need(&m.get_one::<String>("mart").cloned())?;
+            let Some(branch) = marts::proposal_branch(&repo, &mart) else {
+                anyhow::bail!("{mart} has no proposal: `lakehouse marts propose --mart {mart}`");
+            };
+            anyhow::ensure!(
+                f.proposed == f.approved,
+                "{branch} carries another description than the approved requirement: propose again"
+            );
+            let by = reviewer(m.get_one::<String>("by"))?;
+            let msg = format!("lakehouse: merge gold mart {mart}, approved by {by} (RFC 0228)");
+            if let Err(e) = sync::git(&repo, &["merge", "--no-ff", "-q", "-m", &msg, &branch]) {
+                let _ = sync::git(&repo, &["merge", "--abort"]);
+                anyhow::bail!("{branch} does not merge cleanly ({e}); nothing was merged");
+            }
+            let commit = sync::git(&repo, &["rev-parse", "HEAD"])?.trim().to_string();
+            let a = facts::MartMerge {
+                mart: mart.clone(),
+                by: by.clone(),
+                at: now(),
+                note: m.get_one::<String>("note").cloned(),
+                branch: branch.clone(),
+                commit: commit.clone(),
+                requirement_digest: f.approved.clone().unwrap_or_default(),
+            };
+            let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+            facts::record_mart_merge(store.as_ref(), &a)?;
+            sync::git(&repo, &["branch", "-D", &branch])?;
+            println!(
+                "{mart} merged by {by} ({}): build it with `lakehouse marts build --mart {mart}`",
+                &commit[..12.min(commit.len())]
+            );
+            Ok(())
+        }
+        Some(("build", m)) => {
+            workflow::gate(&settings, ctx)?;
+            let (mart, f) = need(&m.get_one::<String>("mart").cloned())?;
+            anyhow::ensure!(
+                f.merged,
+                "{mart} is not merged yet: `lakehouse marts merge --mart {mart}`"
+            );
+            let Some(url) = settings.dagster_url.clone() else {
+                anyhow::bail!("no dagster-url in [extensions.lakehouse]");
+            };
+            let wait = m.get_flag("wait");
+            let asset = format!("gold__{mart}");
+            let id = off_runtime(|| run_cmd::run(&url, "bronze", None, true, wait, Some(&asset)))?;
+            if wait {
+                println!(
+                    "{mart} built: `lakehouse marts reconcile --mart {mart}` checks its totals"
+                );
+            } else {
+                println!("{mart} is building in run {id}");
+            }
+            Ok(())
+        }
+        Some(("reconcile", m)) => {
+            let (mart, f) = need(&m.get_one::<String>("mart").cloned())?;
+            anyhow::ensure!(f.merged, "{mart} is not merged yet");
+            let p = plan
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no deployed plan"))?;
+            let (spec, resolved, c) = marts::compiled(&repo, &p, &mart)?;
+            let queries = ekos_lakehouse_gold::reconcile_sql(
+                &spec,
+                &resolved,
+                &c,
+                &p.settings.target_catalog,
+                marts::GOLD_SCHEMA,
+            );
+            anyhow::ensure!(
+                !queries.is_empty(),
+                "{mart} has no additive measure (sum or count) to reconcile"
+            );
+            let conn = settings.trino_connection()?;
+            let rows = off_runtime(|| {
+                let r = ekos_lakehouse_trino::TrinoReader::new(conn)?;
+                queries
+                    .iter()
+                    .map(|(measure, sql)| {
+                        let row = r.read(sql)?.into_iter().next().unwrap_or_default();
+                        Ok((measure.clone(), row))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })?;
+            let measures: Vec<marts::Totals> = rows
+                .into_iter()
+                .map(|(measure, row)| {
+                    let mart_total = row.first().cloned().unwrap_or_default();
+                    let silver_total = row.get(1).cloned().unwrap_or_default();
+                    marts::Totals {
+                        equal: marts::totals_equal(&mart_total, &silver_total),
+                        measure,
+                        mart_total,
+                        silver_total,
+                    }
+                })
+                .collect();
+            let r = marts::Reconciliation {
+                mart: mart.clone(),
+                at: now(),
+                run_id: f.run.as_ref().map(|r| r.run_id.clone()),
+                measures,
+            };
+            let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+            facts::record_mart_reconciliation(store.as_ref(), &r)?;
+            marts::write_reconciliation(&dir, &r)?;
+            for t in &r.measures {
+                println!(
+                    "{mart}.{}: mart {} / silver {} — {}",
+                    t.measure,
+                    t.mart_total,
+                    t.silver_total,
+                    if t.equal { "equal" } else { "DIFFERS" }
+                );
+            }
+            anyhow::ensure!(
+                r.measures.iter().all(|t| t.equal),
+                "{mart} does not reconcile with silver"
+            );
+            Ok(())
+        }
+        _ => anyhow::bail!("lakehouse marts: show, propose, merge, build or reconcile"),
     }
 }
 

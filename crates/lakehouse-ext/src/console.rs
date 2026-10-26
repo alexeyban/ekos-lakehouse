@@ -148,9 +148,157 @@ pub fn pages() -> Vec<ConsolePage> {
             ..Default::default()
         },
         requirements_page(),
+        marts_page(),
         extraction_page(),
         pentaho_page(),
     ]
+}
+
+/// EKOS RFC 0228: step 7 — each approved requirement's mart from proposal to reconciliation.
+fn marts_page() -> ConsolePage {
+    let show = || vec!["lakehouse", "marts", "show", "--json"];
+    let act = |label: &'static str, verb: &'static str| Action {
+        label,
+        command: vec!["lakehouse", "marts", verb],
+        binds: vec![("mart", "mart")],
+        ..Default::default()
+    };
+    ConsolePage {
+        id: "marts",
+        title: "Marts",
+        description: "Step 7: each approved requirement becomes a gold mart. Propose drafts the dbt \
+                      model on a branch (nothing invented: every part of it comes from the \
+                      requirement); Merge is your approval of the generated model; Build runs it \
+                      and its tests through Dagster; Reconcile compares each measure's total with \
+                      silver's. The SQL is a template that may need tuning: terms marked drafted \
+                      were written by a model and need a person to read them.",
+        params: vec![PageParam {
+            name: "mart",
+            label: "Mart",
+            source: "marts",
+            rows: "/marts",
+            key: "/mart",
+        }],
+        panels: vec![
+            Panel {
+                id: "marts",
+                title: "Marts (click one)",
+                command: show(),
+                view: View::Table {
+                    rows: "/marts",
+                    columns: vec![
+                        Column::new("/mart", "Mart"),
+                        Column::badge("/state", "State"),
+                        Column::new("/branch", "Proposal"),
+                        Column::new("/last_build", "Last build"),
+                        Column::new("/reconciled_at", "Reconciled at"),
+                    ],
+                },
+                empty: "No mart yet: approve a requirement on the Requirements page.",
+                ..Default::default()
+            },
+            Panel {
+                id: "mart",
+                title: "Mart",
+                command: show(),
+                params: vec!["mart"],
+                view: View::Markdown {
+                    pointer: "/selected/markdown",
+                },
+                empty: "",
+            },
+            Panel {
+                id: "sql",
+                title: "Requirement and generated SQL",
+                command: show(),
+                params: vec!["mart"],
+                view: View::Code {
+                    left: "/selected/description",
+                    right: "/selected/sql",
+                    left_label: "Approved requirement",
+                    right_label: "dbt model (gold)",
+                },
+                empty: "",
+            },
+            Panel {
+                id: "terms",
+                title: "Terms: exact or drafted",
+                command: show(),
+                params: vec!["mart"],
+                view: View::Table {
+                    rows: "/selected/terms",
+                    columns: vec![
+                        Column::new("/section", "Section"),
+                        Column::new("/term", "Term"),
+                        Column::new("/written", "Written"),
+                        Column::badge("/fidelity", "Fidelity"),
+                        Column::new("/how", "How"),
+                    ],
+                },
+                empty: "",
+            },
+            Panel {
+                id: "reconciliation",
+                title: "Reconciliation with silver",
+                command: show(),
+                params: vec!["mart"],
+                view: View::Table {
+                    rows: "/selected/reconciliation",
+                    columns: vec![
+                        Column::new("/measure", "Measure"),
+                        Column::new("/mart_total", "Mart total"),
+                        Column::new("/silver_total", "Silver total"),
+                        Column::badge("/equal", "Result"),
+                    ],
+                },
+                empty: "Not reconciled yet: Build, then Reconcile.",
+            },
+            Panel {
+                id: "tests",
+                title: "Tests",
+                command: show(),
+                params: vec!["mart"],
+                view: View::Table {
+                    rows: "/selected/tests",
+                    columns: vec![Column::new("/test", "Test"), Column::new("/what", "Checks")],
+                },
+                empty: "",
+            },
+            Panel {
+                id: "lineage",
+                title: "Lineage",
+                command: show(),
+                params: vec!["mart"],
+                view: View::Graph {
+                    nodes: "/selected/graph/nodes",
+                    edges: "/selected/graph/edges",
+                    id: "/id",
+                    label: "/label",
+                    group: "/group",
+                    badge: "/fidelity",
+                    from: "/from",
+                    to: "/to",
+                },
+                empty: "",
+            },
+        ],
+        actions: vec![
+            act("Propose", "propose"),
+            Action {
+                label: "Merge",
+                command: vec!["lakehouse", "marts", "merge"],
+                binds: vec![("mart", "mart")],
+                inputs: vec![("note", "Note (optional)")],
+                confirm: Some(
+                    "You approve the generated model as shown, under your name: its proposal is \
+                     merged into the pipeline and the next build makes it a table.",
+                ),
+                ..Default::default()
+            },
+            act("Build", "build"),
+            act("Reconcile", "reconcile"),
+        ],
+    }
 }
 
 /// EKOS RFC 0215: step 4 — mart requirements, drafted from text by the configured model or
@@ -827,7 +975,13 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            vec!["lakehouse", "requirements", "extraction", "pentaho"]
+            vec![
+                "lakehouse",
+                "requirements",
+                "marts",
+                "extraction",
+                "pentaho"
+            ]
         );
     }
 

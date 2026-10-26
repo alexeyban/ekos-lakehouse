@@ -742,3 +742,42 @@ fn equals_true_reads_as_is_true() {
         c.plain_sql
     );
 }
+
+#[test]
+fn a_mart_reconciles_each_additive_measure_and_shows_its_lineage() {
+    let s = spec(
+        "grain: [customer]\ndimensions:\n  customer: c_bpartner.name via c_order.c_bpartner_id\n\
+         measures:\n  total: sum of c_order.grandtotal\n  orders: count of c_order\n  biggest: max of c_order.grandtotal\n\
+         filters:\n  - c_order.docstatus = 'CO'\n",
+    );
+    let r = resolve(&s, &orders());
+    let c = compile(&s, &orders(), &r, &BTreeMap::new()).unwrap();
+    let q = reconcile_sql(&s, &r, &c, "iceberg", "gold");
+    assert_eq!(
+        q.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+        ["total", "orders"],
+        "max is not additive"
+    );
+    assert!(
+        q[0].1
+            .contains("select sum(\"total\") from \"iceberg\".\"gold\".\"m\""),
+        "{}",
+        q[0].1
+    );
+    assert!(
+        q[0].1.contains("sum(\"C_ORDER\".\"GRANDTOTAL\")"),
+        "{}",
+        q[0].1
+    );
+    assert!(
+        q[0].1.contains("where \"C_ORDER\".\"DOCSTATUS\" = 'CO'"),
+        "{}",
+        q[0].1
+    );
+    assert!(!q[0].1.contains("group by"), "{}", q[0].1);
+    assert!(r.iter().all(|x| fidelity(x) == "exact"));
+    let (nodes, edges) = lineage(&s, &c);
+    assert_eq!(nodes.len(), 3);
+    assert!(edges.contains(&("C_BPARTNER".into(), "C_ORDER".into())));
+    assert!(edges.contains(&("C_ORDER".into(), "gold.m".into())));
+}

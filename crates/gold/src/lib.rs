@@ -1233,6 +1233,91 @@ pub fn engine_sql(c: &Compiled, catalog: &str) -> String {
         .join("\n")
 }
 
+/// EKOS RFC 0228 §2.5: per additive measure, one query returning the mart's total and the same
+/// aggregate over silver under the mart's joins and filters, both as text (exact decimals).
+/// `gold_schema` is where dbt built the mart.
+pub fn reconcile_sql(
+    spec: &MartSpec,
+    resolved: &[Resolved],
+    c: &Compiled,
+    catalog: &str,
+    gold_schema: &str,
+) -> Vec<(String, String)> {
+    let engine = engine_sql(c, catalog);
+    let from_where = engine
+        .split_once("\nfrom ")
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    let from_where = from_where.split("\ngroup by").next().unwrap_or(from_where);
+    let gold = format!(
+        "{}.{}.{}",
+        ident(catalog),
+        ident(gold_schema),
+        ident(&spec.mart)
+    );
+    let mut out = vec![];
+    for r in resolved.iter().filter(|r| r.section == "measures") {
+        let Ok(Term::Aggregate {
+            func,
+            distinct: false,
+            arg,
+            ..
+        }) = &r.resolution
+        else {
+            continue;
+        };
+        if func != "sum" && func != "count" {
+            continue;
+        }
+        let silver = match arg {
+            Some(a) => format!("{func}({})", col(a)),
+            None => "count(*)".to_string(),
+        };
+        out.push((
+            r.term.clone(),
+            format!(
+                "select cast((select sum({m}) from {gold}) as varchar) as mart_total,\n       \
+                 cast((select {silver}\n        from {from_where}) as varchar) as silver_total",
+                m = ident(&r.term),
+            ),
+        ));
+    }
+    out
+}
+
+/// EKOS RFC 0228 §2.1: how faithfully each term was carried over — `exact` (a pattern compiled
+/// over declared keys) or `drafted` (prose a model wrote: a person should read it).
+pub fn fidelity(r: &Resolved) -> &'static str {
+    match &r.resolution {
+        Ok(Term::Prose { .. }) => "drafted",
+        Ok(_) => "exact",
+        Err(_) => "question",
+    }
+}
+
+/// A lineage graph: nodes `(id, label, group)` and edges `(from, to)`.
+pub type Lineage = (Vec<(String, String, String)>, Vec<(String, String)>);
+
+/// EKOS RFC 0228 §2.1: the mart's lineage — the silver tables it reads, the keys joining them,
+/// the mart.
+pub fn lineage(spec: &MartSpec, c: &Compiled) -> Lineage {
+    let mart = format!("gold.{}", spec.mart);
+    let mut nodes: Vec<(String, String, String)> = c
+        .tables
+        .iter()
+        .map(|t| (t.clone(), t.clone(), "silver".to_string()))
+        .collect();
+    nodes.push((mart.clone(), spec.mart.clone(), "gold".to_string()));
+    let mut edges: Vec<(String, String)> = c
+        .joins
+        .iter()
+        .map(|(child, _, parent, _)| (parent.clone(), child.clone()))
+        .collect();
+    edges.push((c.base.clone(), mart));
+    edges.dedup();
+    (nodes, edges)
+}
+
 // ─────────────────────────────── files ───────────────────────────────
 
 pub fn mart_id(c: &Compiled) -> String {

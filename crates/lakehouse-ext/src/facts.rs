@@ -550,6 +550,69 @@ pub fn record_requirement_approval(
     )
 }
 
+/// EKOS RFC 0228 §2.3: a mart's proposal merged — the approval of the generated model.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MartMerge {
+    pub mart: String,
+    pub by: String,
+    pub at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub branch: String,
+    pub commit: String,
+    pub requirement_digest: String,
+}
+
+pub fn record_mart_merge(store: &dyn KnowledgeStore, a: &MartMerge) -> anyhow::Result<KirId> {
+    with_context(store, &format!("merge-{}-{}", a.mart, a.at), "gold", || {
+        let mut obj = KirObject::new(
+            format!("gold mart {} merged", a.mart),
+            ObjectKind::Custom(APPROVAL_KIND.into()),
+        );
+        obj.id = det_id(&format!("lakehouse-approval:gold:{}", a.mart));
+        obj.properties.insert("subject".into(), json!("gold mart"));
+        if let serde_json::Value::Object(m) = serde_json::to_value(a)? {
+            for (k, v) in m {
+                obj.properties.insert(k, v);
+            }
+        }
+        store.append_object(&obj)?;
+        Ok(obj.id)
+    })
+}
+
+/// EKOS RFC 0228 §2.5: one metric per measure — both totals and whether they agree. Totals are
+/// aggregates, never a row's value.
+pub fn record_mart_reconciliation(
+    store: &dyn KnowledgeStore,
+    r: &crate::marts::Reconciliation,
+) -> anyhow::Result<()> {
+    let run = format!("reconcile-{}", r.at);
+    with_context(store, &run, "gold", || {
+        for t in &r.measures {
+            let table = format!("gold.{}", r.mart);
+            let mut obj = KirObject::new(
+                format!("{table} {} reconciliation", t.measure),
+                ObjectKind::Custom(METRIC_KIND.into()),
+            );
+            obj.id = metric_id(&table, &run, &format!("mart_reconcile:{}", t.measure));
+            obj.properties.insert("table".into(), json!(table));
+            obj.properties
+                .insert("metric".into(), json!("mart_reconcile"));
+            obj.properties.insert("measure".into(), json!(t.measure));
+            obj.properties
+                .insert("mart_total".into(), json!(t.mart_total));
+            obj.properties
+                .insert("silver_total".into(), json!(t.silver_total));
+            obj.properties.insert("equal".into(), json!(t.equal));
+            obj.properties.insert("gold_run_id".into(), json!(r.run_id));
+            obj.properties.insert("at".into(), json!(r.at));
+            store.append_object(&obj)?;
+        }
+        Ok(())
+    })
+}
+
 /// One delete check (RFC 0225 §2.4): counts, method, guard and times — never a key value.
 pub fn record_delete_check(
     store: &dyn KnowledgeStore,
