@@ -235,6 +235,23 @@ pub struct Plan {
     pub refused: Vec<RefusedTable>,
 }
 
+/// EKOS RFC 0231: what keeps a project's silver and gold apart from another project's on the same
+/// catalog — its namespace prefix without the default `bronze_` lead (`bronze_sales_` → `sales_`).
+/// Empty for the default prefix, so a project on the defaults keeps `silver_<schema>` and `gold`.
+pub fn layer_tag(namespace_prefix: &str) -> &str {
+    namespace_prefix
+        .strip_prefix("bronze_")
+        .unwrap_or(namespace_prefix)
+}
+
+/// EKOS RFC 0231: the project's gold schema — `gold`, or `gold_<tag>` (`gold_sales`).
+pub fn gold_schema(namespace_prefix: &str) -> String {
+    match layer_tag(namespace_prefix).trim_end_matches('_') {
+        "" => "gold".into(),
+        tag => format!("gold_{tag}"),
+    }
+}
+
 /// 2: table and column facts for silver (RFC 0193). 3: OIDs, attnums, defaults (RFC 0194).
 pub const FORMAT: u32 = 3;
 
@@ -322,6 +339,18 @@ pub fn plan_with(
 #[cfg(test)]
 mod engine_tests {
     use super::*;
+
+    /// EKOS RFC 0231: the default prefix tags nothing; a project's own prefix tags its silver and
+    /// gold, so two projects on one catalog never write into each other's tables.
+    #[test]
+    fn a_project_prefix_names_its_own_silver_and_gold() {
+        assert_eq!(layer_tag("bronze_"), "");
+        assert_eq!(gold_schema("bronze_"), "gold");
+        assert_eq!(layer_tag("bronze_sales_"), "sales_");
+        assert_eq!(gold_schema("bronze_sales_"), "gold_sales");
+        assert_eq!(layer_tag("raw_"), "raw_");
+        assert_eq!(gold_schema("raw_"), "gold_raw");
+    }
 
     /// RFC 0216: a PostgreSQL lock does not name its engine, so it is byte-identical to one
     /// written before the seam; an Oracle lock does, and reads back as Oracle.

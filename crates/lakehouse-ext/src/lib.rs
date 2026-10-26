@@ -1689,7 +1689,7 @@ async fn marts_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Re
                 &resolved,
                 &c,
                 &p.settings.target_catalog,
-                marts::GOLD_SCHEMA,
+                &ekos_lakehouse_bronze::plan::gold_schema(&p.settings.namespace_prefix),
             );
             anyhow::ensure!(
                 !queries.is_empty(),

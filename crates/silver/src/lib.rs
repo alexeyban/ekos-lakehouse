@@ -51,8 +51,15 @@ pub fn model_name(t: &TablePlan) -> String {
     ekos_lakehouse_bronze::safe_name(&format!("{}__{}", t.schema, t.table))
 }
 
+/// The table's silver schema: `silver_<schema>`, with the project's layer tag when its namespace
+/// prefix is not the default (`bronze_sales_` → `silver_sales_<schema>`, EKOS RFC 0231).
 pub fn silver_schema(t: &TablePlan) -> String {
-    format!("silver_{}", t.schema)
+    let prefix = t.namespace.strip_suffix(&t.schema).unwrap_or("bronze_");
+    format!(
+        "silver_{}{}",
+        ekos_lakehouse_bronze::plan::layer_tag(prefix),
+        t.schema
+    )
 }
 
 /// Quote a column for YAML/tests only when dbt would otherwise fold or misread it.
@@ -944,6 +951,20 @@ mod tests {
                 comment: None,
             },
         ]
+    }
+
+    /// EKOS RFC 0231: the default prefix keeps `silver_<schema>`; another prefix tags it.
+    #[test]
+    fn silver_schemas_follow_the_projects_prefix() {
+        let p = the_plan();
+        assert_eq!(silver_schema(&p.tables[0]), "silver_public");
+        let s = PlanSettings {
+            namespace_prefix: "bronze_sales_".into(),
+            ..Default::default()
+        };
+        let p = plan(&sources(), &s);
+        assert_eq!(p.tables[0].namespace, "bronze_sales_public");
+        assert_eq!(silver_schema(&p.tables[0]), "silver_sales_public");
     }
 
     fn the_plan() -> Plan {

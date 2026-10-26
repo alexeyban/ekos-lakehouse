@@ -499,6 +499,29 @@ fn spec(body: &str) -> MartSpec {
     parse(&format!("---\nmart: m\n{body}---\n")).unwrap()
 }
 
+/// EKOS RFC 0231: a project with its own namespace prefix builds its marts into its own gold schema
+/// and reads its own silver; the default stays `gold` and `silver_<schema>`.
+#[test]
+fn a_project_prefix_tags_the_gold_and_silver_schemas() {
+    let s = spec(
+        "grain: [status]\ndimensions:\n  status: c_order.docstatus\n\
+         measures:\n  total: sum of c_order.grandtotal\n",
+    );
+    let mut p = orders();
+    let r = resolve(&s, &p);
+    let c = compile(&s, &p, &r, &BTreeMap::new()).unwrap();
+    assert!(c.dbt_sql.contains("schema='gold',"), "{}", c.dbt_sql);
+    assert!(engine_sql(&c, "iceberg").contains("silver_public"));
+    p.settings.namespace_prefix = "bronze_sales_".into();
+    let c = compile(&s, &p, &r, &BTreeMap::new()).unwrap();
+    assert!(c.dbt_sql.contains("schema='gold_sales',"), "{}", c.dbt_sql);
+    let e = engine_sql(&c, "iceberg");
+    assert!(
+        e.contains("silver_sales_public") && !e.contains("\"silver_public\""),
+        "{e}"
+    );
+}
+
 #[test]
 fn oracle_names_resolve_whatever_their_case() {
     let s = spec(

@@ -330,7 +330,7 @@ class Site:
             [
                 ("Bronze", f"{code(s.get('target_catalog'))} · namespace {code(s.get('namespace_prefix', 'bronze_') + '<schema>')}",
                  "generated Trino SQL, one asset per table", "faithful copy; append-only with `_ekos_*` columns; reconciled to source every run"),
-                ("Silver", "schema `silver_<schema>`, model `<schema>__<table>`",
+                ("Silver", "schema `silver_<schema>` (`silver_<tag><schema>` for a project with its own namespace prefix), model `<schema>__<table>`",
                  "generated dbt-trino, no model in the loop", "latest row per key, deletes removed, approved PII masked; key/not-null/FK/enum tests"),
                 ("Gold", "schema `gold`, model `gold__<mart>`",
                  "drafted from a written description, approved by merge", "every term resolved; grain uniqueness and measure reconciliation tests"),

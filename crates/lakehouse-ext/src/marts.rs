@@ -11,9 +11,6 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Where dbt builds gold (`schema='gold'` in the generated model).
-pub const GOLD_SCHEMA: &str = "gold";
-
 pub fn state_dir(config: &ekos_compiler_core::EkosConfig, cwd: &Path) -> PathBuf {
     config.ekos_dir(cwd).join("lakehouse").join("marts")
 }

@@ -149,15 +149,17 @@ def build(p: Project) -> Lineage:
     order = _topo(p.models)
     for name in order:
         m = p.models[name]
-        upstream: dict[str, tuple[str, str]] = {}   # "db.table" → (layer, relation id)
+        # "db.table", lower-cased → (layer, relation id). sqlglot's Trino dialect folds identifiers
+        # to lower case, quoted ones too, so Oracle's upper-case names are matched without case.
+        upstream: dict[str, tuple[str, str]] = {}
         sch: dict[str, dict[str, dict[str, str]]] = {}
         for src_schema, src_table in m.sources:
             rel = f"{src_schema}.{src_table}"
             sch.setdefault(src_schema, {})[src_table] = {c: "varchar" for c in bronze_cols.get(rel, [])}
-            upstream[rel] = ("bronze", rel)
+            upstream[rel.lower()] = ("bronze", rel)
         for r in m.refs:
             sch.setdefault("__ref__", {})[r] = {c: "varchar" for c in model_cols.get(r, [])}
-            upstream[f"__ref__.{r}"] = (layer_of.get(r, "other"), r)
+            upstream[f"__ref__.{r}".lower()] = (layer_of.get(r, "other"), r)
         sql = _resolve_jinja(m.sql)
         out_cols = [c.name for c in m.columns]
         for col in out_cols:
@@ -174,13 +176,20 @@ def build(p: Project) -> Lineage:
                     for leaf in leaves:
                         if not isinstance(leaf.source, exp.Table):
                             continue
-                        key = f"{leaf.source.db}.{leaf.source.name}"
+                        key = f"{leaf.source.db}.{leaf.source.name}".lower()
                         if key not in upstream:
                             continue
                         layer, rel = upstream[key]
                         leaf_col = leaf.name.split(".")[-1].strip('"')
+                        # The column as the upstream relation spells it (sqlglot gave it lower-cased).
+                        known = bronze_cols.get(rel) if layer == "bronze" else model_cols.get(rel)
+                        leaf_col = next((c for c in known or [] if c.lower() == leaf_col.lower()), leaf_col)
                         src = Node(layer, rel, leaf_col)
-                        transform = "pass-through" if _is_plain(expr_sql.split(".")[-1], leaf_col) and leaf_col == col else expr_sql
+                        transform = (
+                            "pass-through"
+                            if _is_plain(expr_sql.split(".")[-1], leaf_col) and leaf_col.lower() == col.lower()
+                            else expr_sql
+                        )
                         lin.add(Edge(src, dst, transform, "parsed"))
                         done = True
                 except Exception as err:  # noqa: BLE001 — any parse failure falls back

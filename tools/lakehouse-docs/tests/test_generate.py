@@ -60,6 +60,28 @@ def test_column_lineage_reaches_source_through_every_layer(pipeline):
     assert "HMAC_SHA256" in email.transform
 
 
+def test_column_lineage_matches_upper_case_oracle_names(pipeline):
+    """sqlglot's Trino dialect lower-cases identifiers, quoted ones too; an Oracle pipeline's models
+    and columns are upper case. Gold must still reach the silver column it reads."""
+    p = project.load(pipeline, FIX / "evidence")
+    silver = project.Model(
+        name="ADEMPIERE__C_ORDER", layer="silver", path="x.sql", sql='select "C_ORDER_ID", "GRANDTOTAL" from t',
+        columns=[project.ModelColumn("C_ORDER_ID"), project.ModelColumn("GRANDTOTAL")],
+    )
+    gold = project.Model(
+        name="gold__orders", layer="gold", path="y.sql",
+        sql='select sum("C_ORDER"."GRANDTOTAL") as "total"\nfrom {{ ref(\'ADEMPIERE__C_ORDER\') }} as "C_ORDER"',
+        columns=[project.ModelColumn("total")], refs=["ADEMPIERE__C_ORDER"],
+    )
+    p.models[silver.name] = silver
+    p.models[gold.name] = gold
+    lin = lineage.build(p)
+    assert "gold__orders.total: no upstream column" not in lin.unresolved
+    [edge] = lin.up[Node("gold", "gold__orders", "total")]
+    assert edge.src == Node("silver", "ADEMPIERE__C_ORDER", "GRANDTOTAL")
+    assert edge.kind == "parsed"
+
+
 def test_er_diagram_has_declared_relations(docs):
     er = (docs / "source/er-diagram.md").read_text()
     assert 'public_payment }o--|| public_rental : "rental_id"' in er
