@@ -11,6 +11,7 @@ use ekos_migrate_logic::invention::{AtomKind, InventionReport, check_candidate_w
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+pub mod ask;
 pub mod requirements;
 
 // ─────────────────────────────── the description ───────────────────────────────

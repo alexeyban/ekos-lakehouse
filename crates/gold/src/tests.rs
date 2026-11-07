@@ -43,7 +43,7 @@ fn table(name: &str, cols: Vec<SourceColumn>, fks: Vec<(&str, &str, &str)>) -> S
 }
 
 /// LedgerSMB's shape: ar → transactions (date, approval) and ar → entity_credit_account.
-fn ledger() -> Plan {
+pub(crate) fn ledger() -> Plan {
     plan(
         &[
             table(

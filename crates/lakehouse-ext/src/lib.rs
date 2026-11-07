@@ -4,6 +4,7 @@
 //! repository the user owns and records every run and check as ledger facts. Trino moves the
 //! data and the orchestrator schedules it; nothing here ever moves a row.
 
+pub mod ask_cmd;
 pub mod check;
 pub mod console;
 pub mod deletes;
@@ -11,7 +12,7 @@ pub mod docs;
 pub mod doctor;
 pub mod extraction;
 pub mod facts;
-pub mod gold_cmd;
+mod gold_cmd;
 pub mod install;
 pub mod marts;
 pub mod monitor;
@@ -378,6 +379,21 @@ impl EkosExtension for LakehouseExtension {
                                         .value_parser(clap::value_parser!(std::path::PathBuf))
                                         .help("marts/<name>.md"),
                                 ),
+                        )
+                        .subcommand(
+                            clap::Command::new("ask")
+                                .about(
+                                    "Triage a question's terms (EKOS RFC 0248) against the \
+                                     deployed plan and the existing marts; show the SQL they \
+                                     compile to. Read-only",
+                                )
+                                .arg(
+                                    clap::Arg::new("request")
+                                        .required(true)
+                                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                                        .help("A JSON request: measures, dimensions, filters (terms, never SQL)"),
+                                )
+                                .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
                         ),
                 )
                 .subcommand(
@@ -937,6 +953,8 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse reload", Class::Admin, false),
             // Calls the configured (local) model for prose terms.
             ("lakehouse gold draft", Class::External, true),
+            // EKOS RFC 0248: reads the deployed plan and the marts' descriptions; no model, no write.
+            ("lakehouse gold ask", Class::Read, false),
             // Reads the repository and the ledger; writes metric facts.
             ("lakehouse check", Class::Write, false),
             // Reads the project's own source files (redacted), nothing else.
@@ -1228,6 +1246,18 @@ impl EkosExtension for LakehouseExtension {
                     }
                 }
                 Ok(())
+            }
+            Some(("gold", g)) if matches!(g.subcommand(), Some(("ask", _))) => {
+                let Some(("ask", m)) = g.subcommand() else {
+                    unreachable!()
+                };
+                let settings = settings::load(ctx.config)?;
+                let request = ctx.invoked_from.join(
+                    m.get_one::<std::path::PathBuf>("request")
+                        .expect("required"),
+                );
+                let repo = pipeline_dir(&settings, ctx);
+                ask_cmd::run(&repo, &request, m.get_flag("json"))
             }
             Some(("gold", g)) => {
                 let Some(("draft", m)) = g.subcommand() else {
