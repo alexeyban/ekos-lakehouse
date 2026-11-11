@@ -262,6 +262,9 @@ mod tests {
         fn orderable(&self, _: &str) -> bool {
             false
         }
+        fn capabilities(&self) -> ekos_kir::source_capabilities::Capabilities {
+            ekos_kir::source_capabilities::Capabilities::default()
+        }
     }
 
     #[test]

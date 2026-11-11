@@ -21,6 +21,9 @@ impl EngineSpec for FixtureSpec {
     fn orderable(&self, t: &str) -> bool {
         t == "bigint"
     }
+    fn capabilities(&self) -> ekos_kir::source_capabilities::Capabilities {
+        ekos_kir::source_capabilities::Capabilities::default()
+    }
 }
 
 struct Fixture;

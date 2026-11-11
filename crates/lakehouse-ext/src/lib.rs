@@ -5,6 +5,7 @@
 //! data and the orchestrator schedules it; nothing here ever moves a row.
 
 pub mod ask_cmd;
+pub mod capabilities;
 pub mod check;
 pub mod console;
 pub mod deletes;
@@ -1119,13 +1120,20 @@ impl EkosExtension for LakehouseExtension {
                 let results = off_runtime(|| {
                     let src = plan_cmd::connect_source(&settings, &format!("lakehouse-{run}"))?;
                     let tgt = ekos_lakehouse_trino::TrinoReader::new(settings.trino_connection()?)?;
+                    // RFC 0255 §3.5: a dialect that has not passed the conformance kit on this
+                    // source proves nothing by agreeing; its tables are never healthy.
+                    let provider = settings.engines.get(&plan.settings.source_engine)?.clone();
+                    let report = capabilities::conformance(provider.as_ref(), src.as_ref());
+                    let caps =
+                        capabilities::record(provider.as_ref(), &settings, &[], report.as_ref());
                     let mut out = Vec::new();
                     for t in &plan.tables {
                         let name = format!("{}.{}", t.schema, t.table);
                         if !wanted.is_empty() && !wanted.contains(&name) {
                             continue;
                         }
-                        let r = reconcile::reconcile(t, &plan.settings, src.reader(), &tgt)?;
+                        let mut r = reconcile::reconcile(t, &plan.settings, src.reader(), &tgt)?;
+                        capabilities::apply_trust(&mut r, &caps);
                         out.push((
                             r,
                             reconcile::evidence_queries(t, &plan.settings, src.reader().dialect()),
@@ -1956,10 +1964,21 @@ fn fresh(
     let ledger = facts::plan_facts(settings, ctx)?;
     let mut wf = ledger.write;
     step3.apply_facts(&mut wf);
-    let mut plan = {
+    let (mut plan, caps) = {
         let redaction = ctx.config.redaction_config();
-        off_runtime(|| plan_cmd::build_plan_with(settings, &redaction, &wf))?
+        off_runtime(|| plan_cmd::build_plan_checked(settings, &redaction, &wf))?
     };
+    // RFC 0255 §3.5: what the source engine provides, checked, as one fact per source.
+    for d in &caps.downgrades {
+        eprintln!("source engine {}: {d}", caps.engine);
+    }
+    let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    match facts::open_store_waiting(ctx.config, ctx.cwd)
+        .and_then(|store| capabilities::write(store.as_ref(), &format!("plan-{at}"), &caps))
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("warning: the source's capabilities were not recorded: {e}"),
+    }
     // Over a deployed plan: keep its approved renames, and rename in place what the source
     // renamed since, rather than add an empty column.
     if let Ok(deployed) = plan_cmd::read_lock(repo) {

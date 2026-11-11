@@ -8,6 +8,7 @@
 
 use crate::model::SourceColumn;
 use crate::typemap::Mapping;
+use ekos_kir::source_capabilities::{Capabilities, Capability as C, Support};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::borrow::Cow;
 
@@ -109,6 +110,9 @@ pub trait EngineSpec: Send + Sync {
     fn map_column(&self, column: &SourceColumn) -> Mapping;
     /// Whether a column of this source type can order a watermark (`mode.rs`).
     fn orderable(&self, source_type: &str) -> bool;
+    /// What this engine provides and what it does not (RFC 0255 §3.5), as declared. The build
+    /// checks what it can (`ekos_kir::source_capabilities::checked`) before recording it.
+    fn capabilities(&self) -> Capabilities;
 }
 
 /// PostgreSQL (RFC 0192).
@@ -124,6 +128,23 @@ impl EngineSpec for PostgresSpec {
     }
     fn orderable(&self, source_type: &str) -> bool {
         source_type.starts_with("timestamp") || matches!(source_type, "date" | "integer" | "bigint")
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::of([
+            (C::Catalog, Support::Provided),
+            (C::ReadOnlyProof, Support::Provided),
+            (C::DeclaredKeys, Support::Provided),
+            (C::Descriptions, Support::Provided),
+            (
+                C::ValueLists,
+                Support::partial("enum types; `CHECK (c IN (…))` lists are not read"),
+            ),
+            (C::Routines, Support::Provided),
+            (C::ColumnIdentity, Support::Provided),
+            (C::UsageStats, Support::Provided),
+            (C::Profiling, Support::Provided),
+            (C::Reconcile, Support::Provided),
+        ])
     }
 }
 
@@ -144,6 +165,26 @@ impl EngineSpec for OracleSpec {
             || source_type.starts_with("TIMESTAMP")
             || source_type == "INTEGER"
             || (source_type.starts_with("NUMBER(") && source_type.ends_with(",0)"))
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::of([
+            (C::Catalog, Support::Provided),
+            (C::ReadOnlyProof, Support::Provided),
+            (C::DeclaredKeys, Support::Provided),
+            (C::Descriptions, Support::Provided),
+            (C::ValueLists, Support::Provided),
+            (C::Routines, Support::Provided),
+            (
+                C::ColumnIdentity,
+                Support::partial("COLUMN_ID is a position, renumbered by a drop, not an identity"),
+            ),
+            (
+                C::UsageStats,
+                Support::absent("the Oracle connector reads no workload statistics"),
+            ),
+            (C::Profiling, Support::Provided),
+            (C::Reconcile, Support::Provided),
+        ])
     }
 }
 

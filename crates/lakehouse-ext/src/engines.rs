@@ -42,6 +42,15 @@ pub trait SourceProvider: Send + Sync {
     /// must be the dialect of the connected source's `EngineReader`.
     fn dialect(&self) -> ekos_migrate_validate::Dialect;
 
+    /// The hand-written literals the conformance kit renders this engine's dialect over (RFC 0255
+    /// §3.4). Default: the kit's own table for a built-in dialect; a registered dialect brings
+    /// its own, or has no `reconcile`.
+    fn conformance_literals(
+        &self,
+    ) -> Option<Box<dyn ekos_migrate_validate::conformance::Literals>> {
+        ekos_migrate_validate::conformance::builtin(self.dialect())
+    }
+
     /// `host:port` the doctor's reachability check connects to. Default: `source`.
     fn address(&self, settings: &Settings) -> Option<String> {
         settings.source.clone()
@@ -272,6 +281,9 @@ mod tests {
                 }
                 fn orderable(&self, _: &str) -> bool {
                     false
+                }
+                fn capabilities(&self) -> ekos_kir::source_capabilities::Capabilities {
+                    ekos_kir::source_capabilities::Capabilities::default()
                 }
             }
             Arc::new(Spec(self.0))

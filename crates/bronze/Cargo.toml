@@ -10,3 +10,5 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+# RFC 0255 §3.5: the capability vocabulary is EKOS's, so the ledger fact has one schema.
+ekos-kir.workspace = true

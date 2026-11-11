@@ -186,7 +186,8 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
                 s.source_database.as_deref().unwrap_or("?"),
                 ps.source_catalog
             );
-            match pg.read_tables(trino, &ps.source_catalog, &s.schemas(), redaction, 0) {
+            let read = pg.read_tables(trino, &ps.source_catalog, &s.schemas(), redaction, 0);
+            match &read {
                 Ok(tables) => {
                     let hidden: Vec<String> = tables
                         .iter()
@@ -216,6 +217,9 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
                     ));
                 }
                 Err(e) => out.push(Check::of("columns", target, Err(e.to_string()))),
+            }
+            if let (Some(p), Ok(tables)) = (provider, read.as_deref()) {
+                out.push(engine_check(p.as_ref(), s, pg.as_ref(), tables));
             }
             let user = provider.map(|p| p.role(s)).unwrap_or_default();
             out.push(match pg.writes_refused() {
@@ -280,6 +284,32 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
         out.push(Check::of("gold-model", url, found));
     }
     out
+}
+
+/// RFC 0255 §3.5: the engine's capabilities, checked against the catalog just read and a
+/// conformance run on the source. Failed when a required capability is missing; a warning when
+/// `reconcile` is not provided (no table can be healthy) or a declaration was downgraded.
+fn engine_check(
+    p: &dyn crate::engines::SourceProvider,
+    s: &Settings,
+    source: &dyn crate::source::Source,
+    tables: &[ekos_lakehouse_bronze::SourceTable],
+) -> Check {
+    let report = crate::capabilities::conformance(p, source);
+    let sc = crate::capabilities::record(p, s, tables, report.as_ref());
+    let status = if !sc.capabilities.missing_required().is_empty() {
+        Status::Failed
+    } else if !crate::capabilities::reconcile_trusted(&sc) || !sc.downgrades.is_empty() {
+        Status::Warning
+    } else {
+        Status::Ok
+    };
+    Check {
+        service: "engine",
+        target: Some(sc.engine.clone()),
+        status,
+        detail: format!("\n{}", crate::capabilities::render(&sc).trim_end()),
+    }
 }
 
 pub fn render(checks: &[Check]) -> String {

@@ -447,6 +447,9 @@ mod engine_tests {
             fn orderable(&self, t: &str) -> bool {
                 t == "WEIRDINT"
             }
+            fn capabilities(&self) -> ekos_kir::source_capabilities::Capabilities {
+                ekos_kir::source_capabilities::Capabilities::default()
+            }
         }
         let mut s = PlanSettings {
             source_engine: SourceEngine::from_static("fixture"),

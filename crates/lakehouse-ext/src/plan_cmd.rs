@@ -21,6 +21,17 @@ pub fn build_plan_with(
     redaction: &ekos_common::redaction::RedactionConfig,
     facts: &std::collections::BTreeMap<String, ekos_lakehouse_bronze::WriteFacts>,
 ) -> anyhow::Result<Plan> {
+    Ok(build_plan_checked(s, redaction, facts)?.0)
+}
+
+/// [`build_plan_with`], and the source engine's capabilities as checked against what the plan
+/// read, with the conformance kit run on the source (RFC 0255 §3.5): the fact `plan` records.
+pub fn build_plan_checked(
+    s: &Settings,
+    redaction: &ekos_common::redaction::RedactionConfig,
+    facts: &std::collections::BTreeMap<String, ekos_lakehouse_bronze::WriteFacts>,
+) -> anyhow::Result<(Plan, ekos_kir::source_capabilities::SourceCapabilities)> {
+    let provider = s.engines.get(&s.engine())?.clone();
     let src = connect_source(s, "lakehouse-plan")?;
     let trino = ekos_lakehouse_trino::TrinoReader::new(s.trino_connection()?)?;
     let ps = s.plan_settings();
@@ -31,10 +42,12 @@ pub fn build_plan_with(
         redaction,
         ps.modes.full_refresh_max_rows,
     )?;
-    let spec = s.engines.spec(&ps.source_engine)?;
+    let spec = provider.spec();
     let mut plan = ekos_lakehouse_bronze::plan_for(spec.as_ref(), &sources, &ps, facts);
     ekos_lakehouse_bronze::attach_checks(&mut plan, &src.value_lists(&s.schemas(), redaction)?);
-    Ok(plan)
+    let report = crate::capabilities::conformance(provider.as_ref(), src.as_ref());
+    let caps = crate::capabilities::record(provider.as_ref(), s, &sources, report.as_ref());
+    Ok((plan, caps))
 }
 
 /// The source engine, connected read-only (RFC 0216 §2.1), through its provider (RFC 0255 §3.3).
