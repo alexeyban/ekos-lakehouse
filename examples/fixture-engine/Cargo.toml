@@ -1,0 +1,39 @@
+# RFC 0255 phase 5: a source engine built OUT OF TREE. Its own workspace, not a member of the
+# ekos-lakehouse workspace: it depends on the public crates exactly as a sold engine's private
+# repository would, and adding it changed no public crate. `scripts/out-of-tree-engine.sh` builds
+# and tests it; docs/writing-a-source-engine.md walks through this code.
+[workspace]
+resolver = "3"
+
+[package]
+name = "ekos-lakehouse-fixture-engine"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "A fixture source engine for EKOS Lakehouse, built out of tree (RFC 0255)"
+
+[[bin]]
+name = "ekos-lakehouse-fixture"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The public Lakehouse crates (a private repository would use their git URL and a tag).
+ekos-lakehouse-bronze = { path = "../../crates/bronze" }
+ekos-lakehouse-ext = { path = "../../crates/lakehouse-ext" }
+ekos-lakehouse-trino = { path = "../../crates/trino" }
+# The public EKOS crates.
+ekos = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-common = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-compiler-core = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-kir = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-migrate = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-migrate-validate = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-pg-live = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+toml = "0.8"
