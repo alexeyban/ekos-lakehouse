@@ -1,0 +1,1362 @@
+{
+  "format": 3,
+  "settings": {
+    "source-catalog": "idempiere",
+    "target-catalog": "iceberg",
+    "namespace-prefix": "bronze_idem_",
+    "watermarks": {},
+    "full-refresh-max-rows": 5000000,
+    "application-watermark": "UPDATED",
+    "bronze-schedule": "0 * * * *",
+    "maintenance-schedule": "0 3 * * *",
+    "source-engine": "oracle"
+  },
+  "tables": [
+    {
+      "schema": "ADEMPIERE",
+      "table": "AD_ALERT",
+      "oid": 76161,
+      "namespace": "bronze_idem_ADEMPIERE",
+      "primary_key": [
+        "AD_ALERT_ID"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "full"
+        },
+        "evidence": [
+          "about 1 rows"
+        ],
+        "notes": [
+          "update class raw_sql_skips_updated: some code updates the table without setting UPDATED, so it is loaded in full"
+        ]
+      },
+      "columns": [
+        {
+          "column": "AD_ALERT_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ALERT_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_CLIENT_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_CLIENT_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_ORG_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ORG_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "ISACTIVE",
+          "pg_type": "CHAR(1)",
+          "trino_type": "char(1)",
+          "iceberg_type": "varchar",
+          "expr": "CAST(\"ISACTIVE\" AS varchar)",
+          "lossiness": "as_text",
+          "rule": "char-padded",
+          "rationale": "CHAR(1) landed as varchar",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "CREATED",
+          "pg_type": "DATE",
+          "trino_type": "timestamp(0)",
+          "iceberg_type": "timestamp(6)",
+          "expr": "CAST(\"CREATED\" AS timestamp(6))",
+          "lossiness": "widening",
+          "rule": "oracle-date",
+          "rationale": "an Oracle DATE holds a time of day to the second",
+          "compare": {
+            "rule": "timestamp_naive"
+          }
+        },
+        {
+          "column": "CREATEDBY",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"CREATEDBY\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "UPDATED",
+          "pg_type": "DATE",
+          "trino_type": "timestamp(0)",
+          "iceberg_type": "timestamp(6)",
+          "expr": "CAST(\"UPDATED\" AS timestamp(6))",
+          "lossiness": "widening",
+          "rule": "oracle-date",
+          "rationale": "an Oracle DATE holds a time of day to the second",
+          "compare": {
+            "rule": "timestamp_naive"
+          }
+        },
+        {
+          "column": "UPDATEDBY",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"UPDATEDBY\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "NAME",
+          "pg_type": "VARCHAR2(60 CHAR)",
+          "trino_type": "varchar(60)",
+          "iceberg_type": "varchar",
+          "expr": "\"NAME\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "DESCRIPTION",
+          "pg_type": "VARCHAR2(255 CHAR)",
+          "trino_type": "varchar(255)",
+          "iceberg_type": "varchar",
+          "expr": "\"DESCRIPTION\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "HELP",
+          "pg_type": "VARCHAR2(2000 CHAR)",
+          "trino_type": "varchar(2000)",
+          "iceberg_type": "varchar",
+          "expr": "\"HELP\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "ALERTMESSAGE",
+          "pg_type": "VARCHAR2(2000 CHAR)",
+          "trino_type": "varchar(2000)",
+          "iceberg_type": "varchar",
+          "expr": "\"ALERTMESSAGE\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "ENFORCECLIENTSECURITY",
+          "pg_type": "CHAR(1)",
+          "trino_type": "char(1)",
+          "iceberg_type": "varchar",
+          "expr": "CAST(\"ENFORCECLIENTSECURITY\" AS varchar)",
+          "lossiness": "as_text",
+          "rule": "char-padded",
+          "rationale": "CHAR(1) landed as varchar",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "ENFORCEROLESECURITY",
+          "pg_type": "CHAR(1)",
+          "trino_type": "char(1)",
+          "iceberg_type": "varchar",
+          "expr": "CAST(\"ENFORCEROLESECURITY\" AS varchar)",
+          "lossiness": "as_text",
+          "rule": "char-padded",
+          "rationale": "CHAR(1) landed as varchar",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "AD_ALERTPROCESSOR_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ALERTPROCESSOR_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "ISVALID",
+          "pg_type": "CHAR(1)",
+          "trino_type": "char(1)",
+          "iceberg_type": "varchar",
+          "expr": "CAST(\"ISVALID\" AS varchar)",
+          "lossiness": "as_text",
+          "rule": "char-padded",
+          "rationale": "CHAR(1) landed as varchar",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "AD_ALERT_UU",
+          "pg_type": "VARCHAR2(36 CHAR)",
+          "trino_type": "varchar(36)",
+          "iceberg_type": "varchar",
+          "expr": "\"AD_ALERT_UU\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "ALERTSUBJECT",
+          "pg_type": "VARCHAR2(255 CHAR)",
+          "trino_type": "varchar(255)",
+          "iceberg_type": "varchar",
+          "expr": "\"ALERTSUBJECT\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        }
+      ],
+      "facts": {
+        "foreign_keys": [
+          {
+            "name": "CALERTPROCESSOR_ADALERT",
+            "columns": [
+              "AD_ALERTPROCESSOR_ID"
+            ],
+            "ref_schema": "ADEMPIERE",
+            "ref_table": "AD_ALERTPROCESSOR",
+            "ref_columns": [
+              "AD_ALERTPROCESSOR_ID"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "AD_ALERT_ID",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "AD_CLIENT_ID",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "AD_ORG_ID",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "ISACTIVE",
+            "attnum": 4,
+            "not_null": true,
+            "has_default": true,
+            "check": {
+              "constraint": "SYS_C0019495",
+              "values": [
+                "Y",
+                "N"
+              ]
+            },
+            "code": {
+              "boolean": true
+            }
+          },
+          {
+            "name": "CREATED",
+            "attnum": 5,
+            "not_null": true,
+            "has_default": true
+          },
+          {
+            "name": "CREATEDBY",
+            "attnum": 6,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "UPDATED",
+            "attnum": 7,
+            "not_null": true,
+            "has_default": true
+          },
+          {
+            "name": "UPDATEDBY",
+            "attnum": 8,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "NAME",
+            "attnum": 9,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "DESCRIPTION",
+            "attnum": 10,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "HELP",
+            "attnum": 11,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "ALERTMESSAGE",
+            "attnum": 12,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "ENFORCECLIENTSECURITY",
+            "attnum": 13,
+            "not_null": true,
+            "has_default": true,
+            "check": {
+              "constraint": "SYS_C0019498",
+              "values": [
+                "Y",
+                "N"
+              ]
+            },
+            "code": {
+              "boolean": true
+            }
+          },
+          {
+            "name": "ENFORCEROLESECURITY",
+            "attnum": 14,
+            "not_null": true,
+            "has_default": true,
+            "check": {
+              "constraint": "SYS_C0019494",
+              "values": [
+                "Y",
+                "N"
+              ]
+            },
+            "code": {
+              "boolean": true
+            }
+          },
+          {
+            "name": "AD_ALERTPROCESSOR_ID",
+            "attnum": 15,
+            "not_null": false,
+            "has_default": false,
+            "code": {
+              "references": "AD_AlertProcessor"
+            }
+          },
+          {
+            "name": "ISVALID",
+            "attnum": 16,
+            "not_null": true,
+            "has_default": true,
+            "code": {
+              "boolean": true
+            }
+          },
+          {
+            "name": "AD_ALERT_UU",
+            "attnum": 17,
+            "not_null": false,
+            "has_default": true
+          },
+          {
+            "name": "ALERTSUBJECT",
+            "attnum": 18,
+            "not_null": true,
+            "has_default": false
+          }
+        ]
+      }
+    },
+    {
+      "schema": "ADEMPIERE",
+      "table": "AD_ALERTPROCESSOR",
+      "oid": 76174,
+      "namespace": "bronze_idem_ADEMPIERE",
+      "primary_key": [
+        "AD_ALERTPROCESSOR_ID"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "incremental",
+          "watermark": "UPDATED",
+          "keyset_deletes": false
+        },
+        "evidence": [
+          "update class po_only: the application sets UPDATED on every write it makes (EKOS write behaviour, RFC 0212)",
+          "an update made outside the application does not set UPDATED: the load misses it and the next reconciliation shows it",
+          "deletes: every run (deleted_by_users) by bucketed key diff, recorded as delete"
+        ],
+        "notes": [],
+        "deletes": {
+          "method": "bucketed_key_diff",
+          "cadence": {
+            "every": "run"
+          },
+          "kind": "delete",
+          "contradicts_code": false,
+          "classes": [
+            "deleted_by_users"
+          ]
+        }
+      },
+      "columns": [
+        {
+          "column": "AD_ALERTPROCESSOR_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ALERTPROCESSOR_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_CLIENT_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_CLIENT_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_ORG_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ORG_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "ISACTIVE",
+          "pg_type": "CHAR(1)",
+          "trino_type": "char(1)",
+          "iceberg_type": "varchar",
+          "expr": "CAST(\"ISACTIVE\" AS varchar)",
+          "lossiness": "as_text",
+          "rule": "char-padded",
+          "rationale": "CHAR(1) landed as varchar",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "CREATED",
+          "pg_type": "DATE",
+          "trino_type": "timestamp(0)",
+          "iceberg_type": "timestamp(6)",
+          "expr": "CAST(\"CREATED\" AS timestamp(6))",
+          "lossiness": "widening",
+          "rule": "oracle-date",
+          "rationale": "an Oracle DATE holds a time of day to the second",
+          "compare": {
+            "rule": "timestamp_naive"
+          }
+        },
+        {
+          "column": "CREATEDBY",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"CREATEDBY\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "UPDATED",
+          "pg_type": "DATE",
+          "trino_type": "timestamp(0)",
+          "iceberg_type": "timestamp(6)",
+          "expr": "CAST(\"UPDATED\" AS timestamp(6))",
+          "lossiness": "widening",
+          "rule": "oracle-date",
+          "rationale": "an Oracle DATE holds a time of day to the second",
+          "compare": {
+            "rule": "timestamp_naive"
+          }
+        },
+        {
+          "column": "UPDATEDBY",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"UPDATEDBY\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "NAME",
+          "pg_type": "VARCHAR2(60 CHAR)",
+          "trino_type": "varchar(60)",
+          "iceberg_type": "varchar",
+          "expr": "\"NAME\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "DESCRIPTION",
+          "pg_type": "VARCHAR2(255 CHAR)",
+          "trino_type": "varchar(255)",
+          "iceberg_type": "varchar",
+          "expr": "\"DESCRIPTION\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "FREQUENCYTYPE",
+          "pg_type": "CHAR(1)",
+          "trino_type": "char(1)",
+          "iceberg_type": "varchar",
+          "expr": "CAST(\"FREQUENCYTYPE\" AS varchar)",
+          "lossiness": "as_text",
+          "rule": "char-padded",
+          "rationale": "CHAR(1) landed as varchar",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "FREQUENCY",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"FREQUENCY\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "DATELASTRUN",
+          "pg_type": "DATE",
+          "trino_type": "timestamp(0)",
+          "iceberg_type": "timestamp(6)",
+          "expr": "CAST(\"DATELASTRUN\" AS timestamp(6))",
+          "lossiness": "widening",
+          "rule": "oracle-date",
+          "rationale": "an Oracle DATE holds a time of day to the second",
+          "compare": {
+            "rule": "timestamp_naive"
+          }
+        },
+        {
+          "column": "DATENEXTRUN",
+          "pg_type": "DATE",
+          "trino_type": "timestamp(0)",
+          "iceberg_type": "timestamp(6)",
+          "expr": "CAST(\"DATENEXTRUN\" AS timestamp(6))",
+          "lossiness": "widening",
+          "rule": "oracle-date",
+          "rationale": "an Oracle DATE holds a time of day to the second",
+          "compare": {
+            "rule": "timestamp_naive"
+          }
+        },
+        {
+          "column": "SUPERVISOR_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"SUPERVISOR_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "KEEPLOGDAYS",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"KEEPLOGDAYS\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "PROCESSING",
+          "pg_type": "CHAR(1)",
+          "trino_type": "char(1)",
+          "iceberg_type": "varchar",
+          "expr": "CAST(\"PROCESSING\" AS varchar)",
+          "lossiness": "as_text",
+          "rule": "char-padded",
+          "rationale": "CHAR(1) landed as varchar",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "AD_ALERTPROCESSOR_UU",
+          "pg_type": "VARCHAR2(36 CHAR)",
+          "trino_type": "varchar(36)",
+          "iceberg_type": "varchar",
+          "expr": "\"AD_ALERTPROCESSOR_UU\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "AD_SCHEDULE_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_SCHEDULE_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        }
+      ],
+      "facts": {
+        "foreign_keys": [
+          {
+            "name": "ADSCHEDULE_ADALERTPROCESSOR",
+            "columns": [
+              "AD_SCHEDULE_ID"
+            ],
+            "ref_schema": "ADEMPIERE",
+            "ref_table": "AD_SCHEDULE",
+            "ref_columns": [
+              "AD_SCHEDULE_ID"
+            ]
+          },
+          {
+            "name": "ADUSER_CALERTPROCESSOR",
+            "columns": [
+              "SUPERVISOR_ID"
+            ],
+            "ref_schema": "ADEMPIERE",
+            "ref_table": "AD_USER",
+            "ref_columns": [
+              "AD_USER_ID"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "AD_ALERTPROCESSOR_ID",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "AD_CLIENT_ID",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "AD_ORG_ID",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "ISACTIVE",
+            "attnum": 4,
+            "not_null": true,
+            "has_default": true,
+            "check": {
+              "constraint": "SYS_C0022242",
+              "values": [
+                "Y",
+                "N"
+              ]
+            },
+            "code": {
+              "boolean": true
+            }
+          },
+          {
+            "name": "CREATED",
+            "attnum": 5,
+            "not_null": true,
+            "has_default": true
+          },
+          {
+            "name": "CREATEDBY",
+            "attnum": 6,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "UPDATED",
+            "attnum": 7,
+            "not_null": true,
+            "has_default": true
+          },
+          {
+            "name": "UPDATEDBY",
+            "attnum": 8,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "NAME",
+            "attnum": 9,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "DESCRIPTION",
+            "attnum": 10,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "FREQUENCYTYPE",
+            "attnum": 11,
+            "not_null": false,
+            "has_default": true
+          },
+          {
+            "name": "FREQUENCY",
+            "attnum": 12,
+            "not_null": false,
+            "has_default": true
+          },
+          {
+            "name": "DATELASTRUN",
+            "attnum": 13,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "DATENEXTRUN",
+            "attnum": 14,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "SUPERVISOR_ID",
+            "attnum": 15,
+            "not_null": true,
+            "has_default": false,
+            "code": {
+              "references": "AD_User"
+            }
+          },
+          {
+            "name": "KEEPLOGDAYS",
+            "attnum": 16,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "PROCESSING",
+            "attnum": 17,
+            "not_null": false,
+            "has_default": false,
+            "code": {
+              "boolean": true
+            }
+          },
+          {
+            "name": "AD_ALERTPROCESSOR_UU",
+            "attnum": 18,
+            "not_null": false,
+            "has_default": true
+          },
+          {
+            "name": "AD_SCHEDULE_ID",
+            "attnum": 19,
+            "not_null": true,
+            "has_default": true,
+            "code": {
+              "references": "AD_Schedule"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "schema": "ADEMPIERE",
+      "table": "AD_ALERTRECIPIENT",
+      "oid": 76175,
+      "namespace": "bronze_idem_ADEMPIERE",
+      "primary_key": [
+        "AD_ALERTRECIPIENT_ID"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "incremental",
+          "watermark": "UPDATED",
+          "keyset_deletes": false
+        },
+        "evidence": [
+          "update class po_only: the application sets UPDATED on every write it makes (EKOS write behaviour, RFC 0212)",
+          "an update made outside the application does not set UPDATED: the load misses it and the next reconciliation shows it",
+          "deletes: every run (deleted_by_users) by bucketed key diff, recorded as delete"
+        ],
+        "notes": [],
+        "deletes": {
+          "method": "bucketed_key_diff",
+          "cadence": {
+            "every": "run"
+          },
+          "kind": "delete",
+          "contradicts_code": false,
+          "classes": [
+            "deleted_by_users"
+          ]
+        }
+      },
+      "columns": [
+        {
+          "column": "AD_ALERTRECIPIENT_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ALERTRECIPIENT_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_CLIENT_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_CLIENT_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_ORG_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ORG_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "ISACTIVE",
+          "pg_type": "CHAR(1)",
+          "trino_type": "char(1)",
+          "iceberg_type": "varchar",
+          "expr": "CAST(\"ISACTIVE\" AS varchar)",
+          "lossiness": "as_text",
+          "rule": "char-padded",
+          "rationale": "CHAR(1) landed as varchar",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "CREATED",
+          "pg_type": "DATE",
+          "trino_type": "timestamp(0)",
+          "iceberg_type": "timestamp(6)",
+          "expr": "CAST(\"CREATED\" AS timestamp(6))",
+          "lossiness": "widening",
+          "rule": "oracle-date",
+          "rationale": "an Oracle DATE holds a time of day to the second",
+          "compare": {
+            "rule": "timestamp_naive"
+          }
+        },
+        {
+          "column": "CREATEDBY",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"CREATEDBY\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "UPDATED",
+          "pg_type": "DATE",
+          "trino_type": "timestamp(0)",
+          "iceberg_type": "timestamp(6)",
+          "expr": "CAST(\"UPDATED\" AS timestamp(6))",
+          "lossiness": "widening",
+          "rule": "oracle-date",
+          "rationale": "an Oracle DATE holds a time of day to the second",
+          "compare": {
+            "rule": "timestamp_naive"
+          }
+        },
+        {
+          "column": "UPDATEDBY",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"UPDATEDBY\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_ALERT_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ALERT_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_USER_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_USER_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_ROLE_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ROLE_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "AD_ALERTRECIPIENT_UU",
+          "pg_type": "VARCHAR2(36 CHAR)",
+          "trino_type": "varchar(36)",
+          "iceberg_type": "varchar",
+          "expr": "\"AD_ALERTRECIPIENT_UU\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        }
+      ],
+      "facts": {
+        "foreign_keys": [
+          {
+            "name": "ADALERT_ADALERTRECIPIENT",
+            "columns": [
+              "AD_ALERT_ID"
+            ],
+            "ref_schema": "ADEMPIERE",
+            "ref_table": "AD_ALERT",
+            "ref_columns": [
+              "AD_ALERT_ID"
+            ]
+          },
+          {
+            "name": "ADROLE_ADALTERTRECIPIENT",
+            "columns": [
+              "AD_ROLE_ID"
+            ],
+            "ref_schema": "ADEMPIERE",
+            "ref_table": "AD_ROLE",
+            "ref_columns": [
+              "AD_ROLE_ID"
+            ]
+          },
+          {
+            "name": "ADUSER_ADALERTRECIPIENT",
+            "columns": [
+              "AD_USER_ID"
+            ],
+            "ref_schema": "ADEMPIERE",
+            "ref_table": "AD_USER",
+            "ref_columns": [
+              "AD_USER_ID"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "AD_ALERTRECIPIENT_ID",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "AD_CLIENT_ID",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "AD_ORG_ID",
+            "attnum": 3,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "ISACTIVE",
+            "attnum": 4,
+            "not_null": true,
+            "has_default": true,
+            "check": {
+              "constraint": "SYS_C0021935",
+              "values": [
+                "Y",
+                "N"
+              ]
+            },
+            "code": {
+              "boolean": true
+            }
+          },
+          {
+            "name": "CREATED",
+            "attnum": 5,
+            "not_null": true,
+            "has_default": true
+          },
+          {
+            "name": "CREATEDBY",
+            "attnum": 6,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "UPDATED",
+            "attnum": 7,
+            "not_null": true,
+            "has_default": true
+          },
+          {
+            "name": "UPDATEDBY",
+            "attnum": 8,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "AD_ALERT_ID",
+            "attnum": 9,
+            "not_null": true,
+            "has_default": false,
+            "code": {
+              "references": "AD_Alert"
+            }
+          },
+          {
+            "name": "AD_USER_ID",
+            "attnum": 10,
+            "not_null": false,
+            "has_default": false,
+            "code": {
+              "references": "AD_User"
+            }
+          },
+          {
+            "name": "AD_ROLE_ID",
+            "attnum": 11,
+            "not_null": false,
+            "has_default": false,
+            "code": {
+              "references": "AD_Role"
+            }
+          },
+          {
+            "name": "AD_ALERTRECIPIENT_UU",
+            "attnum": 12,
+            "not_null": false,
+            "has_default": true
+          }
+        ]
+      }
+    },
+    {
+      "schema": "ADEMPIERE",
+      "table": "AD_ATTRIBUTE_VALUE",
+      "oid": 76179,
+      "namespace": "bronze_idem_ADEMPIERE",
+      "primary_key": [
+        "AD_ATTRIBUTE_ID",
+        "RECORD_ID"
+      ],
+      "decision": {
+        "mode": {
+          "mode": "full"
+        },
+        "evidence": [
+          "about 0 rows"
+        ],
+        "notes": []
+      },
+      "columns": [
+        {
+          "column": "AD_ATTRIBUTE_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"AD_ATTRIBUTE_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "RECORD_ID",
+          "pg_type": "NUMBER(10,0)",
+          "trino_type": "decimal(10,0)",
+          "iceberg_type": "bigint",
+          "expr": "CAST(\"RECORD_ID\" AS bigint)",
+          "lossiness": "exact",
+          "rule": "number-bigint",
+          "rationale": "NUMBER(10,0) holds at most 18 digits",
+          "compare": {
+            "rule": "int"
+          }
+        },
+        {
+          "column": "V_NUMBER",
+          "pg_type": "NUMBER",
+          "trino_type": "number",
+          "iceberg_type": "decimal(38,10)",
+          "expr": "CAST(\"V_NUMBER\" AS decimal(38,10))",
+          "lossiness": "narrowing_safe",
+          "rule": "number-no-values",
+          "rationale": "unconstrained NUMBER with no values to measure; landed at scale 10, and a value with more digits fails the next reconciliation",
+          "compare": {
+            "rule": "decimal",
+            "scale": 10
+          }
+        },
+        {
+          "column": "V_DATE",
+          "pg_type": "DATE",
+          "trino_type": "timestamp(0)",
+          "iceberg_type": "timestamp(6)",
+          "expr": "CAST(\"V_DATE\" AS timestamp(6))",
+          "lossiness": "widening",
+          "rule": "oracle-date",
+          "rationale": "an Oracle DATE holds a time of day to the second",
+          "compare": {
+            "rule": "timestamp_naive"
+          }
+        },
+        {
+          "column": "V_STRING",
+          "pg_type": "VARCHAR2(2000 CHAR)",
+          "trino_type": "varchar(2000)",
+          "iceberg_type": "varchar",
+          "expr": "\"V_STRING\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        },
+        {
+          "column": "AD_ATTRIBUTE_VALUE_UU",
+          "pg_type": "VARCHAR2(36 CHAR)",
+          "trino_type": "varchar(36)",
+          "iceberg_type": "varchar",
+          "expr": "\"AD_ATTRIBUTE_VALUE_UU\"",
+          "lossiness": "exact",
+          "rule": "varchar",
+          "rationale": "Iceberg strings have no length; Oracle stores '' as NULL",
+          "compare": {
+            "rule": "text"
+          }
+        }
+      ],
+      "facts": {
+        "comment": "Values for user defined attributes",
+        "foreign_keys": [
+          {
+            "name": "ADATTRIBUTE_ADATTRIBUTEVALUE",
+            "columns": [
+              "AD_ATTRIBUTE_ID"
+            ],
+            "ref_schema": "ADEMPIERE",
+            "ref_table": "AD_ATTRIBUTE",
+            "ref_columns": [
+              "AD_ATTRIBUTE_ID"
+            ]
+          }
+        ],
+        "columns": [
+          {
+            "name": "AD_ATTRIBUTE_ID",
+            "attnum": 1,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "RECORD_ID",
+            "attnum": 2,
+            "not_null": true,
+            "has_default": false
+          },
+          {
+            "name": "V_NUMBER",
+            "attnum": 3,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "V_DATE",
+            "attnum": 4,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "V_STRING",
+            "attnum": 5,
+            "not_null": false,
+            "has_default": false
+          },
+          {
+            "name": "AD_ATTRIBUTE_VALUE_UU",
+            "attnum": 6,
+            "not_null": false,
+            "has_default": true
+          }
+        ]
+      }
+    }
+  ],
+  "refused": [
+    {
+      "schema": "ADEMPIERE",
+      "table": "C_CONVERSION_RATE",
+      "oid": 76474,
+      "reasons": [
+        "MULTIPLYRATE (NUMBER): unconstrained NUMBER whose data uses precision 39, scale 38: more digits than Iceberg's 38 (a stored division result?)",
+        "DIVIDERATE (NUMBER): unconstrained NUMBER whose data uses precision 40, scale 39: more digits than Iceberg's 38 (a stored division result?)"
+      ]
+    }
+  ]
+}
