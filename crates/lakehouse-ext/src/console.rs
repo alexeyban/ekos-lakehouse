@@ -42,6 +42,24 @@ pub fn pages() -> Vec<ConsolePage> {
                     ..Default::default()
                 },
                 Panel {
+                    id: "dashboards",
+                    title: "Dashboards: can the numbers be trusted today",
+                    command: vec!["lakehouse", "dashboards", "status", "--json"],
+                    view: View::Table {
+                        rows: "/dashboards",
+                        columns: vec![
+                            Column::new("/dashboard_id", "Id"),
+                            Column::new("/title", "Dashboard"),
+                            Column::badge("/state", "State"),
+                            Column::new("/as_of", "Data as of"),
+                            Column::new("/evidence/0", "Why"),
+                        ],
+                    },
+                    empty: "No dashboards recorded. Set [extensions.lakehouse.dashboards] and \
+                        read them from Superset (Read dashboards from Superset).",
+                    ..Default::default()
+                },
+                Panel {
                     id: "proposals",
                     title: "Waiting for a merge",
                     command: vec!["lakehouse", "proposals", "--json"],
@@ -118,6 +136,11 @@ pub fn pages() -> Vec<ConsolePage> {
                 Action {
                     label: "Sync source changes",
                     command: vec!["lakehouse", "sync"],
+                    ..Default::default()
+                },
+                Action {
+                    label: "Read dashboards from Superset",
+                    command: vec!["lakehouse", "dashboards", "sync"],
                     ..Default::default()
                 },
                 Action {
@@ -1070,7 +1093,9 @@ mod tests {
             p.panels.iter().map(|x| x.command[1]).collect();
         assert_eq!(
             cmds,
-            ["proposals", "status", "tables"].into_iter().collect()
+            ["dashboards", "proposals", "status", "tables"]
+                .into_iter()
+                .collect()
         );
     }
 

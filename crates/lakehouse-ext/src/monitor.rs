@@ -155,14 +155,7 @@ pub fn alert(h: &[Health], state_dir: &Path, webhook: Option<&str>) -> anyhow::R
         if let Some(url) = webhook {
             let body = json!({"text": text, "table": table, "layer": layer, "state": to.name(),
                               "previous": from.map(State::name), "evidence": x.evidence, "cause": x.cause});
-            reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()?
-                .post(url)
-                .json(&body)
-                .send()
-                .and_then(|r| r.error_for_status())
-                .map_err(|e| anyhow::anyhow!("posting the alert: {e}"))?;
+            post_alert(url, &body)?;
         }
         sent.push(text);
     }
@@ -173,6 +166,19 @@ pub fn alert(h: &[Health], state_dir: &Path, webhook: Option<&str>) -> anyhow::R
     std::fs::create_dir_all(state_dir)?;
     std::fs::write(&path, serde_json::to_string_pretty(&now)? + "\n")?;
     Ok(sent)
+}
+
+/// Post one alert to the webhook; Slack, Teams and PagerDuty read its `text`.
+pub fn post_alert(url: &str, body: &Value) -> anyhow::Result<()> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?
+        .post(url)
+        .json(body)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| anyhow::anyhow!("posting the alert: {e}"))?;
+    Ok(())
 }
 
 /// OTLP/HTTP JSON (`ExportMetricsServiceRequest`) of the current health (RFC 0196 §3).

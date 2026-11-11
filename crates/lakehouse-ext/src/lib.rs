@@ -8,6 +8,7 @@ pub mod ask_cmd;
 pub mod capabilities;
 pub mod check;
 pub mod console;
+pub mod dashboards;
 pub mod deletes;
 pub mod docs;
 pub mod doctor;
@@ -96,6 +97,15 @@ impl EkosExtension for LakehouseExtension {
                 }}
             }),
             serde_json::json!({
+                "name": "ekos_dashboard_health",
+                "description": "EKOS Lakehouse (RFC 0258): every published Superset dashboard's health — trusted, late, unverified or failing — per chart, with the facts that put it there (the table, the run, the divergence), the chain chart → mart → silver → bronze, and data as of (the earliest last successful source load on the chain). The state of the data pipeline behind the numbers, not whether they answer the business question. Read-only: it cannot rerun, republish or certify anything.",
+                "inputSchema": {"type": "object", "properties": {
+                    "dashboard": {"type": "string", "description": "Only this dashboard, by Superset id or title"},
+                    "only_untrusted": {"type": "boolean", "description": "Leave out trusted dashboards"},
+                    "late_after_minutes": {"type": "integer", "description": "A table with no successful run for this long is late (default 120)"}
+                }}
+            }),
+            serde_json::json!({
                 "name": "ekos_table_health",
                 "description": "EKOS Lakehouse: one table's health per layer with its evidence, recent runs, reconciliations (tiers, divergences, planted control) and schema changes. Read-only.",
                 "inputSchema": {"type": "object", "required": ["table"], "properties": {
@@ -110,7 +120,10 @@ impl EkosExtension for LakehouseExtension {
         // All read only through the store they are handed (RFC 0191).
         matches!(
             name,
-            "ekos_pipeline_status" | "ekos_table_health" | "ekos_pentaho_translation"
+            "ekos_pipeline_status"
+                | "ekos_table_health"
+                | "ekos_pentaho_translation"
+                | "ekos_dashboard_health"
         )
     }
 
@@ -133,6 +146,7 @@ impl EkosExtension for LakehouseExtension {
                     serde_json::json!({"tables": shown, "summary": monitor::render(&h).lines().last()}),
                 )
             })()),
+            "ekos_dashboard_health" => Some(dashboards::mcp_answer(ledger, args, late)),
             "ekos_pentaho_translation" => Some((|| {
                 let package = args["package"].as_str();
                 let step = args["step"].as_str();
@@ -816,6 +830,41 @@ impl EkosExtension for LakehouseExtension {
                         ),
                 )
                 .subcommand(
+                    clap::Command::new("dashboards")
+                        .about(
+                            "Whether each published Superset dashboard can be trusted today: the \
+                             state of the data behind every chart (EKOS RFC 0258)",
+                        )
+                        .subcommand_required(true)
+                        .subcommand(
+                            clap::Command::new("status")
+                                .about("Dashboards and charts with their state, evidence and data as of")
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output"),
+                                ),
+                        )
+                        .subcommand(clap::Command::new("sync").about(
+                            "Read the dashboards, charts and datasets from Superset (reads only) and \
+                             record which tables each chart reads",
+                        ))
+                        .subcommand(
+                            clap::Command::new("publish-health")
+                                .about(
+                                    "Write each dashboard's state onto it in Superset: a header and \
+                                     the certification (needs superset-header = true)",
+                                )
+                                .arg(
+                                    clap::Arg::new("dry-run")
+                                        .long("dry-run")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Say what would change; write nothing"),
+                                ),
+                        ),
+                )
+                .subcommand(
                     clap::Command::new("alert")
                         .about("Post each health transition once to the alert webhook (RFC 0196)"),
                 )
@@ -981,6 +1030,15 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse proposals", Class::Read, false),
             // Reach a webhook / a collector outside the home.
             ("lakehouse alert", Class::External, false),
+            // EKOS RFC 0258: status reads the ledger only; sync reads Superset and records facts;
+            // publish-health writes a header and the certification onto dashboards in Superset.
+            ("lakehouse dashboards status", Class::Read, false),
+            ("lakehouse dashboards sync", Class::External, false),
+            (
+                "lakehouse dashboards publish-health",
+                Class::External,
+                false,
+            ),
             ("lakehouse metrics", Class::External, false),
             // Reads the live source; commits and branches in the pipeline repository.
             ("lakehouse sync", Class::External, false),
@@ -1081,6 +1139,7 @@ impl EkosExtension for LakehouseExtension {
             Some(("docs", m)) => docs::cmd(ctx, m, engines),
             Some(("requirements", m)) => requirements_cmd(ctx, m, engines).await,
             Some(("marts", m)) => marts_cmd(ctx, m, engines).await,
+            Some(("dashboards", m)) => dashboards_cmd(ctx, m, engines),
             Some(("run", m)) => {
                 let settings = settings::load_with(ctx.config, engines)?;
                 let Some(url) = settings.dagster_url.clone() else {
@@ -1429,7 +1488,17 @@ impl EkosExtension for LakehouseExtension {
                     None => None,
                 };
                 let dir = pipeline_dir(&settings, ctx).join(".lakehouse");
-                let sent = off_runtime(|| monitor::alert(&h, &dir, webhook.as_deref()))?;
+                let mut sent = off_runtime(|| monitor::alert(&h, &dir, webhook.as_deref()))?;
+                // EKOS RFC 0258: a dashboard that leaves `trusted`.
+                let dash = {
+                    let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+                    dashboards::health(store.as_ref(), settings.late_after_minutes.unwrap_or(120))?
+                };
+                if !dash.is_empty() {
+                    sent.extend(off_runtime(|| {
+                        dashboards::alert(&dash, &dir, webhook.as_deref())
+                    })?);
+                }
                 for t in &sent {
                     println!("{t}");
                 }
@@ -2556,6 +2625,87 @@ fn pipeline_dir(s: &settings::Settings, ctx: &CommandContext<'_>) -> std::path::
 }
 
 /// Run blocking database work on its own thread, off the async runtime (the clients block).
+fn dashboards_cmd(
+    ctx: &CommandContext<'_>,
+    m: &clap::ArgMatches,
+    engines: &engines::Engines,
+) -> anyhow::Result<()> {
+    let settings = settings::load_with(ctx.config, engines)?;
+    let late = settings.late_after_minutes.unwrap_or(120);
+    let ds = settings.dashboards.clone();
+    match m.subcommand() {
+        Some(("status", m)) => {
+            let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+            let h = dashboards::health(store.as_ref(), late)?;
+            if m.get_flag("json") {
+                // `as_of` in words beside the time stamp, for the console's table.
+                let rows: Vec<serde_json::Value> = h
+                    .iter()
+                    .map(|d| {
+                        let mut v = serde_json::to_value(d).unwrap_or_default();
+                        v["as_of"] = serde_json::json!(
+                            d.data_as_of
+                                .map(dashboards::when)
+                                .unwrap_or_else(|| "unknown".into())
+                        );
+                        v
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "dashboards": rows,
+                        "not_evaluated": ekos_lakehouse_health::dashboard::NOT_EVALUATED,
+                    }))?
+                );
+            } else {
+                print!("{}", dashboards::render(&h));
+            }
+            Ok(())
+        }
+        Some(("sync", _)) => {
+            let read = off_runtime(|| {
+                let sup = dashboards::Superset::connect(&ds)?;
+                dashboards::read_superset(&ds, &sup)
+            })?;
+            let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+            let run = format!("dashboards-{}", monitor::now());
+            let (n, removed) = dashboards::sync(store.as_ref(), &read, late, &run)?;
+            for d in &read {
+                println!(
+                    "{:<6} {:<40} {} chart(s)",
+                    d.dashboard_id,
+                    d.title,
+                    d.charts.len()
+                );
+            }
+            println!("recorded {n} dashboard(s), {removed} no longer in Superset");
+            Ok(())
+        }
+        Some(("publish-health", m)) => {
+            let dry = m.get_flag("dry-run");
+            anyhow::ensure!(
+                dry || ds.superset_header == Some(true),
+                "writing to Superset is off: set superset-header = true in \
+                 [extensions.lakehouse.dashboards] (or use --dry-run)"
+            );
+            let h = {
+                let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+                dashboards::health(store.as_ref(), late)?
+            };
+            let said = off_runtime(|| {
+                let sup = dashboards::Superset::connect(&ds)?;
+                dashboards::publish(&ds, &h, &sup, dry)
+            })?;
+            for s in &said {
+                println!("{s}");
+            }
+            Ok(())
+        }
+        other => anyhow::bail!("unknown dashboards command {other:?}"),
+    }
+}
+
 fn off_runtime<T: Send>(f: impl FnOnce() -> anyhow::Result<T> + Send) -> anyhow::Result<T> {
     std::thread::scope(|s| {
         s.spawn(f)

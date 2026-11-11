@@ -98,6 +98,9 @@ pub struct Settings {
     /// EKOS RFC 0230: `[extensions.lakehouse.docs]` — where step 2's documentation is written and
     /// the store it is published to.
     pub docs: crate::docs::DocsSettings,
+    /// EKOS RFC 0258: `[extensions.lakehouse.dashboards]` — the Superset dashboards whose health
+    /// is evaluated, and whether the health is written onto them.
+    pub dashboards: crate::dashboards::DashboardsSettings,
     /// For `oracle`: the `[[databases]]` entry `source-database` names, filled in by [`load`].
     #[serde(skip)]
     pub database: Option<ekos_compiler_core::DatabaseConfig>,

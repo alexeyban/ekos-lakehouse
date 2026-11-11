@@ -2,6 +2,8 @@
 //! reduced to one state per table and layer, with the facts that put it there. Pure: the caller
 //! reads the ledger and supplies the clock.
 
+pub mod dashboard;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
