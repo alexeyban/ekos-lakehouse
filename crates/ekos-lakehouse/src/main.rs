@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     ekos::app::main_with(ekos::extension::Extensions::new(vec![Arc::new(
-        ekos_lakehouse_ext::LakehouseExtension,
+        ekos_lakehouse_ext::LakehouseExtension::new(),
     )]))
     .await
 }

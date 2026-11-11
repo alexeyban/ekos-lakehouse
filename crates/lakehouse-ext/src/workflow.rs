@@ -198,7 +198,7 @@ fn ledger_counts(ctx: &WorkflowContext<'_>) -> anyhow::Result<Counts> {
 }
 
 /// [`ekos::extension::EkosExtension::workflow_steps`].
-pub fn workflow_steps(ctx: &WorkflowContext<'_>) -> Vec<Step> {
+pub fn workflow_steps(ctx: &WorkflowContext<'_>, engines: &crate::engines::Engines) -> Vec<Step> {
     match ledger_counts(ctx) {
         Ok(c) => steps(
             &c,
@@ -208,8 +208,8 @@ pub fn workflow_steps(ctx: &WorkflowContext<'_>) -> Vec<Step> {
                     .as_ref(),
             ),
             requirements_states(ctx),
-            extraction_step(ctx),
-            marts_step(ctx),
+            extraction_step(ctx, engines),
+            marts_step(ctx, engines),
         ),
         Err(e) => ekos_semantic::workflow::EXTENSION_STEPS
             .iter()
@@ -242,8 +242,8 @@ fn requirements_states(ctx: &WorkflowContext<'_>) -> Option<Step> {
 }
 
 /// Step 7 from the marts' states (EKOS RFC 0228), when a requirement has been approved.
-fn marts_step(ctx: &WorkflowContext<'_>) -> Option<Step> {
-    let settings = crate::settings::load(ctx.config).ok()?;
+fn marts_step(ctx: &WorkflowContext<'_>, engines: &crate::engines::Engines) -> Option<Step> {
+    let settings = crate::settings::load_with(ctx.config, engines).ok()?;
     // A home project's config sits in its directory; otherwise beside the source.
     let config_path = ctx
         .config
@@ -281,17 +281,17 @@ fn marts_step(ctx: &WorkflowContext<'_>) -> Option<Step> {
 }
 
 /// Step 5 from the state directory: the proposal with the changes, against the approval.
-fn extraction_step(ctx: &WorkflowContext<'_>) -> Step {
+fn extraction_step(ctx: &WorkflowContext<'_>, engines: &crate::engines::Engines) -> Step {
     let read = || -> anyhow::Result<Step> {
         let dir = crate::extraction::state_dir(ctx.config, ctx.cwd);
-        let configured = crate::settings::load(ctx.config)
+        let configured = crate::settings::load_with(ctx.config, engines)
             .map(|s| s.pii)
             .unwrap_or_default();
         let p = crate::extraction::read_proposal(&dir)?;
         let changes = crate::extraction::read_changes(&dir)?;
         let f = p
             .as_ref()
-            .map(|p| crate::extraction::finalize(p, &changes, &configured));
+            .map(|p| crate::extraction::finalize(engines, p, &changes, &configured));
         let a = crate::extraction::read_approved(&dir)?;
         Ok(crate::extraction::step(p.as_ref(), f.as_ref(), a.as_ref()))
     };

@@ -31,58 +31,15 @@ pub fn build_plan_with(
         redaction,
         ps.modes.full_refresh_max_rows,
     )?;
-    let mut plan = ekos_lakehouse_bronze::plan_with(&sources, &ps, facts);
+    let spec = s.engines.spec(&ps.source_engine)?;
+    let mut plan = ekos_lakehouse_bronze::plan_for(spec.as_ref(), &sources, &ps, facts);
     ekos_lakehouse_bronze::attach_checks(&mut plan, &src.value_lists(&s.schemas(), redaction)?);
     Ok(plan)
 }
 
-/// The source engine, connected read-only (RFC 0216 §2.1).
+/// The source engine, connected read-only (RFC 0216 §2.1), through its provider (RFC 0255 §3.3).
 pub fn connect_source(s: &Settings, purpose: &str) -> anyhow::Result<Box<dyn source::Source>> {
-    match s.engine().as_str() {
-        "postgres" => Ok(Box::new(source::Postgres(connect_postgres(s, purpose)?))),
-        "oracle" => {
-            let db = s.database.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "an Oracle source needs `source-database` naming a [[databases]] entry"
-                )
-            })?;
-            Ok(Box::new(crate::source_oracle::Oracle::connect(
-                db, purpose,
-            )?))
-        }
-        _ => anyhow::bail!(
-            "{}",
-            ekos_lakehouse_bronze::engine::not_in_this_build(
-                &s.engine(),
-                &ekos_lakehouse_bronze::engine::builtins().map(|e| e.engine()),
-            )
-        ),
-    }
-}
-
-/// The PostgreSQL source, through EKOS's read-only session (RFC 0157).
-fn connect_postgres(s: &Settings, purpose: &str) -> anyhow::Result<ekos_pg_live::PgSource> {
-    let (host, port) = s.source_host_port()?;
-    let database = s
-        .source_database
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("set `source-database` in [extensions.lakehouse]"))?;
-    let conn =
-        ekos_migrate::connection::ConnectionRef::parse(&format!("postgres://{host}/{database}"))?
-            .with_secret_env(s.source_password_env.clone())
-            .with_secret_file(
-                s.source_password_file
-                    .as_ref()
-                    .map(std::path::PathBuf::from),
-            );
-    Ok(ekos_pg_live::PgSource::connect(
-        &conn,
-        &host,
-        port,
-        s.source_user.as_deref().unwrap_or("ekos"),
-        purpose,
-        &ekos_pg_live::SessionPolicy::default(),
-    )?)
+    s.engines.get(&s.engine())?.connect(s, purpose)
 }
 
 /// The deployed plan: `lakehouse.lock.json` in the pipeline repository.
@@ -91,6 +48,17 @@ pub fn read_lock(dir: &Path) -> anyhow::Result<Plan> {
     let text = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("{}: {e} (run `lakehouse generate` first)", path.display()))?;
     Ok(serde_json::from_str(&text)?)
+}
+
+/// The deployed plan, refused when it names a source engine this build lacks (RFC 0255 §3.1): a
+/// pipeline planned by a build with a sold engine, opened by the public build. For every command
+/// that reads the source or renders engine SQL from the lock.
+pub fn read_lock_for(dir: &Path, s: &Settings) -> anyhow::Result<Plan> {
+    let plan = read_lock(dir)?;
+    s.engines
+        .get(&plan.settings.source_engine)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", dir.join("lakehouse.lock.json").display()))?;
+    Ok(plan)
 }
 
 pub fn render_summary(p: &Plan) -> String {

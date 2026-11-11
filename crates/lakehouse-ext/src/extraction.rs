@@ -318,26 +318,23 @@ pub fn digest(
 
 /// Pure: the proposal with `changes` applied and `configured` (`ekos.toml`) masks first.
 pub fn finalize(
+    engines: &crate::engines::Engines,
     p: &Proposal,
     changes: &[TableChange],
     configured: &BTreeMap<String, MaskMethod>,
 ) -> Final {
     let mut plan = p.plan.clone();
-    let applied = match ekos_lakehouse_bronze::engine::builtin(&plan.settings.source_engine) {
-        Some(spec) => apply_all(spec, &mut plan, &p.facts, changes),
-        None => {
-            let why = ekos_lakehouse_bronze::engine::not_in_this_build(
-                &plan.settings.source_engine,
-                &ekos_lakehouse_bronze::engine::builtins().map(|s| s.engine()),
-            );
-            changes
-                .iter()
-                .map(|c| ekos_lakehouse_bronze::extraction::Applied {
-                    change: c.clone(),
-                    stale: Some(why.clone()),
-                })
-                .collect()
-        }
+    // The plan's own engine decides which columns can order a watermark; one this build lacks
+    // applies no change, and says why (RFC 0255 §3.1).
+    let applied = match engines.spec(&plan.settings.source_engine) {
+        Ok(spec) => apply_all(spec.as_ref(), &mut plan, &p.facts, changes),
+        Err(e) => changes
+            .iter()
+            .map(|c| ekos_lakehouse_bronze::extraction::Applied {
+                change: c.clone(),
+                stale: Some(e.to_string()),
+            })
+            .collect(),
     };
     let mut masks = configured.clone();
     let mut notes = vec![];
@@ -1128,14 +1125,25 @@ mod tests {
 
     #[test]
     fn the_digest_ignores_row_estimates_and_follows_decisions() {
-        let base = finalize(&proposal(&signed(), 10), &[], &BTreeMap::new());
-        let grown = finalize(&proposal(&signed(), 99_000), &[], &BTreeMap::new());
+        let base = finalize(
+            &crate::engines::Engines::builtin(),
+            &proposal(&signed(), 10),
+            &[],
+            &BTreeMap::new(),
+        );
+        let grown = finalize(
+            &crate::engines::Engines::builtin(),
+            &proposal(&signed(), 99_000),
+            &[],
+            &BTreeMap::new(),
+        );
         assert_eq!(
             base.digest, grown.digest,
             "evidence text carries the estimate"
         );
         let p = proposal(&signed(), 10);
         let full = finalize(
+            &crate::engines::Engines::builtin(),
             &p,
             &[change("C", Change::Mode(ModeChoice::Full), None)],
             &BTreeMap::new(),
@@ -1147,7 +1155,7 @@ mod tests {
         );
         // ekos.toml's mask wins, and says so.
         let configured = [("adempiere.a.email".to_string(), MaskMethod::Null)].into();
-        let f = finalize(&p, &[], &configured);
+        let f = finalize(&crate::engines::Engines::builtin(), &p, &[], &configured);
         assert_eq!(f.masks.len(), 1);
         assert!(f.notes[0].contains("wins over step 3"));
         assert_ne!(f.digest, base.digest);
@@ -1157,17 +1165,32 @@ mod tests {
     fn approval_refuses_stale_changes_and_step_5_follows_the_digest() {
         let p = proposal(&signed(), 10);
         let bad = vec![change("B", Change::Mode(ModeChoice::Full), None)];
-        let f = finalize(&p, &bad, &BTreeMap::new());
+        let f = finalize(
+            &crate::engines::Engines::builtin(),
+            &p,
+            &bad,
+            &BTreeMap::new(),
+        );
         let e = approve(&p, &f, &bad, "ana", "now", None)
             .unwrap_err()
             .to_string();
         assert!(e.contains("ADEMPIERE.B"), "{e}");
         let ok = vec![change("C", Change::Mode(ModeChoice::Full), None)];
-        let f = finalize(&p, &ok, &BTreeMap::new());
+        let f = finalize(
+            &crate::engines::Engines::builtin(),
+            &p,
+            &ok,
+            &BTreeMap::new(),
+        );
         let a = approve(&p, &f, &ok, "ana", "now", Some("first".into())).unwrap();
         assert_eq!(a.counts.full, 2);
         assert_eq!(step(Some(&p), Some(&f), Some(&a)).state, StepState::Done);
-        let undone = finalize(&p, &[], &BTreeMap::new());
+        let undone = finalize(
+            &crate::engines::Engines::builtin(),
+            &p,
+            &[],
+            &BTreeMap::new(),
+        );
         let s = step(Some(&p), Some(&undone), Some(&a));
         assert_eq!(s.state, StepState::Partial);
         assert!(s.detail.contains("changed since"));

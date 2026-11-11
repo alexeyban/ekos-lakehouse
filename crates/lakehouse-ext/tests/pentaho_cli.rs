@@ -97,7 +97,7 @@ async fn translate_proposes_a_branch_and_generate_keeps_the_files() {
     git(&repo, &["commit", "-q", "-m", "generate"]);
 
     std::env::set_current_dir(&root).unwrap();
-    let ext = Extensions::new(vec![Arc::new(LakehouseExtension)]);
+    let ext = Extensions::new(vec![Arc::new(LakehouseExtension::new())]);
     ekos::app::main_with_args(
         ext.clone(),
         [
@@ -297,7 +297,7 @@ async fn plugin_steps_go_through_the_java_decompiler_seam() {
         &settings,
         &root,
         &repo,
-        &Extensions::new(vec![Arc::new(LakehouseExtension)]),
+        &Extensions::new(vec![Arc::new(LakehouseExtension::new())]),
         &public,
     )
     .await;
@@ -317,7 +317,10 @@ async fn plugin_steps_go_through_the_java_decompiler_seam() {
         &settings,
         &root,
         &repo,
-        &Extensions::new(vec![Arc::new(LakehouseExtension), Arc::new(Decompiles)]),
+        &Extensions::new(vec![
+            Arc::new(LakehouseExtension::new()),
+            Arc::new(Decompiles),
+        ]),
         &private,
     )
     .await;

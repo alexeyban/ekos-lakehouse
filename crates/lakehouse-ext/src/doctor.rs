@@ -83,10 +83,18 @@ pub async fn run(s: &Settings) -> Vec<Check> {
             Check::of("dagster", url.clone(), status_ok(&client, &url).await)
         }
     });
-    // An Oracle source is reached at its [[databases]] entry's `host:port/service` (RFC 0216).
-    let addr = match &s.database {
-        Some(db) => Some(db.connect.split('/').next().unwrap_or_default().to_string()),
-        None => s.source.clone(),
+    // Where the engine is reached: `source`, or an Oracle [[databases]] entry's `host:port`
+    // (RFC 0216); an engine this build lacks is reported as such (RFC 0255).
+    let addr = match s.engines.get(&s.engine()) {
+        Ok(p) => p.address(s),
+        Err(e) => {
+            out.push(Check::of(
+                "source",
+                s.engine().to_string(),
+                Err(e.to_string()),
+            ));
+            return out;
+        }
     };
     out.push(match &addr {
         None => Check::not_configured("source", "source"),
@@ -166,6 +174,7 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
         return out;
     }
     let pg = crate::plan_cmd::connect_source(s, "lakehouse-doctor");
+    let provider = s.engines.get(&s.engine()).ok();
     let trino = s
         .trino_connection()
         .and_then(|c| ekos_lakehouse_trino::TrinoReader::new(c).map_err(Into::into));
@@ -200,11 +209,7 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
                                  on catalog {}",
                                 hidden.len(),
                                 hidden.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
-                                if pg.engine().is_postgres() {
-                                    "postgresql.array-mapping=AS_ARRAY and "
-                                } else {
-                                    ""
-                                },
+                                provider.map(|p| p.connector_hint()).unwrap_or_default(),
                                 ps.source_catalog
                             ))
                         },
@@ -212,10 +217,7 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
                 }
                 Err(e) => out.push(Check::of("columns", target, Err(e.to_string()))),
             }
-            let user = match &s.database {
-                Some(db) => db.user.clone(),
-                None => s.source_user.clone().unwrap_or_default(),
-            };
+            let user = provider.map(|p| p.role(s)).unwrap_or_default();
             out.push(match pg.writes_refused() {
                 Ok(true) => Check::of("role", user.clone(), Ok("the source refuses this role's writes".into())),
                 Ok(_) => Check {
@@ -226,6 +228,10 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
                 },
                 Err(e) => Check::of("role", user.clone(), Err(e.to_string())),
             });
+            // The engine's own checks (RFC 0255 §3.3).
+            if let Some(p) = provider {
+                out.extend(p.doctor(pg.as_ref(), s));
+            }
             let catalog = s.plan_settings().target_catalog;
             out.push(Check::of(
                 "iceberg",

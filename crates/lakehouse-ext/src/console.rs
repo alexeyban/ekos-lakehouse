@@ -1033,8 +1033,9 @@ mod tests {
     /// (the check `ekos extensions --json` runs before the console serves a page).
     #[test]
     fn every_page_passes_the_console_checker() {
-        let ext =
-            ekos::extension::Extensions::new(vec![std::sync::Arc::new(crate::LakehouseExtension)]);
+        let ext = ekos::extension::Extensions::new(vec![std::sync::Arc::new(
+            crate::LakehouseExtension::new(),
+        )]);
         let mut root = ext.extend_cli(ekos::app::cli_command()).unwrap();
         root.build();
         let cat = ekos::commands::catalogue::catalogue_with(&root, &ext.command_classes());

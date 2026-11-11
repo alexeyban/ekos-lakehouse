@@ -10,6 +10,7 @@ pub mod console;
 pub mod deletes;
 pub mod docs;
 pub mod doctor;
+pub mod engines;
 pub mod extraction;
 pub mod facts;
 mod gold_cmd;
@@ -34,7 +35,40 @@ use ekos::extension::{CommandContext, EkosExtension};
 /// The extension's name, and the `[extensions.<name>]` table its settings live in.
 pub const NAME: &str = "lakehouse";
 
-pub struct LakehouseExtension;
+/// The Lakehouse as an EKOS extension, with the source engines it can read (RFC 0255 §3.3).
+#[derive(Clone, Default)]
+pub struct LakehouseExtension {
+    engines: engines::Engines,
+}
+
+impl LakehouseExtension {
+    /// The Lakehouse with the built-in engines, PostgreSQL and Oracle.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// With one more source engine. A name already registered stops startup with a message
+    /// naming both providers (RFC 0255 §3.3); [`Self::try_with_engine`] returns it instead.
+    pub fn with_engine(self, provider: std::sync::Arc<dyn engines::SourceProvider>) -> Self {
+        match self.try_with_engine(provider) {
+            Ok(s) => s,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    pub fn try_with_engine(
+        self,
+        provider: std::sync::Arc<dyn engines::SourceProvider>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            engines: self.engines.try_with(provider)?,
+        })
+    }
+
+    pub fn engines(&self) -> &engines::Engines {
+        &self.engines
+    }
+}
 
 #[async_trait(?Send)]
 impl EkosExtension for LakehouseExtension {
@@ -899,7 +933,7 @@ impl EkosExtension for LakehouseExtension {
         &self,
         ctx: &ekos::extension::WorkflowContext<'_>,
     ) -> Vec<ekos_semantic::workflow::Step> {
-        workflow::workflow_steps(ctx)
+        workflow::workflow_steps(ctx, &self.engines)
     }
 
     fn command_classes(&self) -> Vec<(&'static str, Class, bool)> {
@@ -972,9 +1006,10 @@ impl EkosExtension for LakehouseExtension {
         matches: &clap::ArgMatches,
         ctx: &CommandContext<'_>,
     ) -> anyhow::Result<()> {
+        let engines = &self.engines;
         match matches.subcommand() {
             Some(("doctor", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let mut checks = doctor::run(&settings).await;
                 let redaction = ctx.config.redaction_config();
                 checks.extend(off_runtime(|| Ok(doctor::deep(&settings, &redaction)))?);
@@ -986,7 +1021,7 @@ impl EkosExtension for LakehouseExtension {
                 doctor::verdict(&checks)
             }
             Some(("plan", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let f = fresh(&settings, ctx, &pipeline_dir(&settings, ctx))?;
                 if m.get_flag("json") {
                     println!("{}", serde_json::to_string_pretty(&f.plan)?);
@@ -997,7 +1032,7 @@ impl EkosExtension for LakehouseExtension {
                 Ok(())
             }
             Some(("generate", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 workflow::gate(&settings, ctx)?;
                 let out = match m.get_one::<std::path::PathBuf>("out") {
                     Some(o) => ctx.invoked_from.join(o),
@@ -1005,7 +1040,7 @@ impl EkosExtension for LakehouseExtension {
                 };
                 let mut silver = settings.silver_settings();
                 let plan = if m.get_flag("from-lock") {
-                    plan_cmd::read_lock(&out)?
+                    plan_cmd::read_lock_for(&out, &settings)?
                 } else {
                     let f = fresh(&settings, ctx, &out)?;
                     print_final(&f);
@@ -1040,13 +1075,13 @@ impl EkosExtension for LakehouseExtension {
                 println!("wrote {n} files under {}", out.display());
                 Ok(())
             }
-            Some(("deletes", m)) => deletes_cmd(ctx, m),
-            Some(("extraction", m)) => extraction_cmd(ctx, m),
-            Some(("docs", m)) => docs::cmd(ctx, m),
-            Some(("requirements", m)) => requirements_cmd(ctx, m).await,
-            Some(("marts", m)) => marts_cmd(ctx, m).await,
+            Some(("deletes", m)) => deletes_cmd(ctx, m, engines),
+            Some(("extraction", m)) => extraction_cmd(ctx, m, engines),
+            Some(("docs", m)) => docs::cmd(ctx, m, engines),
+            Some(("requirements", m)) => requirements_cmd(ctx, m, engines).await,
+            Some(("marts", m)) => marts_cmd(ctx, m, engines).await,
             Some(("run", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let Some(url) = settings.dagster_url.clone() else {
                     anyhow::bail!("no dagster-url in [extensions.lakehouse]");
                 };
@@ -1068,8 +1103,8 @@ impl EkosExtension for LakehouseExtension {
                 .map(|_| ())
             }
             Some(("reconcile", m)) => {
-                let settings = settings::load(ctx.config)?;
-                let plan = plan_cmd::read_lock(&pipeline_dir(&settings, ctx))?;
+                let settings = settings::load_with(ctx.config, engines)?;
+                let plan = plan_cmd::read_lock_for(&pipeline_dir(&settings, ctx), &settings)?;
                 let wanted: Vec<String> = m
                     .get_many::<String>("table")
                     .map(|v| v.cloned().collect())
@@ -1136,7 +1171,7 @@ impl EkosExtension for LakehouseExtension {
                 Ok(())
             }
             Some(("reload", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let repo = pipeline_dir(&settings, ctx);
                 let plan = plan_cmd::read_lock(&repo)?;
                 let tables: Vec<String> = m
@@ -1157,7 +1192,7 @@ impl EkosExtension for LakehouseExtension {
                 Ok(())
             }
             Some(("sync", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 workflow::gate(&settings, ctx)?;
                 let repo = pipeline_dir(&settings, ctx);
                 // RFC 0226: step 3 and the operator's changes apply; sync's own rules (RFC 0194)
@@ -1251,7 +1286,7 @@ impl EkosExtension for LakehouseExtension {
                 let Some(("ask", m)) = g.subcommand() else {
                     unreachable!()
                 };
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let request = ctx.invoked_from.join(
                     m.get_one::<std::path::PathBuf>("request")
                         .expect("required"),
@@ -1263,7 +1298,7 @@ impl EkosExtension for LakehouseExtension {
                 let Some(("draft", m)) = g.subcommand() else {
                     anyhow::bail!("unknown gold command");
                 };
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 workflow::gate(&settings, ctx)?;
                 let description = ctx.invoked_from.join(
                     m.get_one::<std::path::PathBuf>("description")
@@ -1272,7 +1307,7 @@ impl EkosExtension for LakehouseExtension {
                 gold_draft(ctx, &settings, &description).await
             }
             Some(("pentaho", p)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 match p.subcommand() {
                     Some(("scan", m)) => pentaho_cmd::scan(&settings, ctx, m.get_flag("json")),
                     Some(("translate", m)) => {
@@ -1300,7 +1335,7 @@ impl EkosExtension for LakehouseExtension {
                 }
             }
             Some(("status", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
                 let h =
                     monitor::health(store.as_ref(), settings.late_after_minutes.unwrap_or(120))?;
@@ -1340,7 +1375,7 @@ impl EkosExtension for LakehouseExtension {
                 off_runtime(|| install::install(&o))
             }
             Some(("tables", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let v = console::tables(&settings, &pipeline_dir(&settings, ctx));
                 if m.get_flag("json") {
                     println!("{}", serde_json::to_string(&v)?);
@@ -1350,7 +1385,7 @@ impl EkosExtension for LakehouseExtension {
                 Ok(())
             }
             Some(("proposals", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let v = console::proposals(&pipeline_dir(&settings, ctx));
                 if m.get_flag("json") {
                     println!("{}", serde_json::to_string(&v)?);
@@ -1371,7 +1406,7 @@ impl EkosExtension for LakehouseExtension {
                 Ok(())
             }
             Some(("alert", _)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let h = {
                     let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
                     monitor::health(store.as_ref(), settings.late_after_minutes.unwrap_or(120))?
@@ -1399,7 +1434,7 @@ impl EkosExtension for LakehouseExtension {
                 Ok(())
             }
             Some(("metrics", _)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let endpoint = settings.otlp_endpoint.clone().ok_or_else(|| {
                     anyhow::anyhow!("set `otlp-endpoint` in [extensions.lakehouse]")
                 })?;
@@ -1413,7 +1448,7 @@ impl EkosExtension for LakehouseExtension {
                 Ok(())
             }
             Some(("check", m)) => {
-                let settings = settings::load(ctx.config)?;
+                let settings = settings::load_with(ctx.config, engines)?;
                 let repo = pipeline_dir(&settings, ctx);
                 let plan = plan_cmd::read_lock(&repo)?;
                 let silver = settings.silver_settings();
@@ -1602,8 +1637,12 @@ async fn gold_draft(
 }
 
 /// `lakehouse marts show|propose|merge|build|reconcile` (EKOS RFC 0228).
-async fn marts_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result<()> {
-    let settings = settings::load(ctx.config)?;
+async fn marts_cmd(
+    ctx: &CommandContext<'_>,
+    m: &clap::ArgMatches,
+    engines: &engines::Engines,
+) -> anyhow::Result<()> {
+    let settings = settings::load_with(ctx.config, engines)?;
     let repo = pipeline_dir(&settings, ctx);
     let req_dir = requirements::state_dir(ctx.config, ctx.cwd);
     let dir = marts::state_dir(ctx.config, ctx.cwd);
@@ -1789,10 +1828,14 @@ async fn marts_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Re
 }
 
 /// `lakehouse deletes` (RFC 0225 §2.4).
-fn deletes_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result<()> {
+fn deletes_cmd(
+    ctx: &CommandContext<'_>,
+    m: &clap::ArgMatches,
+    engines: &engines::Engines,
+) -> anyhow::Result<()> {
     use ekos_lakehouse_bronze::Cadence;
-    let settings = settings::load(ctx.config)?;
-    let plan = plan_cmd::read_lock(&pipeline_dir(&settings, ctx))?;
+    let settings = settings::load_with(ctx.config, engines)?;
+    let plan = plan_cmd::read_lock_for(&pipeline_dir(&settings, ctx), &settings)?;
     let name = m.get_one::<String>("table").expect("required");
     let t = plan
         .tables
@@ -1934,7 +1977,12 @@ fn fresh(
     let dir = extraction::state_dir(ctx.config, ctx.cwd);
     extraction::write_proposal(&dir, &p)?;
     let changes = extraction::read_changes(&dir)?;
-    Ok(extraction::finalize(&p, &changes, &settings.pii))
+    Ok(extraction::finalize(
+        &settings.engines,
+        &p,
+        &changes,
+        &settings.pii,
+    ))
 }
 
 /// Step 3 from the review; without a ledger or a review, nothing (and the plan says why).
@@ -2023,9 +2071,13 @@ fn reviewer(by: Option<&String>) -> anyhow::Result<String> {
 }
 
 /// `lakehouse extraction show|change|approve` (RFC 0226).
-fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result<()> {
+fn extraction_cmd(
+    ctx: &CommandContext<'_>,
+    m: &clap::ArgMatches,
+    engines: &engines::Engines,
+) -> anyhow::Result<()> {
     use ekos_lakehouse_bronze::extraction::{CadenceChoice, Change, ModeChoice, TableChange};
-    let settings = settings::load(ctx.config)?;
+    let settings = settings::load_with(ctx.config, engines)?;
     let dir = extraction::state_dir(ctx.config, ctx.cwd);
     let proposal = extraction::read_proposal(&dir)?;
     let changes = extraction::read_changes(&dir)?;
@@ -2039,7 +2091,7 @@ fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Res
         Some(("show", m)) => {
             let f = proposal
                 .as_ref()
-                .map(|p| extraction::finalize(p, &changes, &settings.pii));
+                .map(|p| extraction::finalize(&settings.engines, p, &changes, &settings.pii));
             let a = extraction::read_approved(&dir)?;
             let v = extraction::show(
                 proposal.as_ref(),
@@ -2118,7 +2170,7 @@ fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Res
                 at: now(),
             };
             ekos_lakehouse_bronze::extraction::record(&mut next, new.clone());
-            let f = extraction::finalize(&p, &next, &settings.pii);
+            let f = extraction::finalize(&settings.engines, &p, &next, &settings.pii);
             if let Some(why) = f
                 .applied
                 .iter()
@@ -2147,7 +2199,7 @@ fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Res
         }
         Some(("approve", m)) => {
             let p = need()?;
-            let f = extraction::finalize(&p, &changes, &settings.pii);
+            let f = extraction::finalize(&settings.engines, &p, &changes, &settings.pii);
             let by = reviewer(m.get_one::<String>("by"))?;
             let a = extraction::approve(
                 &p,
@@ -2188,9 +2240,13 @@ fn extraction_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Res
 }
 
 /// `lakehouse requirements show|draft|edit|approve` (EKOS RFC 0215).
-async fn requirements_cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result<()> {
+async fn requirements_cmd(
+    ctx: &CommandContext<'_>,
+    m: &clap::ArgMatches,
+    engines: &engines::Engines,
+) -> anyhow::Result<()> {
     use requirements as rq;
-    let settings = settings::load(ctx.config)?;
+    let settings = settings::load_with(ctx.config, engines)?;
     let dir = rq::state_dir(ctx.config, ctx.cwd);
     let repo = pipeline_dir(&settings, ctx);
     let plan = plan_cmd::read_lock(&repo).ok();

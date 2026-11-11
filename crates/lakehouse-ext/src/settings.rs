@@ -101,6 +101,10 @@ pub struct Settings {
     /// For `oracle`: the `[[databases]]` entry `source-database` names, filled in by [`load`].
     #[serde(skip)]
     pub database: Option<ekos_compiler_core::DatabaseConfig>,
+    /// The source engines of this build (RFC 0255 §3.3), filled in by [`load_with`]. Never in
+    /// `ekos.toml`: `source-engine` names one of them.
+    #[serde(skip)]
+    pub engines: crate::engines::Engines,
 }
 
 impl Settings {
@@ -198,19 +202,30 @@ fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
         || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
-/// The project's settings; an absent table means nothing is configured yet. For an Oracle source,
-/// `source-database` must name one of the project's `[[databases]]` entries (RFC 0216 §2.2).
+/// The project's settings with the built-in engines; see [`load_with`].
 pub fn load(config: &ekos_compiler_core::EkosConfig) -> anyhow::Result<Settings> {
+    load_with(config, &crate::engines::Engines::builtin())
+}
+
+/// The project's settings; an absent table means nothing is configured yet. `source-engine` must
+/// name one of `engines`, and that engine's provider checks the keys it reads and refuses the
+/// ones it does not (RFC 0255 §3.3): for Oracle, `source-database` names one of the project's
+/// `[[databases]]` entries (RFC 0216 §2.2).
+pub fn load_with(
+    config: &ekos_compiler_core::EkosConfig,
+    engines: &crate::engines::Engines,
+) -> anyhow::Result<Settings> {
     let mut s = config
         .extension_settings::<Settings>(crate::NAME)?
         .unwrap_or_default();
-    if s.engine() == ekos_lakehouse_bronze::SourceEngine::ORACLE {
-        resolve_database(&mut s, &config.databases)?;
-    }
+    s.engines = engines.clone();
+    let provider = engines.get(&s.engine())?.clone();
+    provider.check_settings(&mut s, &config.databases)?;
     Ok(s)
 }
 
-fn resolve_database(
+/// RFC 0216 §2.2: an Oracle source's connection is its `[[databases]]` entry.
+pub(crate) fn resolve_database(
     s: &mut Settings,
     databases: &[ekos_compiler_core::DatabaseConfig],
 ) -> anyhow::Result<()> {

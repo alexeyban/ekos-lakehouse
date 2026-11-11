@@ -338,8 +338,12 @@ fn home_page(dir: &Path) -> String {
 }
 
 /// `lakehouse docs show|generate|publish`.
-pub fn cmd(ctx: &CommandContext<'_>, m: &clap::ArgMatches) -> anyhow::Result<()> {
-    let settings = crate::settings::load(ctx.config)?;
+pub fn cmd(
+    ctx: &CommandContext<'_>,
+    m: &clap::ArgMatches,
+    engines: &crate::engines::Engines,
+) -> anyhow::Result<()> {
+    let settings = crate::settings::load_with(ctx.config, engines)?;
     let s = settings.docs.clone();
     let dir = state_dir(ctx.config, ctx.cwd);
     let python = s.python.clone().unwrap_or_else(|| "python3".into());
