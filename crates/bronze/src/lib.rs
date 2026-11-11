@@ -2,6 +2,7 @@
 //! loaded, and the SQL that does it. Pure functions over source facts — no connection, no clock,
 //! no randomness — so the same facts always generate the same files.
 
+pub mod engine;
 pub mod extraction;
 pub mod mode;
 pub mod model;
@@ -10,6 +11,7 @@ pub mod render;
 pub mod typemap;
 pub mod typemap_oracle;
 
+pub use engine::{EngineSpec, OracleSpec, PostgresSpec};
 pub use mode::{Cadence, DeletePlan, LoadMode, ModeSettings, PurgePolicy};
 pub use model::{
     CodeFacts, ColumnCheck, ForeignKey, SourceColumn, SourceEngine, SourceTable, TypeKind,
@@ -17,6 +19,6 @@ pub use model::{
 };
 pub use plan::{
     ColumnRename, Plan, TablePlan, attach_checks, attach_code, carry_renames, iceberg_name, plan,
-    plan_with, safe_name,
+    plan_for, plan_with, safe_name,
 };
 pub use typemap::{CompareRule, Lossiness, Mapping};

@@ -15,7 +15,9 @@ use ekos_migrate_validate::dialect::{
 use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rfc0255").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rfc0255")
+        .join(name)
 }
 
 fn sha(text: &str) -> String {
@@ -49,7 +51,10 @@ fn digests(plan: &Plan) -> String {
                 &u.target_columns,
                 64,
             ),
-            format!("digest_columns={} not_compared={not_compared:?}", u.digest_columns),
+            format!(
+                "digest_columns={} not_compared={not_compared:?}",
+                u.digest_columns
+            ),
         ]
         .join("\n");
         lines.push(format!("{}  reconcile:{}.{}", sha(&sql), t.schema, t.table));
@@ -90,7 +95,10 @@ fn diff(want: &str, got: &str) -> String {
 #[test]
 fn a_postgres_lock_from_before_the_seam_is_unchanged() {
     let text = std::fs::read_to_string(fixture("pagila.lock.json")).unwrap();
-    assert!(!text.contains("source-engine"), "a PostgreSQL lock names no engine");
+    assert!(
+        !text.contains("source-engine"),
+        "a PostgreSQL lock names no engine"
+    );
     check("pagila.lock.json", "pagila.sha256");
 }
 
@@ -114,7 +122,11 @@ fn print_the_digest_of_an_extra_lock() {
     let d = digests(&plan);
     eprintln!(
         "RFC0255 {path}: round trip {}, {} lines, digest {}",
-        if again == text { "identical" } else { "DIFFERENT" },
+        if again == text {
+            "identical"
+        } else {
+            "DIFFERENT"
+        },
         d.lines().count(),
         sha(&d)
     );

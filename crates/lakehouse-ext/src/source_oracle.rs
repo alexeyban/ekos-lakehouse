@@ -312,7 +312,7 @@ fn q(name: &str) -> String {
 
 impl Source for Oracle {
     fn engine(&self) -> SourceEngine {
-        SourceEngine::Oracle
+        SourceEngine::ORACLE
     }
 
     fn read_tables(

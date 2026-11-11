@@ -1,6 +1,7 @@
 //! RFC 0192 §3: how a table is loaded, chosen from facts and recorded with them.
 
-use crate::model::{SourceEngine, SourceTable, WriteFacts};
+use crate::engine::EngineSpec;
+use crate::model::{SourceTable, WriteFacts};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -149,29 +150,13 @@ pub struct ModeDecision {
     pub deletes: Option<DeletePlan>,
 }
 
-/// Types a watermark can be compared on.
-pub fn orderable(engine: SourceEngine, source_type: &str) -> bool {
-    match engine {
-        SourceEngine::Postgres => {
-            source_type.starts_with("timestamp")
-                || matches!(source_type, "date" | "integer" | "bigint")
-        }
-        // A DATE carries a time; an integer NUMBER orders like one.
-        SourceEngine::Oracle => {
-            source_type == "DATE"
-                || source_type.starts_with("TIMESTAMP")
-                || source_type == "INTEGER"
-                || (source_type.starts_with("NUMBER(") && source_type.ends_with(",0)"))
-        }
-    }
-}
-
 /// [`choose_for`] a PostgreSQL source.
 pub fn choose(t: &SourceTable, s: &ModeSettings) -> ModeDecision {
-    choose_for(t, s, SourceEngine::Postgres)
+    choose_for(t, s, &crate::engine::PostgresSpec)
 }
 
-pub fn choose_for(t: &SourceTable, s: &ModeSettings, engine: SourceEngine) -> ModeDecision {
+/// The load mode of `t`; `engine` says which of its columns can order a watermark.
+pub fn choose_for(t: &SourceTable, s: &ModeSettings, engine: &dyn EngineSpec) -> ModeDecision {
     choose_with(t, s, engine, None)
 }
 
@@ -180,7 +165,7 @@ pub fn choose_for(t: &SourceTable, s: &ModeSettings, engine: SourceEngine) -> Mo
 pub fn choose_with(
     t: &SourceTable,
     s: &ModeSettings,
-    engine: SourceEngine,
+    engine: &dyn EngineSpec,
     facts: Option<&WriteFacts>,
 ) -> ModeDecision {
     let mut d = by_trigger(t, s, engine);
@@ -231,7 +216,7 @@ fn by_application(
     d: &mut ModeDecision,
     t: &SourceTable,
     s: &ModeSettings,
-    engine: SourceEngine,
+    engine: &dyn EngineSpec,
     f: &WriteFacts,
 ) {
     let Some(w) = &s.application_watermark else {
@@ -248,7 +233,7 @@ fn by_application(
         ));
         return;
     }
-    if !orderable(engine, &c.pg_type) {
+    if !engine.orderable(&c.pg_type) {
         d.notes.push(format!(
             "{} is {}, which cannot order writes",
             c.name, c.pg_type
@@ -282,7 +267,7 @@ fn by_application(
     };
 }
 
-fn by_trigger(t: &SourceTable, s: &ModeSettings, engine: SourceEngine) -> ModeDecision {
+fn by_trigger(t: &SourceTable, s: &ModeSettings, engine: &dyn EngineSpec) -> ModeDecision {
     let mut d = ModeDecision {
         mode: LoadMode::Full,
         evidence: vec![],
@@ -295,7 +280,7 @@ fn by_trigger(t: &SourceTable, s: &ModeSettings, engine: SourceEngine) -> ModeDe
                 "declared watermark {w} is not a column of {}",
                 t.qualified()
             )),
-            Some(c) if !orderable(engine, &c.pg_type) => d.notes.push(format!(
+            Some(c) if !engine.orderable(&c.pg_type) => d.notes.push(format!(
                 "declared watermark {w} is {}, which cannot order writes",
                 c.pg_type
             )),
@@ -428,7 +413,7 @@ mod tests {
     }
 
     fn oracle(t: &SourceTable, s: &ModeSettings, f: &WriteFacts) -> ModeDecision {
-        choose_with(t, s, SourceEngine::Oracle, Some(f))
+        choose_with(t, s, &crate::engine::OracleSpec, Some(f))
     }
 
     /// RFC 0225 §2.2: the application's own column, where the code keeps it.
@@ -468,7 +453,7 @@ mod tests {
         let none = oracle(&t, &ModeSettings::default(), &facts("po_only", &[]));
         assert_eq!(none.mode, LoadMode::Full);
         assert_eq!(
-            choose_for(&t, &app(), SourceEngine::Oracle).mode,
+            choose_for(&t, &app(), &crate::engine::OracleSpec).mode,
             LoadMode::Full
         );
 
@@ -536,7 +521,7 @@ mod tests {
             watermarks: [("ADEMPIERE.C_ORDER".to_string(), "UPDATED".to_string())].into(),
             ..Default::default()
         };
-        let without = choose_for(&t, &declared, SourceEngine::Oracle);
+        let without = choose_for(&t, &declared, &crate::engine::OracleSpec);
         assert!(matches!(
             without.mode,
             LoadMode::Incremental {
@@ -588,14 +573,14 @@ mod tests {
             ..Default::default()
         };
         t.update_triggers = vec![trigger];
-        let d = choose_for(&t, &at("UPDATED"), SourceEngine::Oracle);
+        let d = choose_for(&t, &at("UPDATED"), &crate::engine::OracleSpec);
         assert!(matches!(d.mode, LoadMode::Incremental { .. }), "{d:?}");
-        let d = choose_for(&t, &at("DOCUMENTNO"), SourceEngine::Oracle);
+        let d = choose_for(&t, &at("DOCUMENTNO"), &crate::engine::OracleSpec);
         assert_eq!(d.mode, LoadMode::Full);
         assert!(d.notes[0].contains("cannot order writes"), "{d:?}");
-        assert!(orderable(SourceEngine::Oracle, "NUMBER(10,0)"));
-        assert!(!orderable(SourceEngine::Oracle, "NUMBER"));
-        assert!(orderable(SourceEngine::Oracle, "TIMESTAMP(6)"));
+        assert!(crate::engine::OracleSpec.orderable("NUMBER(10,0)"));
+        assert!(!crate::engine::OracleSpec.orderable("NUMBER"));
+        assert!(crate::engine::OracleSpec.orderable("TIMESTAMP(6)"));
     }
 
     #[test]

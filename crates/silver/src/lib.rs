@@ -1137,7 +1137,7 @@ mod tests {
                 ),
             ],
             &PlanSettings {
-                source_engine: ekos_lakehouse_bronze::SourceEngine::Oracle,
+                source_engine: ekos_lakehouse_bronze::SourceEngine::ORACLE,
                 ..Default::default()
             },
         );

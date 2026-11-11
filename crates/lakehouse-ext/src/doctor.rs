@@ -200,7 +200,7 @@ pub fn deep(s: &Settings, redaction: &ekos_common::redaction::RedactionConfig) -
                                  on catalog {}",
                                 hidden.len(),
                                 hidden.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
-                                if pg.engine() == ekos_lakehouse_bronze::SourceEngine::Postgres {
+                                if pg.engine().is_postgres() {
                                     "postgresql.array-mapping=AS_ARRAY and "
                                 } else {
                                     ""

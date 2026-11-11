@@ -2,23 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The engine a source is read from (RFC 0216). It decides the type map, which column types can
-/// order a watermark, and the dialect the source side of a reconciliation is rendered in.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceEngine {
-    #[default]
-    Postgres,
-    Oracle,
-}
-
-impl SourceEngine {
-    /// The default: a lock file written for PostgreSQL does not name its engine, so it reads back
-    /// byte-identical to one written before RFC 0216.
-    pub fn is_postgres(&self) -> bool {
-        *self == Self::Postgres
-    }
-}
+/// The engine a source is read from (RFC 0216), an open identifier since RFC 0255: see
+/// [`crate::engine`].
+pub use crate::engine::SourceEngine;
 
 /// What kind of PostgreSQL type a column has (`pg_type.typtype`, plus arrays).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

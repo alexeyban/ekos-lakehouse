@@ -45,7 +45,7 @@ fn database() -> ekos_compiler_core::DatabaseConfig {
 fn settings() -> Settings {
     Settings {
         trino_url: Some("http://127.0.0.1:58080".into()),
-        source_engine: Some(SourceEngine::Oracle),
+        source_engine: Some(SourceEngine::ORACLE),
         source_database: Some("idempiere-db".into()),
         source_catalog: Some("idempiere".into()),
         namespace_prefix: Some("bronze_o216_".into()),

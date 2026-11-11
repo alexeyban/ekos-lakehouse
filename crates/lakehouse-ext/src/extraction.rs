@@ -323,7 +323,22 @@ pub fn finalize(
     configured: &BTreeMap<String, MaskMethod>,
 ) -> Final {
     let mut plan = p.plan.clone();
-    let applied = apply_all(&mut plan, &p.facts, changes);
+    let applied = match ekos_lakehouse_bronze::engine::builtin(&plan.settings.source_engine) {
+        Some(spec) => apply_all(spec, &mut plan, &p.facts, changes),
+        None => {
+            let why = ekos_lakehouse_bronze::engine::not_in_this_build(
+                &plan.settings.source_engine,
+                &ekos_lakehouse_bronze::engine::builtins().map(|s| s.engine()),
+            );
+            changes
+                .iter()
+                .map(|c| ekos_lakehouse_bronze::extraction::Applied {
+                    change: c.clone(),
+                    stale: Some(why.clone()),
+                })
+                .collect()
+        }
+    };
     let mut masks = configured.clone();
     let mut notes = vec![];
     for (k, m) in &p.masks {
@@ -983,7 +998,7 @@ mod tests {
     fn proposal(statuses: &[SubjectStatus], rows: i64) -> Proposal {
         let s3 = step3(statuses, &review());
         let settings = PlanSettings {
-            source_engine: SourceEngine::Oracle,
+            source_engine: SourceEngine::ORACLE,
             modes: ModeSettings {
                 application_watermark: Some("UPDATED".into()),
                 ..Default::default()

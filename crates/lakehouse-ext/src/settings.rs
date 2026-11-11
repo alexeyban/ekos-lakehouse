@@ -140,7 +140,7 @@ impl Settings {
     }
 
     pub fn engine(&self) -> ekos_lakehouse_bronze::SourceEngine {
-        self.source_engine.unwrap_or_default()
+        self.source_engine.clone().unwrap_or_default()
     }
 
     /// The schemas to land. Default: `public`; for `oracle`, the database entry's owners.
@@ -204,7 +204,7 @@ pub fn load(config: &ekos_compiler_core::EkosConfig) -> anyhow::Result<Settings>
     let mut s = config
         .extension_settings::<Settings>(crate::NAME)?
         .unwrap_or_default();
-    if s.engine() == ekos_lakehouse_bronze::SourceEngine::Oracle {
+    if s.engine() == ekos_lakehouse_bronze::SourceEngine::ORACLE {
         resolve_database(&mut s, &config.databases)?;
     }
     Ok(s)
@@ -291,7 +291,7 @@ owners = ["ADEMPIERE"]
         assert_eq!(s.schemas(), ["ADEMPIERE"]);
         assert_eq!(
             s.plan_settings().source_engine,
-            ekos_lakehouse_bronze::SourceEngine::Oracle
+            ekos_lakehouse_bronze::SourceEngine::ORACLE
         );
 
         let unknown: ekos_compiler_core::EkosConfig = toml::from_str(&format!(

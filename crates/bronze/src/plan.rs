@@ -3,7 +3,7 @@
 
 use crate::mode::{ModeDecision, ModeSettings, choose_with};
 use crate::model::{SourceEngine, SourceTable, WriteFacts};
-use crate::typemap::{Lossiness, Mapping, map_column};
+use crate::typemap::{Lossiness, Mapping};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -35,7 +35,7 @@ impl Default for PlanSettings {
             modes: ModeSettings::default(),
             bronze_schedule: "0 * * * *".into(),
             maintenance_schedule: "0 3 * * *".into(),
-            source_engine: SourceEngine::Postgres,
+            source_engine: SourceEngine::POSTGRES,
         }
     }
 }
@@ -261,12 +261,55 @@ pub fn plan(sources: &[SourceTable], settings: &PlanSettings) -> Plan {
     plan_with(sources, settings, &BTreeMap::new())
 }
 
-/// [`plan`], with EKOS's write-behaviour facts by `schema.table` (RFC 0225).
+/// [`plan`], with EKOS's write-behaviour facts by `schema.table` (RFC 0225), for a built-in
+/// engine. An engine this crate does not define refuses every table, naming the engine: plan an
+/// out-of-tree engine with [`plan_for`] and its spec.
 pub fn plan_with(
     sources: &[SourceTable],
     settings: &PlanSettings,
     facts: &BTreeMap<String, WriteFacts>,
 ) -> Plan {
+    match crate::engine::builtin(&settings.source_engine) {
+        Some(spec) => plan_for(spec, sources, settings, facts),
+        None => {
+            let reason = crate::engine::not_in_this_build(
+                &settings.source_engine,
+                &crate::engine::builtins().map(|s| s.engine()),
+            );
+            let mut sorted: Vec<&SourceTable> = sources.iter().collect();
+            sorted.sort_by(|a, b| (&a.schema, &a.name).cmp(&(&b.schema, &b.name)));
+            Plan {
+                format: FORMAT,
+                settings: settings.clone(),
+                tables: vec![],
+                refused: sorted
+                    .into_iter()
+                    .map(|t| RefusedTable {
+                        schema: t.schema.clone(),
+                        table: t.name.clone(),
+                        oid: t.oid,
+                        reasons: vec![reason.clone()],
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
+/// The plan of `sources` with `spec` deciding every engine rule (RFC 0255 §3.2): the type map and
+/// which columns can order a watermark. `settings.source_engine` is recorded in the lock as it is,
+/// and must name `spec`'s engine.
+pub fn plan_for(
+    spec: &dyn crate::engine::EngineSpec,
+    sources: &[SourceTable],
+    settings: &PlanSettings,
+    facts: &BTreeMap<String, WriteFacts>,
+) -> Plan {
+    debug_assert_eq!(
+        spec.engine(),
+        settings.source_engine,
+        "the spec plans its own engine"
+    );
     let mut sorted: Vec<&SourceTable> = sources.iter().collect();
     sorted.sort_by(|a, b| (&a.schema, &a.name).cmp(&(&b.schema, &b.name)));
     let mut out = Plan {
@@ -276,14 +319,7 @@ pub fn plan_with(
         refused: vec![],
     };
     for t in sorted {
-        let columns: Vec<Mapping> = t
-            .columns
-            .iter()
-            .map(|c| match settings.source_engine {
-                SourceEngine::Postgres => map_column(c),
-                SourceEngine::Oracle => crate::typemap_oracle::map_column(c),
-            })
-            .collect();
+        let columns: Vec<Mapping> = t.columns.iter().map(|c| spec.map_column(c)).collect();
         let reasons: Vec<String> = columns
             .iter()
             .filter(|m| m.lossiness == Lossiness::Refused)
@@ -304,12 +340,7 @@ pub fn plan_with(
             oid: t.oid,
             namespace: format!("{}{}", settings.namespace_prefix, t.schema),
             primary_key: t.primary_key.clone(),
-            decision: choose_with(
-                t,
-                &settings.modes,
-                settings.source_engine,
-                facts.get(&t.qualified()),
-            ),
+            decision: choose_with(t, &settings.modes, spec, facts.get(&t.qualified())),
             columns,
             facts: TableFacts {
                 comment: t.comment.clone(),
@@ -352,6 +383,83 @@ mod engine_tests {
         assert_eq!(gold_schema("raw_"), "gold_raw");
     }
 
+    fn one_table() -> SourceTable {
+        SourceTable {
+            schema: "s".into(),
+            name: "t".into(),
+            oid: 7,
+            columns: vec![crate::model::SourceColumn {
+                name: "ID".into(),
+                pg_type: "WEIRDINT".into(),
+                kind: crate::model::TypeKind::Base,
+                not_null: true,
+                trino_type: Some("bigint".into()),
+                numeric_used: None,
+                comment: None,
+                enum_labels: vec![],
+                pii_candidate: None,
+                infinite_values: None,
+                attnum: 1,
+                has_default: false,
+            }],
+            primary_key: vec!["ID".into()],
+            row_estimate: 10,
+            update_triggers: vec![],
+            foreign_keys: vec![],
+            comment: None,
+        }
+    }
+
+    /// RFC 0255 §3.1: a plan for an engine this build lacks refuses every table by the engine's
+    /// name, never falls back to another engine's type map.
+    #[test]
+    fn an_engine_this_build_lacks_refuses_every_table_by_name() {
+        let s = PlanSettings {
+            source_engine: SourceEngine::new("fixture").unwrap(),
+            ..Default::default()
+        };
+        let p = plan(&[one_table()], &s);
+        assert!(p.tables.is_empty());
+        assert_eq!(p.refused.len(), 1);
+        assert!(
+            p.refused[0].reasons[0].starts_with("source engine `fixture` is not in this build"),
+            "{:?}",
+            p.refused[0].reasons
+        );
+    }
+
+    /// RFC 0255 §3.2: an out-of-tree spec decides the type map and the watermark rule.
+    #[test]
+    fn an_out_of_tree_spec_plans_its_own_types() {
+        struct Fixture;
+        impl crate::engine::EngineSpec for Fixture {
+            fn engine(&self) -> SourceEngine {
+                SourceEngine::from_static("fixture")
+            }
+            fn map_column(&self, c: &crate::model::SourceColumn) -> Mapping {
+                let mut m = crate::typemap::map_column(&crate::model::SourceColumn {
+                    pg_type: "bigint".into(),
+                    ..c.clone()
+                });
+                m.pg_type = c.pg_type.clone();
+                m
+            }
+            fn orderable(&self, t: &str) -> bool {
+                t == "WEIRDINT"
+            }
+        }
+        let mut s = PlanSettings {
+            source_engine: SourceEngine::from_static("fixture"),
+            ..Default::default()
+        };
+        s.modes.watermarks.insert("s.t".into(), "ID".into());
+        let p = plan_for(&Fixture, &[one_table()], &s, &BTreeMap::new());
+        assert_eq!(p.tables.len(), 1, "{:?}", p.refused);
+        assert_eq!(p.tables[0].columns[0].iceberg_type, "bigint");
+        let text = serde_json::to_string(&p.settings).unwrap();
+        assert!(text.contains("\"source-engine\":\"fixture\""), "{text}");
+    }
+
     /// RFC 0216: a PostgreSQL lock does not name its engine, so it is byte-identical to one
     /// written before the seam; an Oracle lock does, and reads back as Oracle.
     #[test]
@@ -359,14 +467,14 @@ mod engine_tests {
         let pg = serde_json::to_string(&PlanSettings::default()).unwrap();
         assert!(!pg.contains("source-engine"), "{pg}");
         let oracle = PlanSettings {
-            source_engine: SourceEngine::Oracle,
+            source_engine: SourceEngine::ORACLE,
             ..Default::default()
         };
         let text = serde_json::to_string(&oracle).unwrap();
         assert!(text.contains("\"source-engine\":\"oracle\""), "{text}");
         let back: PlanSettings = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.source_engine, SourceEngine::Oracle);
+        assert_eq!(back.source_engine, SourceEngine::ORACLE);
         let old: PlanSettings = serde_json::from_str(&pg).unwrap();
-        assert_eq!(old.source_engine, SourceEngine::Postgres);
+        assert_eq!(old.source_engine, SourceEngine::POSTGRES);
     }
 }

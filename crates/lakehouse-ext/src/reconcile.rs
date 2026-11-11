@@ -7,7 +7,7 @@
 
 use ekos_lakehouse_bronze::plan::{PlanSettings, TablePlan};
 use ekos_lakehouse_bronze::typemap::ident;
-use ekos_lakehouse_bronze::{CompareRule, SourceEngine, render};
+use ekos_lakehouse_bronze::{CompareRule, render};
 use ekos_migrate_validate::dialect::{
     ColumnRule, Dialect, bucket_checksum_query, canon_expr, count_query,
 };
@@ -69,9 +69,12 @@ pub(crate) fn key_expr(d: Dialect, cols: &[(String, ColumnRule)]) -> String {
 
 /// The dialect a plan's source is read in (RFC 0216).
 pub fn source_dialect(s: &PlanSettings) -> Dialect {
-    match s.source_engine {
-        SourceEngine::Postgres => Dialect::Postgres,
-        SourceEngine::Oracle => Dialect::Oracle,
+    match s.source_engine.as_str() {
+        "oracle" => Dialect::Oracle,
+        "postgres" => Dialect::Postgres,
+        // Unreachable: the source is connected before it is reconciled, and connecting refuses
+        // an engine this build lacks (RFC 0255 §3.1).
+        other => panic!("no reconciliation dialect for source engine `{other}`"),
     }
 }
 

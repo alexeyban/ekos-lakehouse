@@ -3,7 +3,7 @@
 use crate::settings::Settings;
 use crate::source;
 use ekos_lakehouse_bronze::plan::Plan;
-use ekos_lakehouse_bronze::{Cadence, LoadMode, Lossiness, SourceEngine, render};
+use ekos_lakehouse_bronze::{Cadence, LoadMode, Lossiness, render};
 use std::path::Path;
 
 /// Read the source and plan bronze. Synchronous (the source and Trino clients both block): the
@@ -38,9 +38,9 @@ pub fn build_plan_with(
 
 /// The source engine, connected read-only (RFC 0216 §2.1).
 pub fn connect_source(s: &Settings, purpose: &str) -> anyhow::Result<Box<dyn source::Source>> {
-    match s.engine() {
-        SourceEngine::Postgres => Ok(Box::new(source::Postgres(connect_postgres(s, purpose)?))),
-        SourceEngine::Oracle => {
+    match s.engine().as_str() {
+        "postgres" => Ok(Box::new(source::Postgres(connect_postgres(s, purpose)?))),
+        "oracle" => {
             let db = s.database.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "an Oracle source needs `source-database` naming a [[databases]] entry"
@@ -50,6 +50,13 @@ pub fn connect_source(s: &Settings, purpose: &str) -> anyhow::Result<Box<dyn sou
                 db, purpose,
             )?))
         }
+        _ => anyhow::bail!(
+            "{}",
+            ekos_lakehouse_bronze::engine::not_in_this_build(
+                &s.engine(),
+                &ekos_lakehouse_bronze::engine::builtins().map(|e| e.engine()),
+            )
+        ),
     }
 }
 

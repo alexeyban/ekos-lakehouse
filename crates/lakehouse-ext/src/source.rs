@@ -46,7 +46,7 @@ pub struct Postgres(pub ekos_pg_live::PgSource);
 
 impl Source for Postgres {
     fn engine(&self) -> SourceEngine {
-        SourceEngine::Postgres
+        SourceEngine::POSTGRES
     }
 
     fn read_tables(

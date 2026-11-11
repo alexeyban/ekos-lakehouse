@@ -3,9 +3,8 @@
 //! A change is applied to the proposal on every read, so a re-plan keeps it; one that no longer
 //! fits (the table left the plan, lost its key, stopped being purged) is reported, not applied.
 
-use crate::mode::{
-    Cadence, DeletePlan, LoadMode, ModeSettings, PurgePolicy, delete_plan, orderable,
-};
+use crate::engine::EngineSpec;
+use crate::mode::{Cadence, DeletePlan, LoadMode, ModeSettings, PurgePolicy, delete_plan};
 use crate::model::WriteFacts;
 use crate::plan::{Plan, TablePlan};
 use serde::{Deserialize, Serialize};
@@ -114,8 +113,10 @@ fn who(c: &TableChange) -> String {
     }
 }
 
-/// Apply `c` to its table in `plan`, or say why it does not fit.
+/// Apply `c` to its table in `plan`, or say why it does not fit. `engine` is the spec of the
+/// plan's source engine: it says which columns can order a watermark.
 pub fn apply(
+    engine: &dyn EngineSpec,
     plan: &mut Plan,
     facts: &BTreeMap<String, WriteFacts>,
     c: &TableChange,
@@ -156,7 +157,7 @@ pub fn apply(
             let Some(col) = t.columns.iter().find(|m| m.column.eq_ignore_ascii_case(w)) else {
                 return Err(format!("{} has no column {w}", c.table));
             };
-            if !orderable(settings.source_engine, &col.pg_type) {
+            if !engine.orderable(&col.pg_type) {
                 return Err(format!(
                     "{} is {}, which cannot order writes",
                     col.column, col.pg_type
@@ -209,6 +210,7 @@ pub fn apply(
 
 /// Every change applied to `plan`, modes first, in the order recorded within a kind.
 pub fn apply_all(
+    engine: &dyn EngineSpec,
     plan: &mut Plan,
     facts: &BTreeMap<String, WriteFacts>,
     changes: &[TableChange],
@@ -219,7 +221,7 @@ pub fn apply_all(
         .into_iter()
         .map(|c| Applied {
             change: c.clone(),
-            stale: apply(plan, facts, c).err(),
+            stale: apply(engine, plan, facts, c).err(),
         })
         .collect()
 }
@@ -280,7 +282,7 @@ mod tests {
 
     fn setup() -> (Plan, BTreeMap<String, WriteFacts>) {
         let settings = PlanSettings {
-            source_engine: SourceEngine::Oracle,
+            source_engine: SourceEngine::ORACLE,
             modes: ModeSettings {
                 application_watermark: Some("UPDATED".into()),
                 ..Default::default()
@@ -330,6 +332,7 @@ mod tests {
     fn full_is_always_allowed_and_drops_the_delete_plan() {
         let (mut p, f) = setup();
         apply(
+            &crate::engine::OracleSpec,
             &mut p,
             &f,
             &change("A", Change::Mode(ModeChoice::Full), None),
@@ -353,18 +356,21 @@ mod tests {
         let (mut p, f) = setup();
         assert_eq!(get(&p, "B").decision.mode, LoadMode::Full);
         let e = apply(
+            &crate::engine::OracleSpec,
             &mut p,
             &f,
             &change("B", Change::Mode(ModeChoice::Incremental), None),
         );
         assert!(e.unwrap_err().contains("--reason"));
         let e = apply(
+            &crate::engine::OracleSpec,
             &mut p,
             &f,
             &change("D", Change::Mode(ModeChoice::Incremental), Some("x")),
         );
         assert!(e.unwrap_err().contains("primary key"));
         apply(
+            &crate::engine::OracleSpec,
             &mut p,
             &f,
             &change(
@@ -388,6 +394,7 @@ mod tests {
     fn cadence_and_purge_need_the_plan_they_change() {
         let (mut p, f) = setup();
         apply(
+            &crate::engine::OracleSpec,
             &mut p,
             &f,
             &change("A", Change::Deletes(CadenceChoice::Audit), None),
@@ -398,12 +405,14 @@ mod tests {
             Cadence::Audit { days: 7 }
         );
         let e = apply(
+            &crate::engine::OracleSpec,
             &mut p,
             &f,
             &change("A", Change::Purge(PurgePolicy::Propagate), None),
         );
         assert!(e.unwrap_err().contains("only purged"));
         apply(
+            &crate::engine::OracleSpec,
             &mut p,
             &f,
             &change("C", Change::Purge(PurgePolicy::Propagate), None),
@@ -414,12 +423,14 @@ mod tests {
             Some(PurgePolicy::Propagate)
         );
         let e = apply(
+            &crate::engine::OracleSpec,
             &mut p,
             &f,
             &change("D", Change::Mode(ModeChoice::Full), None),
         );
         assert_eq!(e.unwrap_err(), "already in full");
         let e = apply(
+            &crate::engine::OracleSpec,
             &mut p,
             &f,
             &change("D", Change::Deletes(CadenceChoice::Run), None),
@@ -435,7 +446,7 @@ mod tests {
             change("B", Change::Mode(ModeChoice::Incremental), Some("ok")),
             change("Z", Change::Mode(ModeChoice::Full), None),
         ];
-        let out = apply_all(&mut p, &f, &changes);
+        let out = apply_all(&crate::engine::OracleSpec, &mut p, &f, &changes);
         assert_eq!(out.len(), 3);
         assert!(
             out.iter()
