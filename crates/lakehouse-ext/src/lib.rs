@@ -1126,7 +1126,10 @@ impl EkosExtension for LakehouseExtension {
                             continue;
                         }
                         let r = reconcile::reconcile(t, &plan.settings, src.reader(), &tgt)?;
-                        out.push((r, reconcile::evidence_queries(t, &plan.settings)));
+                        out.push((
+                            r,
+                            reconcile::evidence_queries(t, &plan.settings, src.reader().dialect()),
+                        ));
                     }
                     Ok(out)
                 })?;

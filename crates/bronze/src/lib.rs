@@ -9,6 +9,7 @@ pub mod model;
 pub mod plan;
 pub mod render;
 pub mod typemap;
+pub mod typemap_kit;
 pub mod typemap_oracle;
 
 pub use engine::{EngineSpec, OracleSpec, PostgresSpec};

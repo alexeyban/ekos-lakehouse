@@ -37,6 +37,11 @@ pub trait SourceProvider: Send + Sync {
     /// The engine, connected read-only.
     fn connect(&self, settings: &Settings, purpose: &str) -> anyhow::Result<Box<dyn Source>>;
 
+    /// The canonical-form dialect the source side of a reconciliation is rendered in (RFC 0255
+    /// §3.4): a built-in one, or `Dialect::Registered` with the engine's own `CanonDialect`. It
+    /// must be the dialect of the connected source's `EngineReader`.
+    fn dialect(&self) -> ekos_migrate_validate::Dialect;
+
     /// `host:port` the doctor's reachability check connects to. Default: `source`.
     fn address(&self, settings: &Settings) -> Option<String> {
         settings.source.clone()
@@ -160,6 +165,10 @@ impl SourceProvider for Postgres {
         )?)))
     }
 
+    fn dialect(&self) -> ekos_migrate_validate::Dialect {
+        ekos_migrate_validate::Dialect::Postgres
+    }
+
     fn connector_hint(&self) -> &'static str {
         "postgresql.array-mapping=AS_ARRAY and "
     }
@@ -219,6 +228,10 @@ impl SourceProvider for Oracle {
         )?))
     }
 
+    fn dialect(&self) -> ekos_migrate_validate::Dialect {
+        ekos_migrate_validate::Dialect::Oracle
+    }
+
     /// The entry's `host:port/service`, up to the service.
     fn address(&self, s: &Settings) -> Option<String> {
         s.database
@@ -265,6 +278,9 @@ mod tests {
         }
         fn connect(&self, _: &Settings, _: &str) -> anyhow::Result<Box<dyn Source>> {
             anyhow::bail!("fixture")
+        }
+        fn dialect(&self) -> ekos_migrate_validate::Dialect {
+            ekos_migrate_validate::Dialect::Postgres
         }
     }
 

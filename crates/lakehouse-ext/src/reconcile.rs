@@ -64,22 +64,17 @@ pub(crate) fn rule(c: CompareRule) -> ColumnRule {
 /// key, every compared column is the key — V3 then compares the rows as a multiset.
 pub(crate) fn key_expr(d: Dialect, cols: &[(String, ColumnRule)]) -> String {
     let parts: Vec<String> = cols.iter().map(|(c, r)| canon_expr(d, c, *r)).collect();
-    parts.join(" || chr(31) || ")
+    // The built-in dialects all read `chr(31)`; a registered one says how it writes it.
+    let sep = match d {
+        Dialect::Registered(c) => c.separator(),
+        _ => "chr(31)".into(),
+    };
+    parts.join(&format!(" || {sep} || "))
 }
 
-/// The dialect a plan's source is read in (RFC 0216).
-pub fn source_dialect(s: &PlanSettings) -> Dialect {
-    match s.source_engine.as_str() {
-        "oracle" => Dialect::Oracle,
-        "postgres" => Dialect::Postgres,
-        // Unreachable: the source is connected before it is reconciled, and connecting refuses
-        // an engine this build lacks (RFC 0255 §3.1).
-        other => panic!("no reconciliation dialect for source engine `{other}`"),
-    }
-}
-
-pub fn unit_plan(t: &TablePlan, s: &PlanSettings) -> (UnitPlan, Vec<String>) {
-    let src = source_dialect(s);
+/// The reconciliation of `t` with its source read in `src` — the source reader's own dialect
+/// (RFC 0255 §3.4: no engine is named here).
+pub fn unit_plan(t: &TablePlan, s: &PlanSettings, src: Dialect) -> (UnitPlan, Vec<String>) {
     let compared: Vec<(String, ColumnRule)> = t
         .columns
         .iter()
@@ -115,8 +110,9 @@ pub fn unit_plan(t: &TablePlan, s: &PlanSettings) -> (UnitPlan, Vec<String>) {
             .map(|(c, r)| canon_expr(Dialect::Trino, c, *r))
             .collect(),
         buckets: 64,
-        // Oracle cannot build a row string past 4000 bytes (RFC 0216 §2.5).
-        digest_columns: src == Dialect::Oracle,
+        // An engine that cannot build one row string (Oracle stops at 4000 bytes, RFC 0216 §2.5)
+        // has its columns digested one by one.
+        digest_columns: src.digest_columns(),
     };
     (unit, not_compared)
 }
@@ -135,7 +131,7 @@ pub fn reconcile(
     source: &dyn EngineReader,
     target: &dyn EngineReader,
 ) -> Result<Reconciliation, ReadError> {
-    let (unit, not_compared) = unit_plan(t, s);
+    let (unit, not_compared) = unit_plan(t, s, source.dialect());
     let names: Vec<String> = t
         .columns
         .iter()
@@ -243,9 +239,8 @@ pub fn reconcile(
 
 /// The queries a reconciliation runs, for the fact's evidence: counts and bucket checksums on
 /// both sides. They read aggregates only.
-pub fn evidence_queries(t: &TablePlan, s: &PlanSettings) -> Vec<String> {
-    let (u, _) = unit_plan(t, s);
-    let src = source_dialect(s);
+pub fn evidence_queries(t: &TablePlan, s: &PlanSettings, src: Dialect) -> Vec<String> {
+    let (u, _) = unit_plan(t, s, src);
     vec![
         count_query(src, &u.source_table),
         count_query(Dialect::Trino, &u.target_table),

@@ -35,9 +35,12 @@ fn digests(plan: &Plan) -> String {
     for (path, content) in silver {
         lines.push(format!("{}  silver:{path}", sha(&content)));
     }
-    let src = ekos_lakehouse_ext::reconcile::source_dialect(&plan.settings);
+    let src = ekos_lakehouse_ext::engines::Engines::builtin()
+        .get(&plan.settings.source_engine)
+        .unwrap()
+        .dialect();
     for t in &plan.tables {
-        let (u, not_compared) = ekos_lakehouse_ext::reconcile::unit_plan(t, &plan.settings);
+        let (u, not_compared) = ekos_lakehouse_ext::reconcile::unit_plan(t, &plan.settings, src);
         let sql = [
             count_query(src, &u.source_table),
             count_query(Dialect::Trino, &u.target_table),

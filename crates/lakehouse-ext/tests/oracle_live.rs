@@ -227,6 +227,20 @@ fn oracle_reproduces_every_canonical_form_hash_and_bucket() {
     assert_eq!(got, rust);
 }
 
+/// EKOS RFC 0255: the public conformance kit passes on Oracle, as the hand-written check above
+/// does.
+#[test]
+fn the_conformance_kit_passes_on_oracle() {
+    if !live() {
+        return;
+    }
+    let o = oracle();
+    let lits = ekos_migrate_validate::conformance::builtin(Dialect::Oracle).unwrap();
+    let report = ekos_migrate_validate::conformance::run(o.reader(), lits.as_ref());
+    assert!(report.passed(), "{report:#?}");
+    assert_eq!(report.cases_checked, 29);
+}
+
 /// A full load, as the orchestrator runs one.
 fn load(admin: &Client, t: &TablePlan, plan: &Plan) {
     let file = render::load_sql(t, &plan.settings);

@@ -42,6 +42,9 @@ impl SourceProvider for Fixture {
     fn connect(&self, _: &Settings, _: &str) -> anyhow::Result<Box<dyn Source>> {
         anyhow::bail!("the fixture engine has no database")
     }
+    fn dialect(&self) -> ekos_migrate_validate::Dialect {
+        ekos_migrate_validate::Dialect::Postgres
+    }
 }
 
 fn config(extra: &str) -> ekos_compiler_core::EkosConfig {

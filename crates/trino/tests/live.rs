@@ -144,6 +144,28 @@ fn trino_reproduces_every_canonical_form() {
     assert_eq!(checked, 31, "the trino live-case count changed");
 }
 
+/// EKOS RFC 0255: the public conformance kit passes on Trino, as the hand-written checks above
+/// do — the same proof an out-of-tree engine's dialect must give.
+#[test]
+fn the_conformance_kit_passes_on_trino() {
+    if !live() {
+        return;
+    }
+    let reader = TrinoReader::new(conn(None)).unwrap();
+    let lits = ekos_migrate_validate::conformance::builtin(Dialect::Trino).unwrap();
+    let report = ekos_migrate_validate::conformance::run(&reader, lits.as_ref());
+    eprintln!(
+        "RFC 0255 conformance trino: {} cases, {} hashes, buckets {}, passed {}, id {}",
+        report.cases_checked,
+        report.hashes_checked,
+        report.buckets_checked,
+        report.passed(),
+        report.id
+    );
+    assert!(report.passed(), "{report:#?}");
+    assert_eq!(report.cases_checked, 31);
+}
+
 #[test]
 fn hashes_and_prefixes_agree_with_rust() {
     if !live() {
