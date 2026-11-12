@@ -34,6 +34,8 @@ ekos-migrate-validate = { git = "https://github.com/alexeyban/EKOS", branch = "m
 ekos-pg-live = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 
 [dev-dependencies]
+# The end-to-end live test sets up its own source tables (`EKOS_LAKEHOUSE_LIVE=1`).
+postgres = "0.19"
 serde_json = "1"
 tempfile = "3"
 toml = "0.8"

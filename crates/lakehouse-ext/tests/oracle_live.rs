@@ -7,7 +7,11 @@
 //! Needs the lakehouse stack with the `idempiere` catalog (`deploy/trino/catalog/
 //! idempiere.properties`), the testbed, Instant Client on `LD_LIBRARY_PATH`, the crate feature
 //! `oracle`, `EKOS_ORACLE_PASSWORD` and `EKOS_LAKEHOUSE_LIVE=1 EKOS_ORACLE_LIVE=1`. Reads only:
-//! the source user cannot write, and bronze goes to this test's own namespace.
+//! the source user cannot write, and bronze goes to this test's own namespace — except the delete
+//! test, which plants and deletes its own rows (ids above 9,000,000) as the owner of a scratch
+//! schema it is given (`EKOS_ORACLE_WRITE_SCHEMA`, `EKOS_ORACLE_WRITE_PASSWORD`), and is skipped
+//! without one: it never writes into `ADEMPIERE` on its own.
+//! `EKOS_LH_TRINO_URL` names a Trino other than the sandbox's.
 
 use ekos_lakehouse_bronze::plan::{Plan, TablePlan};
 use ekos_lakehouse_bronze::{Lossiness, SourceEngine, render};
@@ -28,23 +32,60 @@ fn live() -> bool {
         .all(|v| std::env::var(v).is_ok_and(|v| v == "1"))
 }
 
+/// The sandbox's Trino, or `EKOS_LH_TRINO_URL` (a second stack on other ports).
+fn trino_url() -> String {
+    std::env::var("EKOS_LH_TRINO_URL").unwrap_or_else(|_| "http://127.0.0.1:58080".into())
+}
+
 fn database() -> ekos_compiler_core::DatabaseConfig {
-    toml::from_str(
+    database_of("ADEMPIERE")
+}
+
+fn database_of(owner: &str) -> ekos_compiler_core::DatabaseConfig {
+    toml::from_str(&format!(
         r#"
         name = "idempiere-db"
         kind = "oracle"
         connect = "localhost:51521/XEPDB1"
         user = "ekos_ro"
         password-env = "EKOS_ORACLE_PASSWORD"
-        owners = ["ADEMPIERE"]
-        "#,
-    )
+        owners = ["{owner}"]
+        "#
+    ))
     .unwrap()
+}
+
+/// The scratch schema the delete test plants rows in and deletes them from, with its owner's
+/// password: `EKOS_ORACLE_WRITE_SCHEMA` and `EKOS_ORACLE_WRITE_PASSWORD`, both required. The
+/// schema holds a copy of `ADEMPIERE.AD_MESSAGE` with its key, readable by the source user, e.g.
+///
+/// ```sql
+/// CREATE USER ekos_live_del IDENTIFIED BY "…" QUOTA UNLIMITED ON users;
+/// GRANT CREATE SESSION, CREATE TABLE TO ekos_live_del;
+/// CREATE TABLE ekos_live_del.ad_message AS SELECT * FROM adempiere.ad_message;
+/// ALTER TABLE ekos_live_del.ad_message ADD PRIMARY KEY (ad_message_id);
+/// GRANT READ ON ekos_live_del.ad_message TO ekos_ro;
+/// ```
+///
+/// There is no default: without both the test is skipped, so the application schema of a shared
+/// testbed is never written by accident.
+fn write_target() -> Option<(String, String)> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    Some((
+        var("EKOS_ORACLE_WRITE_SCHEMA")?,
+        var("EKOS_ORACLE_WRITE_PASSWORD")?,
+    ))
+}
+
+fn write_schema() -> String {
+    write_target()
+        .expect("checked before the delete test writes")
+        .0
 }
 
 fn settings() -> Settings {
     Settings {
-        trino_url: Some("http://127.0.0.1:58080".into()),
+        trino_url: Some(trino_url()),
         source_engine: Some(SourceEngine::ORACLE),
         source_database: Some("idempiere-db".into()),
         source_catalog: Some("idempiere".into()),
@@ -344,6 +385,8 @@ fn idempiere_plans_lands_and_reconciles() {
 /// write, by design. Only rows this test planted (ids above 9,000,000) are touched.
 fn as_owner(sql: &str) {
     use std::io::Write;
+    let (schema, password) = write_target().expect("checked before the delete test writes");
+    let login = format!("{}/{password}@localhost:1521/XEPDB1", schema.to_lowercase());
     let mut child = std::process::Command::new("docker")
         .args([
             "exec",
@@ -352,7 +395,7 @@ fn as_owner(sql: &str) {
             "sqlplus",
             "-s",
             "-L",
-            "adempiere/adempiere@localhost:1521/XEPDB1",
+            &login,
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -459,10 +502,11 @@ fn green(t: &TablePlan, plan: &Plan) -> bool {
 
 fn message_plan(prefix: &str, classes: &[&str]) -> (Plan, TablePlan) {
     let mut s = settings();
+    s.database = Some(database_of(&write_schema()));
     s.namespace_prefix = Some(prefix.into());
     s.application_watermark = Some("UPDATED".into());
     let facts = std::collections::BTreeMap::from([(
-        "ADEMPIERE.AD_MESSAGE".to_string(),
+        format!("{}.AD_MESSAGE", write_schema()),
         ekos_lakehouse_bronze::WriteFacts {
             update_class: "po_only".into(),
             delete_classes: classes.iter().map(|c| c.to_string()).collect(),
@@ -487,6 +531,14 @@ fn message_plan(prefix: &str, classes: &[&str]) -> (Plan, TablePlan) {
 fn idempiere_deletes_are_found_guarded_and_tombstoned() {
     if !live() {
         eprintln!("skipped: set EKOS_LAKEHOUSE_LIVE=1 EKOS_ORACLE_LIVE=1 with the testbed up");
+        return;
+    }
+    if write_target().is_none() {
+        eprintln!(
+            "skipped: this test plants and deletes rows. Set EKOS_ORACLE_WRITE_SCHEMA and \
+             EKOS_ORACLE_WRITE_PASSWORD to a scratch schema holding a copy of AD_MESSAGE (see \
+             `write_target`); it never writes into ADEMPIERE by default"
+        );
         return;
     }
     unplant("1 = 1");

@@ -60,6 +60,42 @@ pub fn pages() -> Vec<ConsolePage> {
                     ..Default::default()
                 },
                 Panel {
+                    id: "dashboard-versions",
+                    title: "Dashboard versions",
+                    command: vec!["lakehouse", "dashboards", "versions", "--json"],
+                    view: View::Table {
+                        rows: "/recent",
+                        columns: vec![
+                            Column::new("/dashboard", "Dashboard"),
+                            Column::new("/version", "Version"),
+                            Column::new("/author", "Author"),
+                            Column::new("/at", "When"),
+                            Column::new("/request", "Request"),
+                            Column::new("/changed", "Terms changed"),
+                        ],
+                    },
+                    empty: "No dashboard has a bundle yet: publish one from terms (Superset's Ask \
+                        your data, or `lakehouse dashboards publish`), or adopt one.",
+                    ..Default::default()
+                },
+                Panel {
+                    id: "dashboard-branches",
+                    title: "Dashboard copies and pull requests",
+                    command: vec!["lakehouse", "dashboards", "branches", "--json"],
+                    view: View::Table {
+                        rows: "/branches",
+                        columns: vec![
+                            Column::new("/dashboard", "Dashboard"),
+                            Column::new("/branch", "Branch"),
+                            Column::new("/author", "By"),
+                            Column::badge("/request", "Pull request"),
+                            Column::new("/copy", "Copy in Superset"),
+                        ],
+                    },
+                    empty: "No open copies: every change is on its dashboard.",
+                    ..Default::default()
+                },
+                Panel {
                     id: "proposals",
                     title: "Waiting for a merge",
                     command: vec!["lakehouse", "proposals", "--json"],
@@ -141,6 +177,35 @@ pub fn pages() -> Vec<ConsolePage> {
                 Action {
                     label: "Read dashboards from Superset",
                     command: vec!["lakehouse", "dashboards", "sync"],
+                    ..Default::default()
+                },
+                Action {
+                    label: "Find dashboards edited in Superset (drift)",
+                    command: vec!["lakehouse", "dashboards", "drift"],
+                    ..Default::default()
+                },
+                Action {
+                    label: "Preview a change to a dashboard",
+                    command: vec!["lakehouse", "dashboards", "change"],
+                    flags: vec!["preview"],
+                    inputs: vec![
+                        ("dashboard", "Dashboard (its key)"),
+                        ("text", "What to change, in words"),
+                    ],
+                    ..Default::default()
+                },
+                Action {
+                    label: "Change a dashboard (yours in place, anyone else's as a copy)",
+                    command: vec!["lakehouse", "dashboards", "change"],
+                    confirm: Some(
+                        "A local model turns your words into a change of terms; it is published \
+                         only if every chart reconciles with silver. Someone else's dashboard is \
+                         changed as a copy.",
+                    ),
+                    inputs: vec![
+                        ("dashboard", "Dashboard (its key)"),
+                        ("text", "What to change, in words"),
+                    ],
                     ..Default::default()
                 },
                 Action {
@@ -683,7 +748,7 @@ fn extraction_page() -> ConsolePage {
                         Column::new("/operations", "Writes"),
                         Column::new("/window", "Seen"),
                         Column::new("/advice", "Advice"),
-                        Column::new("/reason", "Why"),
+                        // The reason is long; it is in the table's evidence (pick the table).
                         Column::new("/cost", "Cost"),
                         Column::new("/answered", "Decision"),
                     ],

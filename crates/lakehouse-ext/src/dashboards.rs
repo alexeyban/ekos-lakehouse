@@ -45,6 +45,18 @@ pub struct DashboardsSettings {
     pub superset_header: Option<bool>,
     /// The console page the header links to (the chain), e.g. `https://ekos.example/ext/lakehouse`.
     pub console_url: Option<String>,
+    /// EKOS RFC 0258 phase 1: the Superset database (its id) new datasets are created on.
+    pub superset_database_id: Option<i64>,
+    /// The schema those datasets run in (default: the gold schema).
+    pub superset_schema: Option<String>,
+    /// Who may merge a change into someone else's dashboard, besides its author.
+    pub reviewers: Vec<String>,
+    /// How a mart added or changed for a dashboard is built: `dagster` (default: the description
+    /// is written and `lakehouse marts build` builds it) or `trino` (`CREATE OR REPLACE TABLE …
+    /// AS` on the engine — for a sandbox without Dagster).
+    pub mart_build: Option<String>,
+    /// RFC 0258 §3.3: an abandoned branch is closed after this many days (default 30).
+    pub branch_ttl_days: Option<i64>,
 }
 
 pub const RECORD_METRIC: &str = "dashboard";
@@ -274,6 +286,7 @@ pub fn chart_records(charts: &[Value], datasets: &[Value]) -> Vec<ChartRecord> {
                     dataset: String::new(),
                     reads: vec![],
                     unreadable: Some("the chart's dataset is not among the dashboard's".into()),
+                    ..Default::default()
                 };
             };
             let schema = ds["schema"].as_str();
@@ -295,6 +308,7 @@ pub fn chart_records(charts: &[Value], datasets: &[Value]) -> Vec<ChartRecord> {
                 dataset,
                 reads,
                 unreadable,
+                ..Default::default()
             }
         })
         .collect();
@@ -490,6 +504,13 @@ impl Superset {
 
     /// A write needs Superset's CSRF token, bound to the session cookie it is issued with.
     pub fn put_dashboard(&self, id: i64, body: &Value) -> anyhow::Result<()> {
+        self.write("PUT", &format!("/api/v1/dashboard/{id}"), Some(body))
+            .map(|_| ())
+    }
+
+    /// One write (`POST`, `PUT`, `DELETE`) with the CSRF token and its session cookie. Returns the
+    /// answer's JSON (`null` when there is none).
+    pub fn write(&self, method: &str, path: &str, body: Option<&Value>) -> anyhow::Result<Value> {
         let r = self
             .http
             .get(format!("{}/api/v1/security/csrf_token/", self.base))
@@ -506,31 +527,54 @@ impl Superset {
             .collect::<Vec<_>>()
             .join("; ");
         let token: Value = r.json()?;
+        let m = reqwest::Method::from_bytes(method.as_bytes())?;
         let mut req = self
             .http
-            .put(format!("{}/api/v1/dashboard/{id}", self.base))
+            .request(m, format!("{}{path}", self.base))
             .bearer_auth(&self.bearer)
             .header("X-CSRFToken", token["result"].as_str().unwrap_or_default())
-            .header(reqwest::header::REFERER, format!("{}/", self.base))
-            .json(body);
+            .header(reqwest::header::REFERER, format!("{}/", self.base));
+        if let Some(b) = body {
+            req = req.json(b);
+        }
         if !cookie.is_empty() {
             req = req.header(reqwest::header::COOKIE, cookie);
         }
-        req.send()
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| anyhow::anyhow!("PUT /api/v1/dashboard/{id}: {e}"))?;
-        Ok(())
+        let resp = req
+            .send()
+            .map_err(|e| anyhow::anyhow!("{method} {path}: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        anyhow::ensure!(
+            status.is_success(),
+            "{method} {path}: {status}: {}",
+            text.chars().take(400).collect::<String>()
+        );
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// One read.
+    pub fn read(&self, path: &str) -> anyhow::Result<Value> {
+        self.get(path, &[])
     }
 }
 
-/// What `sync` read: every selected dashboard, as a record (without `chain_known`).
+/// What `sync` read: every selected dashboard, as a record (without `chain_known`). A dashboard
+/// with a bundle (`with_bundles`, by Superset id) is taken from its bundle — the marts each chart
+/// reads, its reconciliation, its drift — instead of parsing its datasets' SQL (RFC 0248 §2.4);
+/// it is selected whatever its datasets are named.
 pub fn read_superset(
     s: &DashboardsSettings,
     sup: &Superset,
+    with_bundles: &[DashboardRecord],
 ) -> anyhow::Result<Vec<DashboardRecord>> {
     let mut out = vec![];
     for d in sup.dashboards()? {
         let Some(id) = d["id"].as_i64() else { continue };
+        if let Some(b) = with_bundles.iter().find(|b| b.dashboard_id == id) {
+            out.push(b.clone());
+            continue;
+        }
         let datasets = sup.datasets(id)?;
         if !selected(s, id, &datasets) {
             continue;
@@ -547,8 +591,7 @@ pub fn read_superset(
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("/superset/dashboard/{id}/")),
             charts: chart_records(&charts, &datasets),
-            chain_known: vec![],
-            removed: false,
+            ..Default::default()
         });
     }
     Ok(out)
@@ -671,9 +714,18 @@ pub fn render(h: &[DashboardHealth]) -> String {
             out.push_str(&format!("    {e}\n"));
         }
     }
+    let bundled = h.iter().all(|d| {
+        d.charts
+            .iter()
+            .all(|c| c.not_evaluated.len() == dh::NOT_EVALUATED_WITH_BUNDLE.len())
+    });
     out.push_str(&format!(
         "\nnot evaluated: {}\n",
-        dh::NOT_EVALUATED.join("; ")
+        if bundled {
+            dh::NOT_EVALUATED_WITH_BUNDLE.join("; ")
+        } else {
+            dh::NOT_EVALUATED.join("; ")
+        }
     ));
     out
 }

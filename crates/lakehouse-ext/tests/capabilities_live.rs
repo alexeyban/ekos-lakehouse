@@ -10,6 +10,11 @@ fn live() -> bool {
     std::env::var("EKOS_LAKEHOUSE_LIVE").is_ok_and(|v| v == "1")
 }
 
+/// The sandbox's source PostgreSQL as `host:port`, or `EKOS_LH_SOURCE`.
+fn source_addr() -> String {
+    std::env::var("EKOS_LH_SOURCE").unwrap_or_else(|_| "127.0.0.1:55433".into())
+}
+
 #[test]
 fn postgres_passes_the_kit_and_keeps_reconcile() {
     if !live() {
@@ -17,7 +22,7 @@ fn postgres_passes_the_kit_and_keeps_reconcile() {
         return;
     }
     let s = Settings {
-        source: Some("127.0.0.1:55433".into()),
+        source: Some(source_addr()),
         source_database: Some("pagila".into()),
         source_user: Some("ekos".into()),
         source_password_env: Some("EKOS_LH_PG_PASSWORD".into()),

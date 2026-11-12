@@ -8,6 +8,10 @@ pub mod ask_cmd;
 pub mod capabilities;
 pub mod check;
 pub mod console;
+pub mod dashboard_adopt;
+pub mod dashboard_change;
+mod dashboard_cli;
+pub mod dashboard_tool;
 pub mod dashboards;
 pub mod deletes;
 pub mod docs;
@@ -42,6 +46,9 @@ pub const NAME: &str = "lakehouse";
 #[derive(Clone, Default)]
 pub struct LakehouseExtension {
     engines: engines::Engines,
+    /// The pipeline repository `ekos_dashboard_compile` reads, found when the tools are listed
+    /// (the tool call itself is not handed the configuration).
+    mcp_repo: std::sync::Arc<std::sync::OnceLock<std::path::PathBuf>>,
 }
 
 impl LakehouseExtension {
@@ -65,6 +72,7 @@ impl LakehouseExtension {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             engines: self.engines.try_with(provider)?,
+            mcp_repo: self.mcp_repo,
         })
     }
 
@@ -79,8 +87,26 @@ impl EkosExtension for LakehouseExtension {
         NAME
     }
 
-    fn mcp_tools(&self, _config: &ekos_compiler_core::EkosConfig) -> Vec<serde_json::Value> {
+    fn mcp_tools(&self, config: &ekos_compiler_core::EkosConfig) -> Vec<serde_json::Value> {
+        if let (Ok(s), Ok(cwd)) = (
+            settings::load_with(config, &self.engines),
+            std::env::current_dir(),
+        ) {
+            let config_path = config
+                .location
+                .as_ref()
+                .map(|l| l.config_path())
+                .unwrap_or_else(|| cwd.join("ekos.toml"));
+            let repo = settings::pipeline_base(&cwd, &config_path)
+                .join(s.pipeline_dir.as_deref().unwrap_or("pipeline"));
+            let _ = self.mcp_repo.set(repo);
+        }
         vec![
+            serde_json::json!({
+                "name": dashboard_tool::NAME,
+                "description": dashboard_tool::DESCRIPTION,
+                "inputSchema": dashboard_tool::schema(),
+            }),
             serde_json::json!({
                 "name": "ekos_pipeline_status",
                 "description": "EKOS Lakehouse: every table's health per layer (bronze, silver, gold) — healthy, late, unverified (a planted reconciliation control missed), failing, or schema_pending (a source change awaits approval) — with the facts that put it there and, for a failing table, the probable cause. Read-only: it cannot rerun, merge or approve anything.",
@@ -148,6 +174,12 @@ impl EkosExtension for LakehouseExtension {
                 )
             })()),
             "ekos_dashboard_health" => Some(dashboards::mcp_answer(ledger, args, late)),
+            dashboard_tool::NAME => Some(match self.mcp_repo.get() {
+                Some(repo) => dashboard_tool::answer(repo, args),
+                None => Err(anyhow::anyhow!(
+                    "the pipeline repository is not known: [extensions.lakehouse] is not set up"
+                )),
+            }),
             "ekos_pentaho_translation" => Some((|| {
                 let package = args["package"].as_str();
                 let step = args["step"].as_str();
@@ -870,7 +902,8 @@ impl EkosExtension for LakehouseExtension {
                                         .action(clap::ArgAction::SetTrue)
                                         .help("Say what would change; write nothing"),
                                 ),
-                        ),
+                        )
+                        .subcommands(dashboard_cli::commands()),
                 )
                 .subcommand(
                     clap::Command::new("alert")
@@ -1047,6 +1080,21 @@ impl EkosExtension for LakehouseExtension {
                 Class::External,
                 false,
             ),
+            // EKOS RFC 0258 phases 1, 2, 4, 5 (and RFC 0248 §2.4's bundle): every write reaches
+            // Superset (and the engine for a sandbox mart build); a merge is a person's decision.
+            ("lakehouse dashboards publish", Class::External, false),
+            ("lakehouse dashboards change", Class::External, false),
+            ("lakehouse dashboards revert", Class::External, false),
+            ("lakehouse dashboards versions", Class::Read, false),
+            ("lakehouse dashboards diff", Class::Read, false),
+            ("lakehouse dashboards branches", Class::Read, false),
+            ("lakehouse dashboards review", Class::External, false),
+            ("lakehouse dashboards request-merge", Class::External, false),
+            ("lakehouse dashboards merge", Class::Review, false),
+            ("lakehouse dashboards close", Class::External, false),
+            ("lakehouse dashboards drift", Class::External, false),
+            ("lakehouse dashboards republish", Class::External, false),
+            ("lakehouse dashboards adopt", Class::External, false),
             ("lakehouse metrics", Class::External, false),
             // Reads the live source; commits and branches in the pipeline repository.
             ("lakehouse sync", Class::External, false),
@@ -2726,10 +2774,46 @@ fn dashboards_cmd(
             Ok(())
         }
         Some(("sync", _)) => {
+            // RFC 0248 §2.4: bundles in the pipeline repository are the record of what was
+            // published; one the Superset fork wrote is committed first.
+            let repo = pipeline_dir(&settings, ctx);
+            let plan = plan_cmd::read_lock(&repo).ok();
+            let mut recorded = vec![];
+            if repo.join(".git").exists() {
+                recorded = dashboard_change::record_written_bundles(&repo)?;
+            }
             let read = off_runtime(|| {
                 let sup = dashboards::Superset::connect(&ds)?;
-                dashboards::read_superset(&ds, &sup)
+                let mut with_bundles = vec![];
+                if let Some(p) = &plan {
+                    let target = ekos_lakehouse_gold::dashboard::Target {
+                        catalog: p.settings.target_catalog.clone(),
+                        gold_schema: ekos_lakehouse_bronze::plan::gold_schema(
+                            &p.settings.namespace_prefix,
+                        ),
+                    };
+                    let (digests, mart_reads) = dashboard_change::mart_facts(&repo, p);
+                    for (label, b) in dashboard_change::all_bundles(&repo) {
+                        if b.superset.is_some() {
+                            with_bundles.push(dashboard_change::bundle_record(
+                                &sup,
+                                &label,
+                                &b,
+                                &target,
+                                &digests,
+                                &mart_reads,
+                            )?);
+                        }
+                    }
+                }
+                dashboards::read_superset(&ds, &sup, &with_bundles)
             })?;
+            for (key, r) in &recorded {
+                match r {
+                    Ok(c) => println!("bundle {key}: committed as {}", &c[..12.min(c.len())]),
+                    Err(e) => println!("bundle {key}: {e}"),
+                }
+            }
             let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
             let run = format!("dashboards-{}", monitor::now());
             let (n, removed) = dashboards::sync(store.as_ref(), &read, late, &run)?;
@@ -2763,6 +2847,9 @@ fn dashboards_cmd(
                 println!("{s}");
             }
             Ok(())
+        }
+        Some((name, sub)) if dashboard_cli::handles(name) => {
+            dashboard_cli::run(ctx, &settings, &pipeline_dir(&settings, ctx), name, sub)
         }
         other => anyhow::bail!("unknown dashboards command {other:?}"),
     }

@@ -271,10 +271,16 @@ fn pg() -> Pg {
     let password =
         std::env::var("EKOS_LH_PG_PASSWORD").unwrap_or_else(|_| "ekos-local-only".into());
     let client = postgres::Client::connect(
-        &format!("host=127.0.0.1 port=55433 user=ekos dbname=source password={password}"),
+        &format!(
+            "host=127.0.0.1 port={} user=ekos dbname=source password={password}",
+            std::env::var("EKOS_LH_SOURCE")
+                .ok()
+                .and_then(|a| a.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()))
+                .unwrap_or(55433)
+        ),
         postgres::NoTls,
     )
-    .expect("the sandbox PostgreSQL on 55433");
+    .expect("the sandbox PostgreSQL (EKOS_LH_SOURCE, default 127.0.0.1:55433)");
     Pg(RefCell::new(client))
 }
 

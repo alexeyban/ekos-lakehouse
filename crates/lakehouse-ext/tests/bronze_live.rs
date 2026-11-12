@@ -16,10 +16,27 @@ fn live() -> bool {
     std::env::var("EKOS_LAKEHOUSE_LIVE").is_ok_and(|v| v == "1")
 }
 
+/// The sandbox's Trino, or `EKOS_LH_TRINO_URL` (a second stack on other ports).
+fn trino_url() -> String {
+    std::env::var("EKOS_LH_TRINO_URL").unwrap_or_else(|_| "http://127.0.0.1:58080".into())
+}
+
+/// The sandbox's source PostgreSQL as `host:port`, or `EKOS_LH_SOURCE`.
+fn source_addr() -> String {
+    std::env::var("EKOS_LH_SOURCE").unwrap_or_else(|_| "127.0.0.1:55433".into())
+}
+
+fn source_port() -> u16 {
+    source_addr()
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse().ok())
+        .unwrap_or(5432)
+}
+
 fn settings() -> Settings {
     Settings {
-        trino_url: Some("http://127.0.0.1:58080".into()),
-        source: Some("127.0.0.1:55433".into()),
+        trino_url: Some(trino_url()),
+        source: Some(source_addr()),
         source_database: Some("pagila".into()),
         source_user: Some("ekos".into()),
         source_password_env: Some("EKOS_LH_PG_PASSWORD".into()),
@@ -40,7 +57,7 @@ fn source_reader() -> ekos_pg_live::PgSource {
     ekos_pg_live::PgSource::connect(
         &conn,
         "127.0.0.1",
-        55433,
+        source_port(),
         "ekos",
         "lakehouse-test",
         &ekos_pg_live::SessionPolicy::default(),
@@ -51,7 +68,10 @@ fn source_reader() -> ekos_pg_live::PgSource {
 fn pg_writer() -> postgres::Client {
     let pw = std::env::var("EKOS_LH_PG_PASSWORD").unwrap();
     postgres::Client::connect(
-        &format!("host=127.0.0.1 port=55433 user=ekos dbname=pagila password={pw}"),
+        &format!(
+            "host=127.0.0.1 port={} user=ekos dbname=pagila password={pw}",
+            source_port()
+        ),
         postgres::NoTls,
     )
     .unwrap()

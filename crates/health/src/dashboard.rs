@@ -43,14 +43,20 @@ impl DashState {
 }
 
 /// What the evaluation could not judge, said on every chart so "trusted" is read for what it is.
+/// What a chart with a bundle still cannot be judged on.
+pub const NOT_EVALUATED_WITH_BUNDLE: [&str; 1] = [
+    "stale instructions or synonyms and requirement approval validity (RFC 0247 annotations are not read)",
+];
+
 pub const NOT_EVALUATED: [&str; 3] = [
     "chart reconciliation (RFC 0248 §2.4 is not built; the mart's reconciliation with silver stands in)",
     "drift from the published bundle (RFC 0258 phase 4)",
     "stale instructions or synonyms and requirement approval validity (no bundle records a chart's terms)",
 ];
 
-/// One chart as read from Superset: the tables its dataset reads, as the SQL names them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One chart as read from Superset: the tables its dataset reads, as the SQL names them — or, for
+/// a dashboard with a bundle (RFC 0248 §2.4), the marts its bundle says it reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChartRecord {
     pub chart_id: i64,
     pub name: String,
@@ -61,10 +67,38 @@ pub struct ChartRecord {
     /// Why the dataset's tables could not be read (unparsable SQL, no dataset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unreadable: Option<String>,
+    /// RFC 0258 §3.4: how the chart in Superset differs from its bundle (empty: no drift).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drift: Vec<String>,
+    /// The silver tables the chart's mart reads, from the mart as compiled in the pipeline
+    /// repository (a chart with a bundle). Empty: from the mart's requirement approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mart_reads: Vec<String>,
+    /// RFC 0248 §2.4: the chart's own reconciliation with silver, from its bundle. `None` on a
+    /// chart without a bundle (the mart's reconciliation stands in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciled: Option<ChartRecon>,
+}
+
+/// A chart's reconciliation as its bundle records it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChartRecon {
+    /// `None`: the bundle holds no reconciliation (an adopted chart).
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub at: String,
+    /// The mart's digest when the chart was reconciled, and the mart's digest now.
+    #[serde(default)]
+    pub mart_digest: String,
+    #[serde(default)]
+    pub current_digest: Option<String>,
+    /// Measures whose totals differed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub differs: Vec<String>,
 }
 
 /// One dashboard as `lakehouse dashboards sync` recorded it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DashboardRecord {
     pub dashboard_id: i64,
     pub title: String,
@@ -78,6 +112,12 @@ pub struct DashboardRecord {
     /// Set when the dashboard was no longer in Superset at the last sync.
     #[serde(default)]
     pub removed: bool,
+    /// The bundle it was read from (`dashboards/<key>.yaml`, or `<branch>:<key>` for a copy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
+    /// Drift of the dashboard itself (its title, a chart added or removed in Superset).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drift: Vec<String>,
 }
 
 /// One measure of a mart's reconciliation with silver (RFC 0228 §2.5).
@@ -318,6 +358,18 @@ fn chart_health(ctx: &Ctx<'_>, known: &BTreeSet<(String, String)>, c: &ChartReco
             Some((layer, table)) => {
                 push(&mut chain, &layer, &table);
                 let upstream = match layer.as_str() {
+                    "gold" if !c.mart_reads.is_empty() => {
+                        // The silver tables are known from the compiled mart; only the mart's
+                        // own build and reconciliation facts are judged here.
+                        let mut ignore = vec![];
+                        mart_findings(ctx, &table, &mut ignore);
+                        evidence.extend(
+                            ignore
+                                .into_iter()
+                                .filter(|f| !f.fact.contains("are not recorded")),
+                        );
+                        c.mart_reads.clone()
+                    }
                     "gold" => mart_findings(ctx, &table, &mut evidence),
                     "silver" => vec![table.clone()],
                     _ => vec![],
@@ -331,6 +383,17 @@ fn chart_health(ctx: &Ctx<'_>, known: &BTreeSet<(String, String)>, c: &ChartReco
                 }
             }
         }
+    }
+    for d in &c.drift {
+        evidence.push(Finding {
+            state: DashState::Drifted,
+            fact: format!("drifted in Superset: {d}"),
+            layer: None,
+            table: None,
+        });
+    }
+    if let Some(r) = &c.reconciled {
+        evidence.extend(recon_finding(r));
     }
     if c.reads.is_empty() && c.unreadable.is_none() {
         evidence.push(Finding {
@@ -377,8 +440,56 @@ fn chart_health(ctx: &Ctx<'_>, known: &BTreeSet<(String, String)>, c: &ChartReco
         evidence,
         data_as_of,
         chain: nodes,
-        not_evaluated: NOT_EVALUATED.iter().map(|s| s.to_string()).collect(),
+        not_evaluated: if c.reconciled.is_some() {
+            NOT_EVALUATED_WITH_BUNDLE
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            NOT_EVALUATED.iter().map(|s| s.to_string()).collect()
+        },
     }
+}
+
+/// RFC 0258 §3.5 from the chart's own reconciliation: missing → unverified; a difference →
+/// failing; the mart changed since → unverified.
+fn recon_finding(r: &ChartRecon) -> Vec<Finding> {
+    let f = |state, fact: String| Finding {
+        state,
+        fact,
+        layer: None,
+        table: None,
+    };
+    let mut out = vec![];
+    match r.ok {
+        None => out.push(f(
+            DashState::Unverified,
+            "the chart was never reconciled with silver (adopted, not republished)".into(),
+        )),
+        Some(false) => out.push(f(
+            DashState::Failing,
+            format!(
+                "the chart does not reconcile with silver ({})",
+                r.differs.join(", ")
+            ),
+        )),
+        Some(true) => {}
+    }
+    match &r.current_digest {
+        Some(now) if *now != r.mart_digest => out.push(f(
+            DashState::Unverified,
+            format!(
+                "its mart changed since the chart was reconciled ({} → {now}, at {})",
+                r.mart_digest, r.at
+            ),
+        )),
+        None if !r.mart_digest.is_empty() => out.push(f(
+            DashState::Unverified,
+            "the mart it was compiled over is no longer described".into(),
+        )),
+        _ => {}
+    }
+    out
 }
 
 /// Every recorded dashboard that is still in Superset and whose chain the reader can see,
@@ -424,6 +535,14 @@ pub fn evaluate(
                         .map(move |f| (f.state, format!("{}: {}", c.name, f.fact)))
                 })
                 .collect();
+            for x in &d.drift {
+                findings.push((DashState::Drifted, format!("drifted in Superset: {x}")));
+            }
+            let state = if d.drift.is_empty() {
+                state
+            } else {
+                state.max(DashState::Drifted)
+            };
             if charts.is_empty() {
                 findings.push((DashState::Unverified, "the dashboard has no charts".into()));
             }
@@ -512,7 +631,7 @@ mod tests {
             name: format!("chart {id}"),
             dataset: format!("public.ai_abc123_{id}"),
             reads: reads.iter().map(|s| s.to_string()).collect(),
-            unreadable: None,
+            ..Default::default()
         }
     }
 
@@ -522,8 +641,7 @@ mod tests {
             title: "Sales".into(),
             url: "/superset/dashboard/7/".into(),
             charts,
-            chain_known: vec![],
-            removed: false,
+            ..Default::default()
         }
     }
 
@@ -590,6 +708,94 @@ mod tests {
             ]
         );
         assert_eq!(d.charts[0].not_evaluated.len(), NOT_EVALUATED.len());
+    }
+
+    fn eval_with(
+        marts: &BTreeMap<String, MartFacts>,
+        edit: impl Fn(&mut DashboardRecord),
+    ) -> DashboardHealth {
+        let h = table_health(
+            &Facts {
+                runs: healthy_runs(),
+                ..Default::default()
+            },
+            NOW,
+            120,
+        );
+        let mut d = dash(vec![chart(1, &["iceberg.gold.sales"])]);
+        edit(&mut d);
+        evaluate(&[d], &h, marts).remove(0)
+    }
+
+    fn recon(ok: Option<bool>, then: &str, now: Option<&str>) -> ChartRecon {
+        ChartRecon {
+            ok,
+            at: "2026-11-12T00:00:00Z".into(),
+            mart_digest: then.into(),
+            current_digest: now.map(str::to_string),
+            differs: if ok == Some(false) {
+                vec!["revenue".into()]
+            } else {
+                vec![]
+            },
+        }
+    }
+
+    #[test]
+    fn a_bundle_chart_is_judged_on_its_own_reconciliation_and_its_drift() {
+        let marts = mart(&["public.orders", "public.customers"], "gold-99600", true);
+        let ok = eval_with(&marts, |d| {
+            d.charts[0].reconciled = Some(recon(Some(true), "a1", Some("a1")))
+        });
+        assert_eq!(ok.state, DashState::Trusted, "{:#?}", ok.evidence);
+        assert_eq!(
+            ok.charts[0].not_evaluated.len(),
+            NOT_EVALUATED_WITH_BUNDLE.len()
+        );
+        let differs = eval_with(&marts, |d| {
+            d.charts[0].reconciled = Some(recon(Some(false), "a1", Some("a1")))
+        });
+        assert_eq!(differs.state, DashState::Failing);
+        assert!(
+            differs.evidence[0].contains("does not reconcile"),
+            "{:?}",
+            differs.evidence
+        );
+        let moved = eval_with(&marts, |d| {
+            d.charts[0].reconciled = Some(recon(Some(true), "a1", Some("b2")))
+        });
+        assert_eq!(moved.state, DashState::Unverified);
+        assert!(
+            moved.evidence[0].contains("mart changed since"),
+            "{:?}",
+            moved.evidence
+        );
+        let adopted = eval_with(&marts, |d| {
+            d.charts[0].reconciled = Some(recon(None, "a1", Some("a1")))
+        });
+        assert_eq!(adopted.state, DashState::Unverified);
+        let drifted = eval_with(&marts, |d| {
+            d.charts[0].reconciled = Some(recon(Some(true), "a1", Some("a1")));
+            d.charts[0].drift = vec!["Revenue: `viz_type` is \"pie\" in Superset".into()];
+        });
+        assert_eq!(drifted.state, DashState::Drifted);
+        assert!(
+            drifted.evidence[0].starts_with("chart 1: drifted in Superset"),
+            "{:?}",
+            drifted.evidence
+        );
+        let whole = eval_with(&marts, |d| {
+            d.charts[0].reconciled = Some(recon(Some(true), "a1", Some("a1")));
+            d.drift = vec!["the dashboard's title is \"X\"".into()];
+        });
+        assert_eq!(whole.state, DashState::Drifted);
+        // Drift does not hide a worse state.
+        let both = eval_with(&marts, |d| {
+            d.charts[0].reconciled = Some(recon(Some(false), "a1", Some("a1")));
+            d.charts[0].drift = vec!["x".into()];
+        });
+        assert_eq!(both.state, DashState::Failing);
+        assert!(both.evidence.iter().any(|e| e.contains("drifted")));
     }
 
     #[test]

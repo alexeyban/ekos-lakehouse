@@ -122,7 +122,11 @@ fn window_words(f: &WriterFinding) -> String {
     } else {
         ""
     };
-    format!("{from} – {to}{calls}{cut}")
+    // EKOS RFC 0256 open question 2: since when EKOS has seen this writer.
+    let since = day(d.get("first_observed"))
+        .map(|f| format!(", first seen {f}"))
+        .unwrap_or_default();
+    format!("{from} – {to}{calls}{since}{cut}")
 }
 
 fn advice(
@@ -347,6 +351,14 @@ mod tests {
         );
         assert!(w[0].advice.cost.contains("about 50 rows"));
         assert!(w[0].window.contains("2026-11-01 – 2026-11-11, 3 call(s)"));
+        let mut seen = writer("etl_nightly", &["update"]);
+        seen.detail["first_observed"] = json!("2026-11-03T08:00:00Z");
+        let w = warnings(&p, &[seen], &rows(50), &[]);
+        assert!(
+            w[0].window.ends_with("3 call(s), first seen 2026-11-03"),
+            "{}",
+            w[0].window
+        );
     }
 
     #[test]

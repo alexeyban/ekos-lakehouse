@@ -235,7 +235,7 @@ fn a_failed_load_turns_the_dashboard_failing_in_superset_and_recovery_trusted() 
     let sup = Superset::with_token(&base, "t0ken").unwrap();
 
     // Sync: only the dashboard the fork published (8's dataset is a plain table).
-    let read = dashboards::read_superset(&s, &sup).unwrap();
+    let read = dashboards::read_superset(&s, &sup, &[]).unwrap();
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].charts[0].reads, ["iceberg.gold.sales"]);
     let (n, removed) = dashboards::sync(store.as_ref(), &read, 120, "t1").unwrap();
@@ -320,9 +320,11 @@ fn a_restricted_reader_sees_no_dashboard() {
             dataset: "public.ai_abcdef_1".into(),
             reads: vec!["gold.sales".into()],
             unreadable: None,
+            ..Default::default()
         }],
         chain_known: vec![],
         removed: false,
+        ..Default::default()
     };
     dashboards::sync(store.as_ref(), &[record], 120, "t1").unwrap();
     let ext = LakehouseExtension::new();

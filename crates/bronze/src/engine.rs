@@ -180,7 +180,12 @@ impl EngineSpec for OracleSpec {
             ),
             (
                 C::UsageStats,
-                Support::absent("the Oracle connector reads no workload statistics"),
+                // EKOS RFC 0256: `ekos interaction observe` reads V$SQL per user, table and
+                // operation; cursors age out of the shared pool, so an observation is partial.
+                Support::partial(
+                    "V$SQL per user, read by `ekos interaction observe`; the shared pool ages \
+                     cursors out, so an observation is partial and table counters are not compared",
+                ),
             ),
             (C::Profiling, Support::Provided),
             (C::Reconcile, Support::Provided),
