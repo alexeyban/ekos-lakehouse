@@ -1,0 +1,25 @@
+{
+  "about": "EKOS RFC 0257 §4 phase 5: twenty written change requests on iDempiere marts (ekos-lakehouse-oracle/pipeline). `expect` is an edit (a new term's `name` is free), `question` or `not_expressible`. A value written as a word (cancelled, big, drafted) has no value list naming it, so the right answer is a question.",
+  "requests": [
+    {"mart": "invoices_by_month", "step": 1, "request": "Leave out invoices whose status is VO.", "expect": {"edit": {"edit": "add_filter", "filter": "C_INVOICE.DOCSTATUS <> 'VO'"}}},
+    {"mart": "invoices_by_month", "step": 1, "request": "Exclude cancelled invoices here.", "expect": "question"},
+    {"mart": "invoices_by_month", "step": 1, "request": "Instead of status CO, keep every status except DR.", "expect": {"edit": {"edit": "change_filter", "from": "c_invoice.docstatus = 'CO'", "to": "C_INVOICE.DOCSTATUS <> 'DR'"}}},
+    {"mart": "invoices_by_month", "step": 2, "request": "Drop the sales-transaction condition; I want purchase invoices too.", "expect": {"edit": {"edit": "drop_filter", "filter": "c_invoice.issotrx is true"}}},
+    {"mart": "invoices_by_month", "step": 3, "request": "Also give me the total of the invoices' TOTALLINES amount.", "expect": {"edit": {"edit": "add_measure", "name": "*", "definition": "sum of C_INVOICE.TOTALLINES"}}},
+    {"mart": "invoices_by_month", "step": 3, "request": "Show the average invoice amount per month.", "expect": "not_expressible"},
+    {"mart": "invoices_by_month", "step": 3, "request": "Split each month by the invoice's PAYMENTRULE.", "expect": {"edit": {"edit": "add_dimension", "name": "*", "definition": "C_INVOICE.PAYMENTRULE"}}},
+    {"mart": "invoices_by_month", "step": 0, "request": "Only invoices that are paid (ISPAID).", "expect": {"edit": {"edit": "add_filter", "filter": "C_INVOICE.ISPAID is true"}}},
+    {"mart": "invoices_by_month", "step": 3, "request": "Rank the months by revenue and keep the top 3.", "expect": "not_expressible"},
+    {"mart": "sales_by_month", "step": 4, "request": "Use status CL instead of CO.", "expect": {"edit": {"edit": "change_filter", "from": "c_order.docstatus = 'CO'", "to": "C_ORDER.DOCSTATUS = 'CL'"}}},
+    {"mart": "sales_by_month", "step": 5, "request": "Add the sum of the orders' TOTALLINES as a measure.", "expect": {"edit": {"edit": "add_measure", "name": "*", "definition": "sum of C_ORDER.TOTALLINES"}}},
+    {"mart": "sales_by_month", "step": 5, "request": "Remove the orders measure.", "expect": {"edit": {"edit": "drop_measure", "name": "orders"}}},
+    {"mart": "sales_by_month", "step": 5, "request": "Stop splitting the rows by customer.", "expect": {"edit": {"edit": "drop_dimension", "name": "customer"}}},
+    {"mart": "sales_by_month", "step": 2, "request": "Join the customer through the bill-to partner (BILL_BPARTNER_ID) instead of the order's partner.", "expect": {"edit": {"edit": "change_join", "term": "customer", "via": "C_ORDER.BILL_BPARTNER_ID"}}},
+    {"mart": "sales_by_month", "step": 3, "request": "Only big orders.", "expect": "question"},
+    {"mart": "sales_by_month", "step": 0, "request": "Only orders with a GRANDTOTAL above 1000.", "expect": {"edit": {"edit": "add_filter", "filter": "C_ORDER.GRANDTOTAL > 1000"}}},
+    {"mart": "sales_by_month", "step": 5, "request": "Add a column with the sales representative's email address.", "expect": "question"},
+    {"mart": "orders_per_customer", "step": 3, "request": "Include inactive orders as well.", "expect": {"edit": {"edit": "drop_filter", "filter": "C_ORDER.ISACTIVE = true"}}},
+    {"mart": "orders_per_customer", "step": 4, "request": "Exclude drafted orders here.", "expect": "question"},
+    {"mart": "orders_per_customer", "step": 5, "request": "Write the SQL for a 3-month moving average of the order count.", "expect": "not_expressible"}
+  ]
+}

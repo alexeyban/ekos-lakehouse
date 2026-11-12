@@ -21,6 +21,10 @@ pub mod extraction;
 pub mod facts;
 mod gold_cmd;
 pub mod install;
+pub mod mart_assist;
+pub mod mart_edit;
+pub mod mart_graph;
+pub mod mart_rows;
 pub mod marts;
 pub mod monitor;
 pub mod pentaho_cmd;
@@ -653,6 +657,128 @@ impl EkosExtension for LakehouseExtension {
                                 .arg(clap::Arg::new("mart").long("mart").help("Show this mart in full")),
                         )
                         .subcommand(
+                            clap::Command::new("graph")
+                                .about(
+                                    "The mart as a chain of steps, each joined to the term it was \
+                                     compiled from (EKOS RFC 0257)",
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart"))
+                                .arg(
+                                    clap::Arg::new("proposed")
+                                        .long("proposed")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help(
+                                            "Draw what the compiler writes from the description now, \
+                                             not the committed model",
+                                        ),
+                                )
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output (ekos.transformation-graph/1)"),
+                                ),
+                        )
+                        .subcommand({
+                            let opt = |id: &'static str, help: &'static str| {
+                                clap::Arg::new(id).long(id).help(help)
+                            };
+                            clap::Command::new("edit")
+                                .about(
+                                    "Change a mart on a step of its chain: a filter, a join's path, a \
+                                     dimension or a measure — previewed, gated, and recorded as a change \
+                                     to its requirement (EKOS RFC 0257)",
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart"))
+                                .arg(
+                                    clap::Arg::new("step")
+                                        .long("step")
+                                        .required(true)
+                                        .value_parser(clap::value_parser!(u32))
+                                        .help("The step the edit is made on (its number in `marts graph`)"),
+                                )
+                                .arg(opt("edit", "The edit as JSON (the assistant's form)"))
+                                .arg(opt("add-filter", "A filter to add: table.column <op> value"))
+                                .arg(opt("change-filter", "A filter to change, as written (with --to)"))
+                                .arg(opt("to", "The changed filter"))
+                                .arg(opt("drop-filter", "A filter to remove, as written"))
+                                .arg(opt("join-term", "The term whose join path changes (with --via)"))
+                                .arg(opt("via", "The declared foreign key to join along: table.column"))
+                                .arg(opt("add-dimension", "A dimension to add (with --definition)"))
+                                .arg(opt("drop-dimension", "A dimension to remove"))
+                                .arg(opt("add-measure", "An additive measure to add (with --definition)"))
+                                .arg(opt("drop-measure", "A measure to remove"))
+                                .arg(opt("definition", "The new term's definition"))
+                                .arg(
+                                    clap::Arg::new("preview")
+                                        .long("preview")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Show the chain before and after, the counts and the gates; change nothing"),
+                                )
+                                .arg(
+                                    clap::Arg::new("confirm")
+                                        .long("confirm")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Confirm a modifying change (existing rows or values change)"),
+                                )
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output"),
+                                )
+                                .arg(
+                                    clap::Arg::new("by")
+                                        .long("as")
+                                        .help("Who (default: $USER; the console sets it)"),
+                                )
+                        })
+                        .subcommand(
+                            clap::Command::new("suggest")
+                                .about(
+                                    "Ask the local assistant to turn what you want on a step into one \
+                                     proposed edit, a question, or \"not expressible\" (EKOS RFC 0257; \
+                                     a local Ollama only; nothing is recorded)",
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart"))
+                                .arg(
+                                    clap::Arg::new("step")
+                                        .long("step")
+                                        .required(true)
+                                        .value_parser(clap::value_parser!(u32))
+                                        .help("The step (its number in `marts graph`)"),
+                                )
+                                .arg(clap::Arg::new("request").long("request").required(true).help("What you want, in your words"))
+                                .arg(clap::Arg::new("model").long("model").help("The Ollama model (default: gold-model, else llama3)"))
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output"),
+                                ),
+                        )
+                        .subcommand(
+                            clap::Command::new("rows")
+                                .about(
+                                    "The mart's chain with the rows each step passes, counted on \
+                                     the engine now: aggregates only, small cells hidden, not stored \
+                                     (EKOS RFC 0257)",
+                                )
+                                .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart"))
+                                .arg(
+                                    clap::Arg::new("proposed")
+                                        .long("proposed")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Count what the compiler writes now, not the committed model"),
+                                )
+                                .arg(
+                                    clap::Arg::new("json")
+                                        .long("json")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Machine-readable output"),
+                                ),
+                        )
+                        .subcommand(
                             clap::Command::new("propose")
                                 .about("Draft the mart from its approved requirement onto a proposal branch")
                                 .arg(clap::Arg::new("mart").long("mart").required(true).help("The mart")),
@@ -1063,6 +1189,14 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse docs generate", Class::Write, false),
             ("lakehouse docs publish", Class::External, false),
             ("lakehouse marts show", Class::Read, false),
+            // EKOS RFC 0257: reads the repository and the deployed plan only.
+            ("lakehouse marts graph", Class::Read, false),
+            // EKOS RFC 0257 §3.3: counts on the engine (aggregates only, never stored).
+            ("lakehouse marts rows", Class::External, false),
+            // EKOS RFC 0257 §3.5: changes a requirement after the engine gates; a person's act.
+            ("lakehouse marts edit", Class::Review, false),
+            // EKOS RFC 0257 §3.6: a local model proposes; nothing is recorded.
+            ("lakehouse marts suggest", Class::External, true),
             ("lakehouse marts propose", Class::External, true),
             ("lakehouse marts merge", Class::Review, false),
             ("lakehouse marts build", Class::External, false),
@@ -1710,6 +1844,8 @@ async fn gold_draft(
             .map_err(|e| anyhow::anyhow!("{}: {e}", description.display()))?;
         requirements::require_approved(&requirements::state_dir(ctx.config, ctx.cwd), &text)?;
     }
+    let plan = plan_cmd::read_lock(&repo).ok();
+    let notes = mart_notes(ctx, plan.as_ref());
     let (outcome, _) = gold_cmd::draft(
         &repo,
         description,
@@ -1719,6 +1855,7 @@ async fn gold_draft(
             .as_deref()
             .unwrap_or("http://127.0.0.1:11434"),
         &settings.trino_connection()?,
+        &notes.instructions,
     )
     .await?;
     let run = format!(
@@ -1772,7 +1909,261 @@ async fn gold_draft(
     }
 }
 
-/// `lakehouse marts show|propose|merge|build|reconcile` (EKOS RFC 0228).
+/// EKOS RFC 0257 §3.5: `lakehouse marts edit` — preview, gates, and the requirement change.
+fn mart_edit_cmd(
+    ctx: &CommandContext<'_>,
+    settings: &settings::Settings,
+    repo: &std::path::Path,
+    plan: Option<&ekos_lakehouse_bronze::plan::Plan>,
+    m: &clap::ArgMatches,
+) -> anyhow::Result<()> {
+    use ekos_lakehouse_gold as gold;
+    use serde_json::{Value, json};
+    let mart = m.get_one::<String>("mart").expect("required");
+    let step = *m.get_one::<u32>("step").expect("required");
+    let p = plan.ok_or_else(|| anyhow::anyhow!("no deployed plan (lakehouse.lock.json)"))?;
+    let arg = |k: &str| m.get_one::<String>(k).map(String::as_str);
+    let e = mart_edit::edit_from(&mart_edit::EditArgs {
+        json: arg("edit"),
+        add_filter: arg("add-filter"),
+        drop_filter: arg("drop-filter"),
+        change_filter: arg("change-filter"),
+        to: arg("to"),
+        join_term: arg("join-term"),
+        via: arg("via"),
+        add_dimension: arg("add-dimension"),
+        drop_dimension: arg("drop-dimension"),
+        add_measure: arg("add-measure"),
+        drop_measure: arg("drop-measure"),
+        definition: arg("definition"),
+    })?;
+    let notes = mart_notes(ctx, Some(p));
+    let min_cell = ctx.config.probe.min_cell;
+    // The chain the edit is made on: what runs, else what the requirement compiles to now.
+    let (before, before_ir) = marts::chain(repo, p, mart, marts::Version::Committed, &notes)
+        .or_else(|_| marts::chain(repo, p, mart, marts::Version::Proposed, &notes))?;
+    let node = before
+        .nodes
+        .iter()
+        .find(|n| n.index == Some(step))
+        .ok_or_else(|| {
+            anyhow::anyhow!("{mart} has no step {step} (`lakehouse marts graph --mart {mart}`)")
+        })?;
+    mart_edit::on_step(&e, &node.node_type).map_err(|w| anyhow::anyhow!("{w}"))?;
+    let step_label = node.label.clone();
+    let req_dir = requirements::state_dir(ctx.config, ctx.cwd);
+    let draft = requirements::read(&req_dir, mart)?;
+    let before_spec = match &draft {
+        Some(d) => d.spec.clone(),
+        None => gold::parse(
+            &marts::file_at(repo, "HEAD", &marts::description_path(mart))
+                .ok_or_else(|| anyhow::anyhow!("{mart} has no requirement"))?,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?,
+    };
+    let (after_spec, said) = gold::edits::apply(&before_spec, &e).map_err(|w| {
+        anyhow::anyhow!("{w}: not expressible as this edit. A comment on the step says it instead")
+    })?;
+    let class = gold::edits::classify(&before_spec, &after_spec, &e);
+    let (mut gates, compiled) = gold::edits::static_gates(&after_spec, p, &notes.instructions, &e);
+    let mut after_json = Value::Null;
+    if let Some(c) = &compiled {
+        let (spec2, resolved2, _) = gold::resolve_with(&after_spec, p, &notes.instructions);
+        let eg = mart_edit::engine_gates(&spec2, &resolved2, c, mart_edit::catalog(p));
+        let conn = settings.trino_connection()?;
+        let (plans, dup, totals) = off_runtime(move || {
+            let client = ekos_lakehouse_trino::Client::new(conn.clone())?;
+            let plans = client
+                .execute(&eg.plans)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let r = ekos_lakehouse_trino::TrinoReader::new(conn)?;
+            let mut dup = None;
+            let mut totals = vec![];
+            if plans.is_ok() {
+                if let Some(g) = &eg.grain {
+                    let row = r.read(g)?.into_iter().next().unwrap_or_default();
+                    dup = row.first().and_then(|x| x.parse::<i64>().ok());
+                }
+                for (measure, sql) in &eg.reconcile {
+                    let row = r.read(sql)?.into_iter().next().unwrap_or_default();
+                    totals.push((
+                        measure.clone(),
+                        row.first().cloned().unwrap_or_default(),
+                        row.get(1).cloned().unwrap_or_default(),
+                    ));
+                }
+            }
+            Ok((plans, dup, totals))
+        })?;
+        gates.extend(mart_edit::engine_verdicts(plans, dup, &totals));
+        let (g, ir) = mart_graph::chain_ir(&mart_graph::MartSql {
+            mart,
+            path: &marts::model_path(mart),
+            dbt_sql: &c.dbt_sql,
+            version: "preview",
+            grain: &spec2.grain,
+            resolved: &resolved2,
+            clauses: &c.clauses,
+            notes_by_table: notes.by_table.clone(),
+            notes_by_term: notes.by_term(),
+        })?;
+        after_json = mart_graph::to_json(&g);
+        let rows = mart_step_rows(settings, p, &ir, min_cell)?;
+        mart_graph::with_rows(&mut after_json, &rows, "the edited mart, counted now");
+    }
+    let mut before_json = mart_graph::to_json(&before);
+    let rows = mart_step_rows(settings, p, &before_ir, min_cell)?;
+    mart_graph::with_rows(
+        &mut before_json,
+        &rows,
+        "the mart before the edit, counted now",
+    );
+    let mut out = mart_edit::outcome(&e, step, &said, &class, &gates, m.get_flag("confirm"));
+    let preview = m.get_flag("preview");
+    out["preview"] = json!(preview);
+    out["requires_signoff"] = json!(settings.require_plan_approval.unwrap_or(false));
+    out["before"] = before_json;
+    out["after"] = after_json;
+    let blocked = out["blocked"].as_str().map(str::to_string);
+    let print = |out: &Value| {
+        if m.get_flag("json") {
+            println!("{out}");
+        } else {
+            println!(
+                "{} on step {step} ({step_label}): {said} — {}",
+                e.kind(),
+                out["class"].as_str().unwrap_or_default()
+            );
+            for g in out["gates"].as_array().into_iter().flatten() {
+                println!(
+                    "  {} {:<15} {}",
+                    if g["passed"] == true { "pass" } else { "FAIL" },
+                    g["gate"].as_str().unwrap_or_default(),
+                    g["detail"].as_str().unwrap_or_default()
+                );
+            }
+            for (side, key) in [("before", "before"), ("after", "after")] {
+                let steps: Vec<String> = out[key]["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|n| n["label"].as_str().unwrap_or_default().to_string())
+                    .collect();
+                println!("  {side}: {}", steps.join(" → "));
+            }
+        }
+    };
+    if preview {
+        print(&out);
+        return Ok(());
+    }
+    if let Some(b) = blocked {
+        print(&out);
+        anyhow::bail!("{mart}: {b}; nothing was recorded");
+    }
+    workflow::gate(settings, ctx)?;
+    let Some(mut d) = draft else {
+        anyhow::bail!(
+            "{mart} has no requirement in this project's state: `lakehouse requirements draft --mart \
+             {mart} --file {}` first",
+            marts::description_path(mart)
+        );
+    };
+    d.spec = after_spec;
+    let by = reviewer(m.get_one::<String>("by"))?;
+    d.record.log.push(requirements::Logged {
+        at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        by: by.clone(),
+        change: mart_edit::log_line(step, &step_label, &said, class.class),
+    });
+    let ev = requirements::evaluate(&d.spec, p);
+    let text = ekos_lakehouse_gold::requirements::render(&d.spec);
+    let a = requirements::read_approval(&req_dir, mart)?;
+    d.record.state = requirements::state(
+        &text,
+        &ev,
+        a.as_ref(),
+        requirements::committed(repo, mart).as_deref(),
+    )
+    .to_string();
+    d.record.questions = ev.questions.len();
+    requirements::write(&req_dir, &d.spec, &d.record)?;
+    ekos_common::run_log::emit(
+        "marts",
+        "edited",
+        &json!({"mart": mart, "step": step, "edit": e, "class": class.class, "by": by}),
+    );
+    out["recorded"] = json!(true);
+    out["state"] = json!(d.record.state);
+    print(&out);
+    println!(
+        "{mart}: the requirement changed ({}); approve it again, then propose, merge, build and \
+         reconcile{}",
+        d.record.state,
+        if settings.require_plan_approval.unwrap_or(false) {
+            " — this project requires sign-off, so the edit is a proposal to the approver"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+/// EKOS RFC 0257 §3.3: each step's counts, run on the engine now under the probe rules; never
+/// stored.
+fn mart_step_rows(
+    settings: &settings::Settings,
+    plan: &ekos_lakehouse_bronze::plan::Plan,
+    ir: &ekos_semantic::transform_ir::TransformGraph,
+    min_cell: i64,
+) -> anyhow::Result<std::collections::BTreeMap<u32, serde_json::Value>> {
+    let tag = ekos_lakehouse_bronze::plan::layer_tag(&plan.settings.namespace_prefix);
+    let p = mart_rows::plan(ir, &plan.settings.target_catalog, tag, plan);
+    let conn = settings.trino_connection()?;
+    let queries = p.queries.clone();
+    let counts = off_runtime(move || {
+        let r = ekos_lakehouse_trino::TrinoReader::new(conn)?;
+        let mut out: std::collections::BTreeMap<
+            u32,
+            std::collections::BTreeMap<&'static str, i64>,
+        > = Default::default();
+        for q in &queries {
+            let row = r.read(&q.sql)?.into_iter().next().unwrap_or_default();
+            let n: i64 = row
+                .first()
+                .and_then(|x| x.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("step {}: not a count", q.step))?;
+            out.entry(q.step).or_default().insert(q.measure, n);
+        }
+        Ok(out)
+    })?;
+    Ok(mart_rows::present(
+        &p,
+        &counts,
+        ir.nodes.len() as u32,
+        min_cell,
+    ))
+}
+
+/// EKOS RFC 0257 §3.4: the annotations on the plan's silver tables, from the project's ledger;
+/// none when there is no ledger yet.
+fn mart_notes(
+    ctx: &CommandContext<'_>,
+    plan: Option<&ekos_lakehouse_bronze::plan::Plan>,
+) -> marts::Notes {
+    let Some(plan) = plan else {
+        return marts::Notes::default();
+    };
+    match ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)
+        .and_then(|s| Ok(s.all_objects()?))
+    {
+        Ok(objects) => marts::notes(&objects, plan),
+        Err(_) => marts::Notes::default(),
+    }
+}
+
+/// `lakehouse marts show|graph|propose|merge|build|reconcile` (EKOS RFC 0228, 0257).
 async fn marts_cmd(
     ctx: &CommandContext<'_>,
     m: &clap::ArgMatches,
@@ -1802,11 +2193,134 @@ async fn marts_cmd(
                 &repo,
                 plan.as_ref(),
                 m.get_one::<String>("mart").map(String::as_str),
+                &mart_notes(ctx, plan.as_ref()).instructions,
             );
             if m.get_flag("json") {
                 println!("{v}");
             } else {
                 print!("{}", marts::render(&v));
+            }
+            Ok(())
+        }
+        Some((verb @ ("graph" | "rows"), m)) => {
+            let mart = m.get_one::<String>("mart").expect("required");
+            let p = plan
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("no deployed plan (lakehouse.lock.json)"))?;
+            let version = if m.get_flag("proposed") {
+                marts::Version::Proposed
+            } else {
+                marts::Version::Committed
+            };
+            let (g, ir) = marts::chain(&repo, p, mart, version, &mart_notes(ctx, Some(p)))?;
+            let mut v = mart_graph::to_json(&g);
+            let counted = verb == "rows";
+            if counted {
+                let rows = mart_step_rows(&settings, p, &ir, ctx.config.probe.min_cell)?;
+                let note = format!(
+                    "measured on the engine just now (one query per count, at most {} per request;                      cells under {} hidden; not stored)",
+                    mart_rows::BUDGET,
+                    ctx.config.probe.min_cell
+                );
+                mart_graph::with_rows(&mut v, &rows, &note);
+            }
+            if m.get_flag("json") {
+                println!("{v}");
+            } else {
+                print!("{}", mart_graph::render(&g));
+                if counted {
+                    for n in v["nodes"].as_array().into_iter().flatten() {
+                        println!(
+                            "  [{:>2}] rows {}",
+                            n["index"],
+                            serde_json::to_string(&n["rows"]).unwrap_or_default()
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some(("edit", m)) => mart_edit_cmd(ctx, &settings, &repo, plan.as_ref(), m),
+        Some(("suggest", m)) => {
+            let mart = m.get_one::<String>("mart").expect("required");
+            let step = *m.get_one::<u32>("step").expect("required");
+            let p = plan
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("no deployed plan (lakehouse.lock.json)"))?;
+            let notes = mart_notes(ctx, Some(p));
+            let (g, _) = marts::chain(&repo, p, mart, marts::Version::Committed, &notes)
+                .or_else(|_| marts::chain(&repo, p, mart, marts::Version::Proposed, &notes))?;
+            let node = g
+                .nodes
+                .iter()
+                .find(|n| n.index == Some(step))
+                .ok_or_else(|| anyhow::anyhow!("{mart} has no step {step}"))?;
+            let spec = match requirements::read(&req_dir, mart)? {
+                Some(d) => d.spec,
+                None => ekos_lakehouse_gold::parse(
+                    &marts::file_at(&repo, "HEAD", &marts::description_path(mart))
+                        .ok_or_else(|| anyhow::anyhow!("{mart} has no requirement"))?,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?,
+            };
+            let (_, _, c) = marts::compiled(&repo, p, mart, &notes.instructions)?;
+            let texts: Vec<String> = c
+                .tables
+                .iter()
+                .flat_map(|t| {
+                    notes
+                        .by_table
+                        .get(&t.to_ascii_lowercase())
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .filter(|n| n["state"] == "active")
+                .map(|n| {
+                    format!(
+                        "{} ({}) on {}: {}",
+                        n["author"].as_str().unwrap_or_default(),
+                        n["kind"].as_str().unwrap_or_default(),
+                        n["table"].as_str().unwrap_or_default(),
+                        n["text"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect();
+            let ask = mart_assist::Ask {
+                spec: &spec,
+                step: format!("step {step}, {}: {}", node.node_type, node.summary),
+                step_type: node.node_type.clone(),
+                tables: c.tables.clone(),
+                plan: p,
+                notes: texts,
+                request: m.get_one::<String>("request").expect("required"),
+            };
+            let model = m
+                .get_one::<String>("model")
+                .cloned()
+                .or_else(|| settings.gold_model.clone())
+                .unwrap_or_else(|| "llama3".into());
+            let url = settings
+                .ollama_url
+                .clone()
+                .unwrap_or_else(|| "http://127.0.0.1:11434".into());
+            let (j, raw) = mart_assist::suggest(&ask, &model, &url).await?;
+            let mut v = mart_assist::view(mart, step, &j);
+            v["model"] = serde_json::json!(model);
+            v["raw"] = serde_json::json!(raw);
+            if m.get_flag("json") {
+                println!("{v}");
+            } else {
+                println!(
+                    "{}: {}",
+                    v["kind"].as_str().unwrap_or_default(),
+                    v["text"].as_str().unwrap_or_default()
+                );
+                if let Some(n) = v["note"].as_str() {
+                    println!("  note: {n}");
+                }
+                if let Some(c) = v["preview"].as_str() {
+                    println!("  preview it: {c}");
+                }
             }
             Ok(())
         }
@@ -1888,7 +2402,8 @@ async fn marts_cmd(
             let p = plan
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("no deployed plan"))?;
-            let (spec, resolved, c) = marts::compiled(&repo, &p, &mart)?;
+            let (spec, resolved, c) =
+                marts::compiled(&repo, &p, &mart, &mart_notes(ctx, Some(&p)).instructions)?;
             let queries = ekos_lakehouse_gold::reconcile_sql(
                 &spec,
                 &resolved,
@@ -1959,7 +2474,7 @@ async fn marts_cmd(
             );
             Ok(())
         }
-        _ => anyhow::bail!("lakehouse marts: show, propose, merge, build or reconcile"),
+        _ => anyhow::bail!("lakehouse marts: show, graph, propose, merge, build or reconcile"),
     }
 }
 

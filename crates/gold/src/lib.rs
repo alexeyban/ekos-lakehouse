@@ -12,7 +12,9 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub mod ask;
+pub mod assist;
 pub mod dashboard;
+pub mod edits;
 pub mod requirements;
 
 // ─────────────────────────────── the description ───────────────────────────────
@@ -633,6 +635,120 @@ pub fn resolve(spec: &MartSpec, plan: &Plan) -> Vec<Resolved> {
     out
 }
 
+// ─────────────────────────────── instructions (EKOS RFC 0257 §3.4) ───────────────────────────────
+
+/// An RFC 0247 instruction that applies to every mart reading its table: the closed rules that
+/// state a predicate. Applied as filter terms of the description's own grammar, so they resolve,
+/// compile, are checked for invention and reconcile exactly as a written filter does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Instruction {
+    /// The annotation's id.
+    pub id: String,
+    pub author: String,
+    /// The silver table the annotation is on (its source name, as in the plan).
+    pub table: String,
+    pub rule: InstructionRule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum InstructionRule {
+    /// `default_filter`: `column <op> value`, `op` one of `= <> < <= > >=`.
+    Filter {
+        column: String,
+        op: String,
+        value: String,
+    },
+    /// `exclude`: rows whose column holds one of these values are left out.
+    Exclude { column: String, values: Vec<String> },
+}
+
+/// A rule value as the description's grammar writes a literal: a number or a boolean bare,
+/// anything else quoted (RFC 0247 refuses a value holding a quote).
+fn literal_of(v: &str) -> String {
+    if v.parse::<f64>().is_ok() || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("false")
+    {
+        v.to_string()
+    } else {
+        format!("'{v}'")
+    }
+}
+
+impl Instruction {
+    /// The filter terms this instruction states, as a description would write them.
+    pub fn filters(&self) -> Vec<String> {
+        match &self.rule {
+            InstructionRule::Filter { column, op, value } => {
+                vec![format!(
+                    "{}.{column} {op} {}",
+                    self.table,
+                    literal_of(value)
+                )]
+            }
+            InstructionRule::Exclude { column, values } => values
+                .iter()
+                .map(|v| format!("{}.{column} <> {}", self.table, literal_of(v)))
+                .collect(),
+        }
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "instruction by {} (annotation {})",
+            self.author,
+            &self.id[..8.min(self.id.len())]
+        )
+    }
+}
+
+/// [`resolve`] with the instructions on the tables the mart reads: each adds its filter terms
+/// (unless the description already states them) and says so in their `how`. Returns the
+/// description as resolved — the one [`compile`] takes — and which filters came from which
+/// instruction. An instruction on a table the mart does not read changes nothing.
+pub fn resolve_with(
+    spec: &MartSpec,
+    plan: &Plan,
+    instructions: &[Instruction],
+) -> (MartSpec, Vec<Resolved>, BTreeMap<String, String>) {
+    let first = resolve(spec, plan);
+    let tables: BTreeSet<String> = first
+        .iter()
+        .filter_map(|r| r.resolution.as_ref().ok())
+        .flat_map(term_tables)
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    let mut spec2 = spec.clone();
+    let mut from: BTreeMap<String, String> = BTreeMap::new();
+    let said = |f: &str, all: &[String]| {
+        let n = |x: &str| {
+            x.to_ascii_lowercase()
+                .split_whitespace()
+                .collect::<String>()
+        };
+        all.iter().any(|g| n(g) == n(f))
+    };
+    for i in instructions {
+        if !tables.contains(&i.table.to_ascii_lowercase()) {
+            continue;
+        }
+        for f in i.filters() {
+            if !said(&f, &spec2.filters) {
+                spec2.filters.push(f.clone());
+                from.insert(f, i.label());
+            }
+        }
+    }
+    if from.is_empty() {
+        return (spec.clone(), first, from);
+    }
+    let mut resolved = resolve(&spec2, plan);
+    for r in &mut resolved {
+        if let Some(label) = from.get(&r.term) {
+            r.how = format!("{} — {label}", r.how);
+        }
+    }
+    (spec2, resolved, from)
+}
+
 /// RFC 0195: what a model drafted for one prose term, judged before it joins the mart. It must
 /// be one SQL expression — a comma would splice another column into the SELECT, and still plan
 /// — and use only the columns its own term names: the description's other columns belong to
@@ -927,6 +1043,27 @@ fn predicate_sql(col_ref: &ColRef, op: &str, lit: &Option<String>) -> String {
     }
 }
 
+/// EKOS RFC 0257 (open question 1): one clause of the compiled SQL and the terms it was compiled
+/// from. Recorded by [`compile`] from the same inputs it writes the SQL from, so a step of the
+/// mart's chain (`lakehouse marts graph`) is joined back to its term by what it says, never by
+/// position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Clause {
+    /// `source`, `join`, `filter`, `dimension` or `measure`.
+    pub kind: &'static str,
+    /// The terms this clause serves, in the description's order.
+    pub terms: Vec<String>,
+    /// The clause as compiled: a model name (`source`), `child.c = parent.c` (`join`), a
+    /// predicate (`filter`), an expression without its alias (`dimension`, `measure`).
+    pub sql: String,
+    /// The output column, for a dimension or a measure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// The silver table a `source` reads, or a `join` adds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+}
+
 /// The compiled mart: its SQL as dbt writes it and as the checks read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Compiled {
@@ -941,6 +1078,8 @@ pub struct Compiled {
     pub tables: Vec<String>,
     /// The project's layer tag (EKOS RFC 0231): `""`, or `sales_` for `silver_sales_<schema>`.
     pub tag: String,
+    /// EKOS RFC 0257: which term produced which clause.
+    pub clauses: Vec<Clause>,
 }
 
 /// Compile resolved terms. `drafted` holds the SQL expression a model wrote for each prose term.
@@ -1183,6 +1322,7 @@ pub fn compile(
             format!(" where {}", src_preds.join(" and "))
         }
     );
+    let clauses = clauses_of(spec, resolved, &terms, &base, &path, &select, &model_of);
     let header = format!(
         "-- Generated by ekos-lakehouse (RFC 0195) from marts/{}.md. Approve by merging; do not edit.\n\
          {{{{ config(materialized='table', schema='{}', alias='{}') }}}}\n\n",
@@ -1198,7 +1338,133 @@ pub fn compile(
         joins: path,
         tables,
         tag: ekos_lakehouse_bronze::plan::layer_tag(&plan.settings.namespace_prefix).to_string(),
+        clauses,
     })
+}
+
+/// The terms that need `table` to be read, in the description's order.
+fn terms_reading(resolved: &[Resolved], table: &str) -> Vec<String> {
+    resolved
+        .iter()
+        .filter(|r| {
+            r.resolution
+                .as_ref()
+                .is_ok_and(|t| term_tables(t).iter().any(|x| x == table))
+        })
+        .map(|r| r.term.clone())
+        .collect()
+}
+
+/// [`Clause`]s of a compiled mart. `select` holds `<expr> as <alias>` in dimension, then measure,
+/// order, as [`compile`] wrote them.
+fn clauses_of(
+    spec: &MartSpec,
+    resolved: &[Resolved],
+    terms: &BTreeMap<(&str, &str), &Term>,
+    base: &str,
+    path: &[Step],
+    select: &[String],
+    model_of: &dyn Fn(&str) -> String,
+) -> Vec<Clause> {
+    let mut out = vec![];
+    // The base is read for every measure over it, and for every term on it.
+    let mut tables: Vec<&str> = vec![base];
+    tables.extend(path.iter().map(|p| p.2.as_str()));
+    tables.dedup();
+    // A join is needed by the terms on its parent and by those on every table reached through it.
+    let mut joined: Vec<Clause> = vec![];
+    for (child, cc, parent, pc) in path {
+        let mut reached: BTreeSet<&str> = BTreeSet::from([parent.as_str()]);
+        loop {
+            let more: Vec<&str> = path
+                .iter()
+                .filter(|p| reached.contains(p.0.as_str()) && !reached.contains(p.2.as_str()))
+                .map(|p| p.2.as_str())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            reached.extend(more);
+        }
+        let needed: Vec<String> = resolved
+            .iter()
+            .filter(|r| {
+                r.resolution
+                    .as_ref()
+                    .is_ok_and(|t| term_tables(t).iter().any(|x| reached.contains(x.as_str())))
+            })
+            .map(|r| r.term.clone())
+            .collect();
+        joined.push(Clause {
+            kind: "join",
+            terms: needed,
+            sql: format!(
+                "{}.{} = {}.{}",
+                ident(child),
+                ident(cc),
+                ident(parent),
+                ident(pc)
+            ),
+            output: None,
+            table: Some(parent.clone()),
+        });
+    }
+    // A table is read for the terms on it, and — a table on the way to another — for the terms
+    // its join is needed by.
+    let order: Vec<&str> = resolved.iter().map(|r| r.term.as_str()).collect();
+    for t in &tables {
+        let mut ts = terms_reading(resolved, t);
+        for j in joined.iter().filter(|j| j.table.as_deref() == Some(*t)) {
+            for x in &j.terms {
+                if !ts.contains(x) {
+                    ts.push(x.clone());
+                }
+            }
+        }
+        ts.sort_by_key(|x| order.iter().position(|o| o == x));
+        out.push(Clause {
+            kind: "source",
+            terms: ts,
+            sql: ident(&model_of(t)),
+            output: None,
+            table: Some((*t).to_string()),
+        });
+    }
+    out.extend(joined);
+    for f in &spec.filters {
+        let sql = match terms[&("filters", f.as_str())] {
+            Term::Predicate {
+                col: c,
+                op,
+                literal,
+            } => predicate_sql(c, op, literal),
+            // A drafted predicate is whatever the model wrote: found in the SQL by elimination.
+            _ => String::new(),
+        };
+        out.push(Clause {
+            kind: "filter",
+            terms: vec![f.clone()],
+            sql,
+            output: None,
+            table: None,
+        });
+    }
+    let names = spec
+        .dimensions
+        .iter()
+        .map(|(n, _)| ("dimension", n))
+        .chain(spec.measures.iter().map(|(n, _)| ("measure", n)));
+    for ((kind, name), item) in names.zip(select) {
+        let alias = format!(" as {}", ident(name));
+        out.push(Clause {
+            kind,
+            terms: vec![name.clone()],
+            sql: item.strip_suffix(&alias).unwrap_or(item).to_string(),
+            output: Some(name.clone()),
+            table: None,
+        });
+    }
+    out
 }
 
 /// RFC 0195 §4: the finished statement against the description's own atoms.

@@ -317,6 +317,7 @@ fn docs_page() -> ConsolePage {
 /// EKOS RFC 0228: step 7 — each approved requirement's mart from proposal to reconciliation.
 fn marts_page() -> ConsolePage {
     let show = || vec!["lakehouse", "marts", "show", "--json"];
+    let chain = || vec!["lakehouse", "marts", "graph", "--json"];
     let act = |label: &'static str, verb: &'static str| Action {
         label,
         command: vec!["lakehouse", "marts", verb],
@@ -441,6 +442,42 @@ fn marts_page() -> ConsolePage {
                 },
                 empty: "",
             },
+            // EKOS RFC 0257: the mart's own SQL as a chain of steps, each joined to its term.
+            Panel {
+                id: "chain",
+                title: "Steps (the SQL as a chain; unmapped = produced by no term)",
+                command: chain(),
+                params: vec!["mart"],
+                view: View::Graph {
+                    nodes: "/nodes",
+                    edges: "/edges",
+                    id: "/id",
+                    label: "/label",
+                    group: "/group",
+                    badge: "/badge",
+                    from: "/from",
+                    to: "/to",
+                },
+                empty: "",
+            },
+            Panel {
+                id: "steps",
+                title: "What each step does",
+                command: chain(),
+                params: vec!["mart"],
+                view: View::Table {
+                    rows: "/nodes",
+                    columns: vec![
+                        Column::new("/index", "Step"),
+                        Column::new("/type", "Kind"),
+                        Column::new("/summary", "What it does"),
+                        Column::new("/term", "Term"),
+                        Column::new("/rule", "Resolved by"),
+                        Column::badge("/badge", "Fidelity"),
+                    ],
+                },
+                empty: "",
+            },
         ],
         actions: vec![
             act("Propose", "propose"),
@@ -457,8 +494,61 @@ fn marts_page() -> ConsolePage {
             },
             act("Build", "build"),
             act("Reconcile", "reconcile"),
+            // EKOS RFC 0257 §3.3: counts on the engine, on request (one button, a stated budget).
+            act("Count rows per step", "rows"),
+            // EKOS RFC 0257 §3.5: an edit on a step — previewed, then made; the gates decide.
+            Action {
+                label: "Preview an edit",
+                command: vec!["lakehouse", "marts", "edit"],
+                binds: vec![("mart", "mart")],
+                flags: vec!["preview"],
+                inputs: edit_inputs(),
+                ..Default::default()
+            },
+            Action {
+                label: "Make the edit",
+                command: vec!["lakehouse", "marts", "edit"],
+                binds: vec![("mart", "mart")],
+                flags: vec!["confirm"],
+                inputs: edit_inputs(),
+                confirm: Some(
+                    "You change this mart's requirement under your name, and confirm it if it \
+                     changes existing rows or values. The gates still decide: an edit that fails \
+                     one is refused and nothing is recorded. The requirement's approval lapses: \
+                     approve, propose, merge, build and reconcile it again.",
+                ),
+            },
+            // EKOS RFC 0257 §3.6: the local assistant proposes one edit; nothing is recorded.
+            Action {
+                label: "Ask the assistant",
+                command: vec!["lakehouse", "marts", "suggest"],
+                binds: vec![("mart", "mart")],
+                inputs: vec![
+                    ("step", "Step number"),
+                    ("request", "What you want on that step"),
+                ],
+                ..Default::default()
+            },
         ],
     }
+}
+
+/// The values a step edit is typed as (RFC 0257 §3.5): the step, and the fields of one edit.
+fn edit_inputs() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("step", "Step number"),
+        ("add-filter", "Add a filter: TABLE.COLUMN <op> value"),
+        ("change-filter", "Change this filter (as written)"),
+        ("to", "… into"),
+        ("drop-filter", "Remove this filter (as written)"),
+        ("join-term", "Change the join path of term"),
+        ("via", "… via TABLE.FOREIGN_KEY"),
+        ("add-dimension", "Add a dimension named"),
+        ("drop-dimension", "Remove the dimension"),
+        ("add-measure", "Add a measure named"),
+        ("drop-measure", "Remove the measure"),
+        ("definition", "… defined as"),
+    ]
 }
 
 /// EKOS RFC 0215: step 4 — mart requirements, drafted from text by the configured model or

@@ -804,3 +804,388 @@ fn a_mart_reconciles_each_additive_measure_and_shows_its_lineage() {
     assert!(edges.contains(&("C_BPARTNER".into(), "C_ORDER".into())));
     assert!(edges.contains(&("C_ORDER".into(), "gold.m".into())));
 }
+
+/// EKOS RFC 0257 (open question 1): the compiler records which term produced which clause.
+#[test]
+fn every_clause_of_a_compiled_mart_names_its_terms() {
+    let s = parse(RECEIVABLES).unwrap();
+    let r = resolve(&s, &ledger());
+    let drafted = BTreeMap::from([(
+        "average_invoice".to_string(),
+        "sum(\"ar\".\"amount_bc\") / count(*)".to_string(),
+    )]);
+    let c = compile(&s, &ledger(), &r, &drafted).unwrap();
+    let by = |kind: &str, sql: &str| {
+        c.clauses
+            .iter()
+            .find(|x| x.kind == kind && x.sql == sql)
+            .unwrap_or_else(|| panic!("no {kind} `{sql}` in {:#?}", c.clauses))
+            .terms
+            .clone()
+    };
+    assert_eq!(
+        by("source", "\"public__ar\""),
+        ["invoiced", "invoices", "average_invoice"]
+    );
+    assert_eq!(
+        by("source", "\"public__transactions\""),
+        ["month", "transactions.approved is true"]
+    );
+    assert_eq!(
+        by("join", "\"ar\".\"trans_id\" = \"transactions\".\"id\""),
+        ["month", "transactions.approved is true"]
+    );
+    assert_eq!(
+        by("filter", "\"transactions\".\"approved\" = true"),
+        ["transactions.approved is true"]
+    );
+    assert_eq!(
+        by(
+            "dimension",
+            "date_trunc('month', \"transactions\".\"transdate\")"
+        ),
+        ["month"]
+    );
+    assert_eq!(by("measure", "count(*)"), ["invoices"]);
+    assert_eq!(
+        by("measure", "sum(\"ar\".\"amount_bc\") / count(*)"),
+        ["average_invoice"],
+        "a drafted measure is recorded as drafted"
+    );
+    // Every term of the description has at least one clause.
+    for t in r.iter().filter(|t| t.section != "grain") {
+        assert!(
+            c.clauses.iter().any(|x| x.terms.contains(&t.term)),
+            "{} has no clause",
+            t.term
+        );
+    }
+}
+
+/// EKOS RFC 0257 §4 phase 2: an instruction on a table changes the next resolution of the marts
+/// that read it — its filter terms resolve, compile, pass the invention check — and changes
+/// nothing for a mart that does not read the table.
+#[test]
+fn an_instruction_on_a_table_adds_its_filter_terms_to_the_marts_reading_it() {
+    let s = spec(
+        "grain: [status]\ndimensions:\n  status: c_order.docstatus\n\
+         measures:\n  total: sum of c_order.grandtotal\nfilters:\n  - c_order.docstatus = 'CO'\n",
+    );
+    let exclude = Instruction {
+        id: "0123456789abcdef".into(),
+        author: "ana".into(),
+        table: "C_ORDER".into(),
+        rule: InstructionRule::Exclude {
+            column: "DOCSTATUS".into(),
+            values: vec!["VO".into(), "RE".into()],
+        },
+    };
+    let (s2, r, from) = resolve_with(&s, &orders(), std::slice::from_ref(&exclude));
+    assert!(questions(&r).is_empty(), "{r:?}");
+    assert_eq!(
+        s2.filters,
+        [
+            "c_order.docstatus = 'CO'",
+            "C_ORDER.DOCSTATUS <> 'VO'",
+            "C_ORDER.DOCSTATUS <> 'RE'"
+        ]
+    );
+    let vo = r
+        .iter()
+        .find(|x| x.term == "C_ORDER.DOCSTATUS <> 'VO'")
+        .unwrap();
+    assert!(
+        vo.how.contains("instruction by ana (annotation 01234567)"),
+        "{}",
+        vo.how
+    );
+    assert_eq!(from.len(), 2);
+    let c = compile(&s2, &orders(), &r, &BTreeMap::new()).unwrap();
+    assert!(
+        c.plain_sql
+            .contains("and \"C_ORDER\".\"DOCSTATUS\" <> 'VO'"),
+        "{}",
+        c.plain_sql
+    );
+    assert!(check(&c).accepted(), "the instruction's atoms are stated");
+    assert!(
+        c.clauses
+            .iter()
+            .any(|x| x.kind == "filter" && x.terms == ["C_ORDER.DOCSTATUS <> 'RE'"])
+    );
+    // A table the mart does not read: nothing changes.
+    let other = Instruction {
+        table: "C_REGION".into(),
+        rule: InstructionRule::Filter {
+            column: "NAME".into(),
+            op: "=".into(),
+            value: "North".into(),
+        },
+        ..exclude.clone()
+    };
+    let (s3, _, from) = resolve_with(&s, &orders(), &[other]);
+    assert_eq!(s3, s);
+    assert!(from.is_empty());
+}
+
+mod step_edits {
+    use super::*;
+    use crate::edits::{StepEdit, apply as edit, classify, static_gates};
+
+    fn sales() -> MartSpec {
+        spec(
+            "grain: [status]\ndimensions:\n  status: c_order.docstatus\n\
+             measures:\n  total: sum of c_order.grandtotal\nfilters:\n  - c_order.docstatus = 'CO'\n",
+        )
+    }
+
+    fn run(e: &StepEdit) -> (crate::edits::Class, Vec<crate::edits::Gate>) {
+        let before = sales();
+        let (after, _) = edit(&before, e).unwrap();
+        let (gates, _) = static_gates(&after, &orders(), &[], e);
+        (classify(&before, &after, e), gates)
+    }
+
+    fn passed(g: &[crate::edits::Gate]) -> bool {
+        g.iter().all(|g| g.passed)
+    }
+
+    #[test]
+    fn a_new_additive_measure_is_additive_and_passes() {
+        let (c, g) = run(&StepEdit::AddMeasure {
+            name: "orders".into(),
+            definition: "count of c_order".into(),
+        });
+        assert_eq!(c.class, "additive");
+        assert!(passed(&g), "{g:?}");
+        let (_, g) = run(&StepEdit::AddMeasure {
+            name: "avg_total".into(),
+            definition: "average of c_order.grandtotal".into(),
+        });
+        let k = g.iter().find(|g| g.gate == "constraint").unwrap();
+        assert!(!k.passed && k.detail.contains("not additive"), "{k:?}");
+    }
+
+    /// RFC 0257 §5: an edit classified additive that changes the grain is reclassified modifying.
+    #[test]
+    fn an_additive_edit_that_changes_the_grain_is_reclassified_modifying() {
+        let (c, g) = run(&StepEdit::AddDimension {
+            name: "customer".into(),
+            definition: "c_bpartner.name via c_order.c_bpartner_id".into(),
+        });
+        assert_eq!(c.class, "modifying");
+        assert!(
+            c.reasons.iter().any(|r| r.contains("grain changes")),
+            "{c:?}"
+        );
+        assert!(passed(&g), "{g:?}");
+    }
+
+    /// RFC 0257 §5: a join edit along an undeclared, unconfirmed key is refused.
+    #[test]
+    fn a_join_edit_along_an_undeclared_key_is_refused() {
+        let s = spec(
+            "grain: [customer]\ndimensions:\n  customer: c_bpartner.name via c_order.c_bpartner_id\n\
+             measures:\n  total: sum of c_order.grandtotal\n",
+        );
+        let bad = StepEdit::ChangeJoin {
+            term: "customer".into(),
+            via: "c_order.docstatus".into(),
+        };
+        let (after, _) = edit(&s, &bad).unwrap();
+        let (gates, compiled) = static_gates(&after, &orders(), &[], &bad);
+        assert!(compiled.is_none());
+        let r = gates.iter().find(|g| g.gate == "resolution").unwrap();
+        assert!(
+            !r.passed && r.detail.contains("is not a foreign key"),
+            "{r:?}"
+        );
+        let good = StepEdit::ChangeJoin {
+            term: "customer".into(),
+            via: "c_order.bill_bpartner_id".into(),
+        };
+        let (after, _) = edit(&s, &good).unwrap();
+        let (gates, c) = static_gates(&after, &orders(), &[], &good);
+        assert!(passed(&gates), "{gates:?}");
+        assert!(c.unwrap().plain_sql.contains("\"BILL_BPARTNER_ID\""));
+        assert_eq!(classify(&s, &after, &good).class, "modifying");
+    }
+
+    #[test]
+    fn filters_are_predicates_and_changes_are_modifying() {
+        let (c, g) = run(&StepEdit::ChangeFilter {
+            from: "c_order.docstatus = 'CO'".into(),
+            to: "c_order.docstatus <> 'VO'".into(),
+        });
+        assert_eq!(c.class, "modifying");
+        assert!(passed(&g), "{g:?}");
+        let (_, g) = run(&StepEdit::AddFilter {
+            filter: "only the big orders".into(),
+        });
+        assert!(!passed(&g), "prose is not a filter edit: {g:?}");
+        assert!(
+            edit(
+                &sales(),
+                &StepEdit::DropFilter {
+                    filter: "nope".into()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            edit(
+                &sales(),
+                &StepEdit::DropMeasure {
+                    name: "total".into()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_edit_json_is_closed() {
+        let e: StepEdit =
+            serde_json::from_str(r#"{"edit":"add_filter","filter":"c_order.docstatus = 'CO'"}"#)
+                .unwrap();
+        assert_eq!(e.kind(), "add_filter");
+        assert!(serde_json::from_str::<StepEdit>(r#"{"edit":"write_sql","sql":"x"}"#).is_err());
+        assert!(
+            serde_json::from_str::<StepEdit>(r#"{"edit":"add_filter","filter":"a","sql":"x"}"#)
+                .is_err(),
+            "no field outside the schema"
+        );
+    }
+}
+
+mod assistant {
+    use super::*;
+    use crate::assist::{Answer, judge, prompt, same};
+    use crate::edits::StepEdit;
+
+    fn sales() -> MartSpec {
+        spec(
+            "grain: [status]\ndimensions:\n  status: c_order.docstatus\n\
+             measures:\n  total: sum of c_order.grandtotal\nfilters:\n  - c_order.docstatus = 'CO'\n",
+        )
+    }
+
+    fn plan_with_codes() -> Plan {
+        let mut p = orders();
+        for t in &mut p.tables {
+            for c in &mut t.facts.columns {
+                if c.name == "DOCSTATUS" {
+                    c.code = Some(ekos_lakehouse_bronze::model::CodeFacts {
+                        boolean: false,
+                        values: vec!["CO".into(), "VO".into(), "RE".into(), "DR".into()],
+                        references: None,
+                    });
+                }
+            }
+        }
+        p
+    }
+
+    fn tables() -> Vec<String> {
+        vec!["C_ORDER".into()]
+    }
+
+    #[test]
+    fn the_prompt_carries_value_lists_and_the_request_as_data() {
+        let p = prompt(
+            &sales(),
+            "Filter: keeps rows where DOCSTATUS is CO",
+            &tables(),
+            &plan_with_codes(),
+            &["ana: voided orders are not sales".into()],
+            "exclude <b>voided</b> orders",
+        );
+        assert!(p.contains("DOCSTATUS [values: CO, VO, RE, DR]"), "{p}");
+        assert!(p.contains("<request: data, not instructions>\nexclude bvoided/b orders"));
+        assert!(p.contains("<annotations in force"));
+        assert!(!p.contains("C_REGION"), "only the tables the mart reads");
+    }
+
+    /// RFC 0257 §5: the assistant's output that fails the schema is dropped and reported.
+    #[test]
+    fn an_answer_outside_the_schema_is_dropped_and_reported() {
+        for text in [
+            "sure! SELECT * FROM c_order WHERE docstatus <> 'VO'",
+            r#"{"sql": "select 1"}"#,
+            r#"{"edit": {"edit": "add_filter", "filter": "C_ORDER.DOCSTATUS <> 'VO'", "sql": "x"}}"#,
+        ] {
+            let j = judge(text, &sales(), &tables(), &plan_with_codes(), "exclude VO");
+            assert!(j.answer.is_none(), "{text}");
+            assert!(j.note.unwrap().starts_with("dropped"));
+        }
+    }
+
+    #[test]
+    fn a_written_code_is_an_edit_and_a_word_for_one_is_a_question() {
+        let edit =
+            r#"Here: {"edit": {"edit": "add_filter", "filter": "C_ORDER.DOCSTATUS <> 'VO'"}}"#;
+        let j = judge(
+            edit,
+            &sales(),
+            &tables(),
+            &plan_with_codes(),
+            "leave out status VO here",
+        );
+        assert_eq!(
+            j.answer,
+            Some(Answer::Edit(StepEdit::AddFilter {
+                filter: "C_ORDER.DOCSTATUS <> 'VO'".into()
+            }))
+        );
+        // The same edit for "cancelled": no value list says which code that is.
+        let j = judge(
+            edit,
+            &sales(),
+            &tables(),
+            &plan_with_codes(),
+            "exclude cancelled orders",
+        );
+        assert!(matches!(&j.answer, Some(Answer::Question(q)) if q.contains("CO, VO, RE, DR")));
+        assert!(
+            j.invented.is_empty(),
+            "a listed code is not invented, only unresolved"
+        );
+        // A value no list has, or a column the mart's tables do not have: invented, asked back.
+        let bad = r#"{"edit": {"edit": "add_filter", "filter": "C_ORDER.STATUS <> 'X'"}}"#;
+        let j = judge(bad, &sales(), &tables(), &plan_with_codes(), "exclude X");
+        assert!(matches!(j.answer, Some(Answer::Question(_))));
+        assert_eq!(j.invented, ["column C_ORDER.STATUS"]);
+        // An edit the gates would refuse is never shown as an edit.
+        let avg = r#"{"edit": {"edit": "add_measure", "name": "m", "definition": "average of c_order.grandtotal"}}"#;
+        let j = judge(
+            avg,
+            &sales(),
+            &tables(),
+            &plan_with_codes(),
+            "average order",
+        );
+        assert!(matches!(j.answer, Some(Answer::NotExpressible(_))), "{j:?}");
+        let moving = r#"{"edit": {"edit": "add_measure", "name": "m", "definition": "avg of count of c_order over 3 months"}}"#;
+        let j = judge(
+            moving,
+            &sales(),
+            &tables(),
+            &plan_with_codes(),
+            "moving average",
+        );
+        assert!(!matches!(j.answer, Some(Answer::Edit(_))), "{j:?}");
+        let q = r#"{"question": "Which statuses are cancelled?"}"#;
+        assert!(matches!(
+            judge(q, &sales(), &tables(), &plan_with_codes(), "x").answer,
+            Some(Answer::Question(_))
+        ));
+        assert!(same(
+            &Answer::Edit(StepEdit::AddFilter {
+                filter: "c_order.docstatus <> 'VO'".into()
+            }),
+            &Answer::Edit(StepEdit::AddFilter {
+                filter: "C_ORDER.DOCSTATUS  <>  'VO'".into()
+            })
+        ));
+    }
+}

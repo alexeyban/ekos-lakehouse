@@ -200,16 +200,18 @@ pub fn facts(req_dir: &Path, dir: &Path, repo: &Path, plan: Option<&Plan>, mart:
     }
 }
 
-/// The mart's description from the repository, resolved and compiled against the plan.
+/// The mart's description from the repository, resolved — with the instructions in force on
+/// the tables it reads (EKOS RFC 0257 §3.4) — and compiled against the plan.
 pub fn compiled(
     repo: &Path,
     plan: &Plan,
     mart: &str,
+    instructions: &[gold::Instruction],
 ) -> anyhow::Result<(MartSpec, Vec<gold::Resolved>, gold::Compiled)> {
     let text = file_at(repo, "HEAD", &description_path(mart))
         .ok_or_else(|| anyhow::anyhow!("{} is not committed", description_path(mart)))?;
     let spec = gold::parse(&text).map_err(|e| anyhow::anyhow!("{mart}: {e}"))?;
-    let resolved = gold::resolve(&spec, plan);
+    let (spec, resolved, _) = gold::resolve_with(&spec, plan, instructions);
     let c = gold::compile(&spec, plan, &resolved, &Default::default()).map_err(|qs| {
         anyhow::anyhow!(
             "{mart} no longer resolves against the plan: {}",
@@ -222,9 +224,195 @@ pub fn compiled(
     Ok((spec, resolved, c))
 }
 
+// ─────────────────────────────── notes on silver tables (EKOS RFC 0257 §3.4) ───────────────────────────────
+
+/// RFC 0247 annotations on the silver tables a project's marts read, from its ledger.
+#[derive(Debug, Clone, Default)]
+pub struct Notes {
+    /// The instructions that apply to every mart: shared, approved, still valid, and from the
+    /// rules that state a predicate (`default_filter`, `exclude`).
+    pub instructions: Vec<gold::Instruction>,
+    /// Every current annotation per table (lower-case source name), as the steps show them.
+    pub by_table: std::collections::BTreeMap<String, Vec<Value>>,
+    /// Annotation view per annotation id.
+    pub by_id: std::collections::BTreeMap<String, Value>,
+}
+
+impl Notes {
+    /// The instruction each instruction-made filter term came from, by the term.
+    pub fn by_term(&self) -> std::collections::BTreeMap<String, Vec<Value>> {
+        let mut out: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+        for i in &self.instructions {
+            for f in i.filters() {
+                if let Some(v) = self.by_id.get(&i.id) {
+                    out.entry(f).or_default().push(v.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+fn op_sql(op: ekos_semantic::annotations::Op) -> &'static str {
+    use ekos_semantic::annotations::Op;
+    match op {
+        Op::Eq => "=",
+        Op::Ne => "<>",
+        Op::Lt => "<",
+        Op::Le => "<=",
+        Op::Gt => ">",
+        Op::Ge => ">=",
+    }
+}
+
+/// The plan table an annotated object is: a `Table` whose name's last part is a planned table.
+fn plan_table<'a>(plan: &'a Plan, o: &ekos_kir::KirObject) -> Option<&'a str> {
+    let last = o
+        .name
+        .rsplit('.')
+        .next()
+        .unwrap_or(&o.name)
+        .trim_matches('"');
+    plan.tables
+        .iter()
+        .find(|t| t.table.eq_ignore_ascii_case(last))
+        .map(|t| t.table.as_str())
+}
+
+/// The annotations on the plan's tables and the instructions among them that apply to marts.
+/// Only a shared, approved instruction applies (a mart is everyone's); a personal one and a
+/// comment are shown, never applied. Pure over the ledger's objects.
+pub fn notes(objects: &[ekos_kir::KirObject], plan: &Plan) -> Notes {
+    use ekos_semantic::annotations::{self as an, Rule};
+    let digest = |id: &str| -> Option<String> {
+        objects
+            .iter()
+            .find(|o| o.id.0.to_string() == id)
+            .map(an::digest_of_object)
+    };
+    let all = an::current(objects);
+    let applies: Vec<String> = an::applicable(&all, "", &digest)
+        .iter()
+        .map(|a| a.id.0.to_string())
+        .collect();
+    let mut out = Notes::default();
+    for a in &all {
+        let Some(target) = objects.iter().find(|o| o.id.0.to_string() == a.target) else {
+            continue;
+        };
+        let Some(table) = plan_table(plan, target) else {
+            continue;
+        };
+        let state = match an::effective(a, digest(&a.target).as_deref()) {
+            an::Effective::Active => "active",
+            an::Effective::Stale => "stale",
+            an::Effective::Withdrawn => "withdrawn",
+        };
+        let id = a.id.0.to_string();
+        let rule = match &a.rule {
+            Some(Rule::DefaultFilter { column, op, value }) => {
+                Some(gold::InstructionRule::Filter {
+                    column: column.clone(),
+                    op: op_sql(*op).into(),
+                    value: value.clone(),
+                })
+            }
+            Some(Rule::Exclude { column, values }) => Some(gold::InstructionRule::Exclude {
+                column: column.clone(),
+                values: values.clone(),
+            }),
+            _ => None,
+        };
+        let applied = applies.contains(&id) && rule.is_some();
+        let view = json!({
+            "id": id,
+            "target": a.target,
+            "table": table,
+            "kind": a.kind.as_str(),
+            "text": a.text,
+            "rule": a.rule,
+            "author": a.author,
+            "approved_by": a.approved_by,
+            "state": state,
+            "applies_to_marts": applied,
+        });
+        if let (true, Some(rule)) = (applied, rule) {
+            out.instructions.push(gold::Instruction {
+                id: id.clone(),
+                author: a.author.clone(),
+                table: table.to_string(),
+                rule,
+            });
+        }
+        out.by_table
+            .entry(table.to_ascii_lowercase())
+            .or_default()
+            .push(view.clone());
+        out.by_id.insert(id, view);
+    }
+    out
+}
+
+// ─────────────────────────────── the chain (EKOS RFC 0257) ───────────────────────────────
+
+/// Which SQL a chain is drawn from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Version {
+    /// The model on the repository's current branch, else on its proposal branch: what runs.
+    Committed,
+    /// What the compiler writes from the committed description now.
+    Proposed,
+}
+
+/// The mart's chain of steps (`ekos.transformation-graph/1`), every step joined to its terms.
+pub fn chain(
+    repo: &Path,
+    plan: &Plan,
+    mart: &str,
+    version: Version,
+    notes: &Notes,
+) -> anyhow::Result<(
+    ekos_semantic::transform_chain::ChainGraph,
+    ekos_semantic::transform_ir::TransformGraph,
+)> {
+    let (spec, resolved, c) = compiled(repo, plan, mart, &notes.instructions)?;
+    let path = model_path(mart);
+    let (sql, label) = match version {
+        Version::Committed => (
+            file_at(repo, "HEAD", &path)
+                .or_else(|| proposal_branch(repo, mart).and_then(|b| file_at(repo, &b, &path)))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{path} is neither merged nor proposed: `lakehouse marts propose`"
+                    )
+                })?,
+            "committed",
+        ),
+        Version::Proposed => (c.dbt_sql.clone(), "proposed"),
+    };
+    crate::mart_graph::chain_ir(&crate::mart_graph::MartSql {
+        mart,
+        path: &path,
+        dbt_sql: &sql,
+        version: label,
+        grain: &spec.grain,
+        resolved: &resolved,
+        clauses: &c.clauses,
+        notes_by_table: notes.by_table.clone(),
+        notes_by_term: notes.by_term(),
+    })
+}
+
 // ─────────────────────────────── show ───────────────────────────────
 
-fn selected(repo: &Path, plan: &Plan, mart: &str, st: &str, f: &Facts) -> Value {
+fn selected(
+    repo: &Path,
+    plan: &Plan,
+    mart: &str,
+    st: &str,
+    f: &Facts,
+    instructions: &[gold::Instruction],
+) -> Value {
     let sql = file_at(repo, "HEAD", &model_path(mart))
         .or_else(|| proposal_branch(repo, mart).and_then(|b| file_at(repo, &b, &model_path(mart))));
     let mut md = format!("### {mart} — {st}\n\n");
@@ -232,7 +420,7 @@ fn selected(repo: &Path, plan: &Plan, mart: &str, st: &str, f: &Facts) -> Value 
         "Generated from the approved requirement. The SQL is a template: terms marked \
          `drafted` were written by a model and need a person to read them.\n\n",
     );
-    let Ok((spec, resolved, c)) = compiled(repo, plan, mart) else {
+    let Ok((spec, resolved, c)) = compiled(repo, plan, mart, instructions) else {
         md.push_str("The description is not committed yet: approve the requirement (step 4).\n");
         return json!({"mart": mart, "state": st, "markdown": md});
     };
@@ -317,6 +505,7 @@ pub fn show(
     repo: &Path,
     plan: Option<&Plan>,
     want: Option<&str>,
+    instructions: &[gold::Instruction],
 ) -> Value {
     let mut marts = vec![];
     let mut sel = Value::Null;
@@ -333,7 +522,7 @@ pub fn show(
         if want == Some(mart.as_str())
             && let Some(p) = plan
         {
-            sel = selected(repo, p, &mart, st, &f);
+            sel = selected(repo, p, &mart, st, &f, instructions);
         }
     }
     json!({"marts": marts, "selected": sel})
@@ -471,6 +660,217 @@ mod tests {
             Some((true, "1 of 1 mart(s) reconciled".into()))
         );
         assert_eq!(mart_of("gold.sales"), Some("sales"));
+    }
+}
+
+/// EKOS RFC 0257 §4 phase 2.
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+    use ekos_kir::{KirObject, ObjectKind};
+    use ekos_lakehouse_bronze::plan::{PlanSettings, plan};
+    use ekos_lakehouse_bronze::{ForeignKey, SourceColumn, SourceTable, TypeKind};
+    use ekos_semantic::annotations::{self as an, AnnotationKind, NewAnnotation, Rule, Scope};
+
+    fn col(n: &str, trino: &str) -> SourceColumn {
+        SourceColumn {
+            name: n.into(),
+            pg_type: "x".into(),
+            kind: TypeKind::Base,
+            not_null: false,
+            trino_type: Some(trino.into()),
+            numeric_used: None,
+            comment: None,
+            enum_labels: vec![],
+            pii_candidate: None,
+            infinite_values: None,
+            attnum: 0,
+            has_default: false,
+        }
+    }
+
+    fn orders() -> Plan {
+        let t = |name: &str, cols: Vec<SourceColumn>, fks: Vec<(&str, &str, &str)>| SourceTable {
+            schema: "ADEMPIERE".into(),
+            oid: 0,
+            name: name.into(),
+            columns: cols,
+            primary_key: vec![format!("{name}_ID")],
+            row_estimate: 10,
+            update_triggers: vec![],
+            foreign_keys: fks
+                .into_iter()
+                .map(|(c, t, rc)| ForeignKey {
+                    name: format!("{name}_{c}"),
+                    columns: vec![c.into()],
+                    ref_schema: "ADEMPIERE".into(),
+                    ref_table: t.into(),
+                    ref_columns: vec![rc.into()],
+                })
+                .collect(),
+            comment: None,
+        };
+        plan(
+            &[
+                t(
+                    "C_ORDER",
+                    vec![
+                        col("C_ORDER_ID", "decimal(10,0)"),
+                        col("C_BPARTNER_ID", "decimal(10,0)"),
+                        col("GRANDTOTAL", "decimal(38,10)"),
+                        col("DOCSTATUS", "varchar(2)"),
+                        col("DATEORDERED", "timestamp(0)"),
+                    ],
+                    vec![("C_BPARTNER_ID", "C_BPARTNER", "C_BPARTNER_ID")],
+                ),
+                t(
+                    "C_BPARTNER",
+                    vec![
+                        col("C_BPARTNER_ID", "decimal(10,0)"),
+                        col("NAME", "varchar(60)"),
+                    ],
+                    vec![],
+                ),
+            ],
+            &PlanSettings::default(),
+        )
+    }
+
+    fn table_object() -> KirObject {
+        let mut o = KirObject::new("silver_ADEMPIERE.C_ORDER", ObjectKind::Table);
+        o.properties.insert(
+            "columns".into(),
+            json!([{"name": "DOCSTATUS"}, {"name": "GRANDTOTAL"}]),
+        );
+        o
+    }
+
+    fn instruction(t: &KirObject, author: &str, scope: Scope, values: &[&str]) -> NewAnnotation {
+        NewAnnotation {
+            target: t.id.0.to_string(),
+            kind: AnnotationKind::Instruction,
+            text: "voided and reversed orders are not sales".into(),
+            rule: Some(Rule::Exclude {
+                column: "DOCSTATUS".into(),
+                values: values.iter().map(|v| v.to_string()).collect(),
+            }),
+            author: author.into(),
+            scope,
+            term: None,
+            target_digest: an::digest_of_object(t),
+            at: "2026-11-12T00:00:00Z".into(),
+        }
+    }
+
+    const DESCRIPTION: &str = "---\nmart: sales\ngrain: [month]\ndimensions:\n  month: month of \
+        c_order.dateordered\nmeasures:\n  total: sum of c_order.grandtotal\nfilters:\n  - \
+        c_order.docstatus = 'CO'\n---\n";
+
+    fn draw(notes: &Notes) -> ekos_semantic::transform_chain::ChainGraph {
+        let p = orders();
+        let spec = gold::parse(DESCRIPTION).unwrap();
+        let (spec, resolved, _) = gold::resolve_with(&spec, &p, &notes.instructions);
+        let c = gold::compile(&spec, &p, &resolved, &Default::default()).unwrap();
+        assert!(gold::check(&c).accepted());
+        crate::mart_graph::chain(&crate::mart_graph::MartSql {
+            mart: "sales",
+            path: "dbt/models/gold/gold__sales.sql",
+            dbt_sql: &c.dbt_sql,
+            version: "proposed",
+            grain: &spec.grain,
+            resolved: &resolved,
+            clauses: &c.clauses,
+            notes_by_table: notes.by_table.clone(),
+            notes_by_term: notes.by_term(),
+        })
+        .unwrap()
+    }
+
+    /// An instruction added on a step changes the next resolution of the term it is on, and is
+    /// shown on the step.
+    #[test]
+    fn an_approved_instruction_on_a_step_changes_the_next_resolution_and_is_shown() {
+        let p = orders();
+        let t = table_object();
+        let before = draw(&notes(std::slice::from_ref(&t), &p));
+        let filters = |g: &ekos_semantic::transform_chain::ChainGraph| {
+            g.nodes
+                .iter()
+                .filter(|n| n.node_type == "Filter")
+                .map(|n| n.term.clone().unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(filters(&before), ["c_order.docstatus = 'CO'"]);
+
+        // Written on the step that reads C_ORDER, shared: shown, not applied until approved.
+        let a = an::annotation_object(&instruction(&t, "ana", Scope::Shared, &["VO", "RE"]));
+        let mut objects = vec![t.clone(), a.clone()];
+        let n = notes(&objects, &p);
+        assert!(
+            n.instructions.is_empty(),
+            "an unapproved instruction applies to nobody"
+        );
+        let g = draw(&n);
+        assert_eq!(filters(&g), ["c_order.docstatus = 'CO'"]);
+        let source = g.nodes.iter().find(|n| n.node_type == "Source").unwrap();
+        assert_eq!(source.annotations.len(), 1, "shown on the step");
+        assert_eq!(source.annotations[0]["applies_to_marts"], false);
+
+        // Approved: the next resolution carries it, each value its own step, mapped and noted.
+        let ann = an::current(&objects)[0].clone();
+        let approved =
+            an::approve_object(&ann, "bo", &ann.target_digest, "2026-11-12T01:00:00Z").unwrap();
+        objects.push(approved);
+        let n = notes(&objects, &p);
+        assert_eq!(n.instructions.len(), 1);
+        let g = draw(&n);
+        assert_eq!(
+            filters(&g),
+            [
+                "c_order.docstatus = 'CO'",
+                "C_ORDER.DOCSTATUS <> 'VO'",
+                "C_ORDER.DOCSTATUS <> 'RE'"
+            ]
+        );
+        assert_eq!(g.counts.unmapped, 0);
+        let vo = g
+            .nodes
+            .iter()
+            .find(|n| n.term.as_deref() == Some("C_ORDER.DOCSTATUS <> 'VO'"))
+            .unwrap();
+        assert!(vo.rule.as_deref().unwrap().contains("instruction by ana"));
+        assert_eq!(vo.annotations.len(), 1);
+        assert_eq!(vo.annotations[0]["applies_to_marts"], true);
+
+        // The table changed since: the instruction is stale and applies nothing.
+        let mut changed = t.clone();
+        changed
+            .properties
+            .insert("comment".into(), json!("orders and quotes"));
+        let stale: Vec<KirObject> = objects
+            .iter()
+            .map(|o| {
+                if o.id == t.id {
+                    changed.clone()
+                } else {
+                    o.clone()
+                }
+            })
+            .collect();
+        let n = notes(&stale, &p);
+        assert!(n.instructions.is_empty());
+        assert_eq!(n.by_table["c_order"][0]["state"], "stale");
+    }
+
+    /// A comment and a personal instruction are shown on the step and never applied.
+    #[test]
+    fn a_personal_instruction_is_shown_and_not_applied() {
+        let p = orders();
+        let t = table_object();
+        let a = an::annotation_object(&instruction(&t, "ana", Scope::Personal, &["VO"]));
+        let n = notes(&[t, a], &p);
+        assert!(n.instructions.is_empty());
+        assert_eq!(n.by_table["c_order"].len(), 1);
     }
 }
 

@@ -28,6 +28,8 @@ ekos-lakehouse-kettle-expr.workspace = true
 ekos-lakehouse-kettle-rel.workspace = true
 ekos-lakehouse-pentaho-dbt.workspace = true
 ekos-recovery.workspace = true
+ekos-plugin-sql-dialect-trino = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-sql-dialect-sdk = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-lakehouse-trino.workspace = true
 ekos-kir.workspace = true
 ekos-ledger.workspace = true

@@ -80,6 +80,7 @@ pub async fn draft(
     model: &str,
     ollama_url: &str,
     trino: &ekos_lakehouse_trino::Connection,
+    instructions: &[gold::Instruction],
 ) -> anyhow::Result<(DraftOutcome, Option<(String, BTreeMap<String, String>)>)> {
     let text = std::fs::read_to_string(description)
         .map_err(|e| anyhow::anyhow!("{}: {e}", description.display()))?;
@@ -105,7 +106,8 @@ pub async fn draft(
         );
     }
     let plan = read_lock(repo)?;
-    let resolved = gold::resolve(&spec, &plan);
+    // EKOS RFC 0257 §3.4: the instructions in force on the tables the mart reads.
+    let (spec, resolved, _) = gold::resolve_with(&spec, &plan, instructions);
     let mut outcome = DraftOutcome {
         mart: spec.mart.clone(),
         questions: gold::questions(&resolved)
