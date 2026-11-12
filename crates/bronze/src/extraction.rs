@@ -29,6 +29,9 @@ pub enum CadenceChoice {
 #[serde(rename_all = "snake_case", tag = "change", content = "to")]
 pub enum Change {
     Mode(ModeChoice),
+    /// Keep the planned mode: an explicit decision, recorded so a warning it answers does not
+    /// return on every plan (EKOS RFC 0256 §3.6). Changes nothing in the plan.
+    Keep,
     Deletes(CadenceChoice),
     Purge(PurgePolicy),
 }
@@ -37,7 +40,8 @@ impl Change {
     /// One change of each kind per table; a newer one replaces the older.
     pub fn kind(&self) -> &'static str {
         match self {
-            Change::Mode(_) => "mode",
+            // Keeping the mode and changing it exclude each other: one replaces the other.
+            Change::Mode(_) | Change::Keep => "mode",
             Change::Deletes(_) => "deletes",
             Change::Purge(_) => "purge",
         }
@@ -45,7 +49,7 @@ impl Change {
 
     fn order(&self) -> u8 {
         match self {
-            Change::Mode(_) => 0,
+            Change::Mode(_) | Change::Keep => 0,
             Change::Deletes(_) => 1,
             Change::Purge(_) => 2,
         }
@@ -55,6 +59,7 @@ impl Change {
         match self {
             Change::Mode(ModeChoice::Full) => "load in full".into(),
             Change::Mode(ModeChoice::Incremental) => "load incrementally".into(),
+            Change::Keep => "keep the planned mode".into(),
             Change::Deletes(CadenceChoice::Run) => "look for deletes every run".into(),
             Change::Deletes(CadenceChoice::Audit) => "audit deletes periodically".into(),
             Change::Purge(PurgePolicy::Retain) => "keep purged rows".into(),
@@ -74,6 +79,10 @@ pub struct TableChange {
     pub reason: Option<String>,
     pub by: String,
     pub at: String,
+    /// The evidence of the warnings this change answers (EKOS RFC 0256 §3.6): a warning whose
+    /// evidence is listed here is answered; one whose evidence changed is open again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<String>,
 }
 
 /// A change and whether it applied.
@@ -139,6 +148,16 @@ pub fn apply(
         d.notes.extend(old);
     };
     match c.change {
+        Change::Keep => {
+            if c.answers.is_empty() {
+                return Err("keeping the planned mode answers a warning, and none is open".into());
+            }
+            t.decision.notes.push(format!(
+                "operator ({}) kept the planned mode despite a warning",
+                who(c)
+            ));
+            return Ok(());
+        }
         Change::Mode(ModeChoice::Full) => {
             if matches!(t.decision.mode, LoadMode::Full) {
                 return Err("already in full".into());
@@ -321,6 +340,7 @@ mod tests {
             reason: reason.map(Into::into),
             by: "op".into(),
             at: "2026-10-26T00:00:00Z".into(),
+            answers: vec![],
         }
     }
 

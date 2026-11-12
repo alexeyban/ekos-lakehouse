@@ -29,6 +29,7 @@ pub mod source;
 pub mod source_oracle;
 pub mod sync;
 pub mod workflow;
+pub mod writer_warnings;
 
 use async_trait::async_trait;
 use ekos::commands::catalogue::Class;
@@ -764,6 +765,12 @@ impl EkosExtension for LakehouseExtension {
                                         .help("Remove rows the source purges"),
                                 )
                                 .arg(
+                                    clap::Arg::new("keep")
+                                        .long("keep")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Keep the planned mode: answers the table's writer warnings (EKOS RFC 0256) so they do not return until their evidence changes"),
+                                )
+                                .arg(
                                     clap::Arg::new("undo")
                                         .long("undo")
                                         .action(clap::ArgAction::SetTrue)
@@ -778,6 +785,7 @@ impl EkosExtension for LakehouseExtension {
                                             "deletes-audit",
                                             "keep-purged",
                                             "remove-purged",
+                                            "keep",
                                             "undo",
                                         ])
                                         .required(true),
@@ -2033,7 +2041,7 @@ fn fresh(
     let ledger = facts::plan_facts(settings, ctx)?;
     let mut wf = ledger.write;
     step3.apply_facts(&mut wf);
-    let (mut plan, caps) = {
+    let (mut plan, caps, rows) = {
         let redaction = ctx.config.redaction_config();
         off_runtime(|| plan_cmd::build_plan_checked(settings, &redaction, &wf))?
     };
@@ -2064,6 +2072,8 @@ fn fresh(
         masks,
         excluded,
         step3: step3.subjects,
+        writer_findings: read_writer_findings(ctx),
+        rows,
     };
     let dir = extraction::state_dir(ctx.config, ctx.cwd);
     extraction::write_proposal(&dir, &p)?;
@@ -2074,6 +2084,51 @@ fn fresh(
         &changes,
         &settings.pii,
     ))
+}
+
+/// EKOS RFC 0256 §3.6: the current interaction findings that warn. Without a ledger or an
+/// observation there are none, and the plan says so on stderr: absence is not evidence.
+fn read_writer_findings(ctx: &CommandContext<'_>) -> Vec<writer_warnings::WriterFinding> {
+    let read = || -> anyhow::Result<Vec<writer_warnings::WriterFinding>> {
+        let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
+        let objects =
+            ekos::commands::interaction::current_findings(ctx.config, ctx.cwd, store.as_ref())?;
+        let text = |o: &ekos_kir::KirObject, k: &str| {
+            o.properties
+                .get(k)
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        };
+        Ok(objects
+            .iter()
+            .filter_map(|o| {
+                let finding = text(o, "finding")?;
+                writer_warnings::WARNING_FINDINGS
+                    .contains(&finding.as_str())
+                    .then(|| writer_warnings::WriterFinding {
+                        finding,
+                        table: text(o, "table").unwrap_or_default(),
+                        actor: text(o, "actor"),
+                        operations: o
+                            .properties
+                            .get("operations")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect(),
+                        detail: o.properties.get("detail").cloned().unwrap_or_default(),
+                    })
+            })
+            .collect())
+    };
+    match read() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("note: no interaction findings read ({e}); no writer warnings");
+            vec![]
+        }
+    }
 }
 
 /// Step 3 from the review; without a ledger or a review, nothing (and the plan says why).
@@ -2237,7 +2292,9 @@ fn extraction_cmd(
                 println!("{table}: {} change(s) removed", before - next.len());
                 return Ok(());
             }
-            let change = if m.get_flag("full") {
+            let change = if m.get_flag("keep") {
+                Change::Keep
+            } else if m.get_flag("full") {
                 Change::Mode(ModeChoice::Full)
             } else if m.get_flag("incremental") {
                 Change::Mode(ModeChoice::Incremental)
@@ -2259,6 +2316,11 @@ fn extraction_cmd(
                     .filter(|r| !r.is_empty()),
                 by: reviewer(m.get_one::<String>("by"))?,
                 at: now(),
+                // RFC 0256 §3.6: a decision on the table answers the writer warnings on it now.
+                answers: writer_warnings::evidence_on(
+                    &extraction::finalize(&settings.engines, &p, &changes, &settings.pii).warnings,
+                    &table,
+                ),
             };
             ekos_lakehouse_bronze::extraction::record(&mut next, new.clone());
             let f = extraction::finalize(&settings.engines, &p, &next, &settings.pii);

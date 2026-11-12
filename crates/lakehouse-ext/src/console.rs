@@ -589,6 +589,14 @@ fn extraction_page() -> ConsolePage {
                         Column::new("/summary/masked_columns", "Masked columns"),
                         Column::new("/summary/changes", "Changes"),
                         Column::new("/summary/stale_changes", "Changes not applied"),
+                        Column::new(
+                            "/summary/writer_warnings_open",
+                            "Written outside the code: open",
+                        ),
+                        Column::new(
+                            "/summary/writer_warnings_answered",
+                            "Written outside the code: answered",
+                        ),
                         Column::new("/summary/notes", "Notes"),
                     ],
                 },
@@ -628,6 +636,7 @@ fn extraction_page() -> ConsolePage {
                         Column::new("/masked", "Masked"),
                         Column::new("/change", "Changed by the operator"),
                         Column::badge("/since_approval", "Since the approval"),
+                        Column::badge("/writer_warning", "Written outside the code"),
                     ],
                 },
                 empty: "No plan yet: run Plan.",
@@ -660,6 +669,29 @@ fn extraction_page() -> ConsolePage {
                     ],
                 },
                 empty: "",
+            },
+            Panel {
+                id: "warnings",
+                title: "Written outside the code (EKOS advises, you decide)",
+                command: show(),
+                view: View::Table {
+                    rows: "/warnings",
+                    columns: vec![
+                        Column::new("/table", "Table"),
+                        Column::badge("/state", "State"),
+                        Column::new("/role", "Role"),
+                        Column::new("/operations", "Writes"),
+                        Column::new("/window", "Seen"),
+                        Column::new("/advice", "Advice"),
+                        Column::new("/reason", "Why"),
+                        Column::new("/cost", "Cost"),
+                        Column::new("/answered", "Decision"),
+                    ],
+                },
+                empty: "No incremental table is written outside the code, or nothing was \
+                        observed (EKOS's `interaction observe`): without an observation there is \
+                        no warning.",
+                ..Default::default()
             },
             Panel {
                 id: "changes",
@@ -721,6 +753,7 @@ fn extraction_page() -> ConsolePage {
             change("Audit deletes", "deletes-audit"),
             change("Keep purged rows", "keep-purged"),
             change("Remove purged rows", "remove-purged"),
+            change("Keep the planned mode", "keep"),
             Action {
                 label: "Undo changes",
                 command: vec!["lakehouse", "extraction", "change"],

@@ -24,13 +24,21 @@ pub fn build_plan_with(
     Ok(build_plan_checked(s, redaction, facts)?.0)
 }
 
+/// What [`build_plan_checked`] returns: the plan, the engine's capabilities, and each read
+/// table's row estimate by `schema.table` (the advice of EKOS RFC 0256 §3.6 weighs it).
+pub type CheckedPlan = (
+    Plan,
+    ekos_kir::source_capabilities::SourceCapabilities,
+    std::collections::BTreeMap<String, i64>,
+);
+
 /// [`build_plan_with`], and the source engine's capabilities as checked against what the plan
 /// read, with the conformance kit run on the source (RFC 0255 §3.5): the fact `plan` records.
 pub fn build_plan_checked(
     s: &Settings,
     redaction: &ekos_common::redaction::RedactionConfig,
     facts: &std::collections::BTreeMap<String, ekos_lakehouse_bronze::WriteFacts>,
-) -> anyhow::Result<(Plan, ekos_kir::source_capabilities::SourceCapabilities)> {
+) -> anyhow::Result<CheckedPlan> {
     let provider = s.engines.get(&s.engine())?.clone();
     let src = connect_source(s, "lakehouse-plan")?;
     let trino = ekos_lakehouse_trino::TrinoReader::new(s.trino_connection()?)?;
@@ -47,7 +55,11 @@ pub fn build_plan_checked(
     ekos_lakehouse_bronze::attach_checks(&mut plan, &src.value_lists(&s.schemas(), redaction)?);
     let report = crate::capabilities::conformance(provider.as_ref(), src.as_ref());
     let caps = crate::capabilities::record(provider.as_ref(), s, &sources, report.as_ref());
-    Ok((plan, caps))
+    let rows = sources
+        .iter()
+        .map(|t| (format!("{}.{}", t.schema, t.name), t.row_estimate))
+        .collect();
+    Ok((plan, caps, rows))
 }
 
 /// The source engine, connected read-only (RFC 0216 §2.1), through its provider (RFC 0255 §3.3).

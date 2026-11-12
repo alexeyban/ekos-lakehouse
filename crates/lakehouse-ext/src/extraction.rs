@@ -268,6 +268,12 @@ pub struct Proposal {
     pub masks: BTreeMap<String, MaskMethod>,
     pub excluded: Vec<Excluded>,
     pub step3: Vec<SubjectUse>,
+    /// EKOS RFC 0256: the current interaction findings that warn, as the plan read them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writer_findings: Vec<crate::writer_warnings::WriterFinding>,
+    /// The source's row estimates by `schema.table`, for the warnings' advice.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rows: BTreeMap<String, i64>,
 }
 
 /// The plan as it would be built: the proposal with the changes, and its digest.
@@ -282,6 +288,9 @@ pub struct Final {
     /// `schema.table` → its part of the digest.
     pub tables: BTreeMap<String, String>,
     pub notes: Vec<String>,
+    /// EKOS RFC 0256 §3.6: tables something outside the code writes, against the proposal's
+    /// modes, each answered or open. Advice only: none of it is in the plan or the digest.
+    pub warnings: Vec<crate::writer_warnings::WriterWarning>,
 }
 
 impl Final {
@@ -350,6 +359,7 @@ pub fn finalize(
         }
     }
     let (digest, tables) = digest(&plan, &masks, &p.excluded);
+    let warnings = crate::writer_warnings::warnings(&p.plan, &p.writer_findings, &p.rows, changes);
     Final {
         plan,
         masks,
@@ -358,6 +368,7 @@ pub fn finalize(
         digest,
         tables,
         notes,
+        warnings,
     }
 }
 
@@ -664,7 +675,7 @@ pub fn show(
         return json!({
             "proposed": false,
             "summary": {"state": state.words()},
-            "step3": [], "tables": [], "refused": [], "excluded": [], "changes": [],
+            "step3": [], "tables": [], "refused": [], "excluded": [], "changes": [], "warnings": [],
         });
     };
     let c = counts(f);
@@ -718,6 +729,7 @@ pub fn show(
                 "masked": masked,
                 "change": change.join("; "),
                 "since_approval": since_approval,
+                "writer_warning": warning_state(f, &q),
             })
         })
         .collect();
@@ -732,6 +744,9 @@ pub fn show(
         let mut md = format!("## {q}\n\n");
         bullets(&mut md, "Why it loads this way", &t.decision.evidence);
         bullets(&mut md, "Worth knowing", &t.decision.notes);
+        let ws: Vec<&crate::writer_warnings::WriterWarning> =
+            f.warnings.iter().filter(|w| w.table == q).collect();
+        md.push_str(&crate::writer_warnings::markdown(&ws));
         let ch: Vec<String> = changes_of(&q)
             .iter()
             .map(|x| {
@@ -813,6 +828,8 @@ pub fn show(
             "masked_columns": c.masked_columns,
             "changes": f.applied.len(),
             "stale_changes": f.stale().len(),
+            "writer_warnings_open": f.warnings.iter().filter(|w| w.is_open()).count(),
+            "writer_warnings_answered": f.warnings.iter().filter(|w| !w.is_open()).count(),
             "notes": f.notes.join("; "),
         },
         "step3": step3,
@@ -821,7 +838,41 @@ pub fn show(
         "refused": refused,
         "excluded": f.excluded,
         "changes": changes,
+        "warnings": warning_rows(f),
     })
+}
+
+/// A table's writer warnings in one word: `open` when any is, else `answered`, else nothing.
+fn warning_state(f: &Final, table: &str) -> Option<&'static str> {
+    let mut on = f.warnings.iter().filter(|w| w.table == table).peekable();
+    on.peek()?;
+    Some(if on.any(|w| w.is_open()) {
+        "open"
+    } else {
+        "answered"
+    })
+}
+
+fn warning_rows(f: &Final) -> Vec<Value> {
+    f.warnings
+        .iter()
+        .map(|w| {
+            json!({
+                "table": w.table,
+                "state": w.state(),
+                "finding": w.finding,
+                "role": w.role,
+                "operations": w.operations.join(", "),
+                "window": w.window,
+                "advice": w.advice.words,
+                "reason": w.advice.reason,
+                "cost": w.advice.cost,
+                "answered": w.answered_by.as_ref().map(|c| format!(
+                    "{} — by {} at {}", c.change.describe(), c.by, c.at)),
+                "evidence": w.evidence,
+            })
+        })
+        .collect()
 }
 
 /// Pure: the text form of [`show`].
@@ -876,6 +927,24 @@ pub fn render(v: &Value) -> String {
     }
     if let Some(n) = s["notes"].as_str().filter(|n| !n.is_empty()) {
         out.push_str(&format!("  note: {n}\n"));
+    }
+    for x in v["warnings"].as_array().into_iter().flatten() {
+        let who = x["role"]
+            .as_str()
+            .map(|r| format!("role {r}"))
+            .unwrap_or_else(|| "unattributed writes".into());
+        out.push_str(&format!(
+            "  WARNING ({}) {}: written outside the code — {who}, {} ({})\n    advice: {} — {}\n",
+            x["state"].as_str().unwrap_or("?"),
+            x["table"].as_str().unwrap_or("?"),
+            x["operations"].as_str().unwrap_or("?"),
+            x["window"].as_str().unwrap_or("?"),
+            x["advice"].as_str().unwrap_or("?"),
+            x["cost"].as_str().unwrap_or("?"),
+        ));
+        if let Some(a) = x["answered"].as_str() {
+            out.push_str(&format!("    answered: {a}\n"));
+        }
     }
     if let Some(t) = v["selected"].as_object() {
         out.push('\n');
@@ -1035,6 +1104,8 @@ mod tests {
             masks,
             excluded,
             step3: s3.subjects,
+            writer_findings: vec![],
+            rows: BTreeMap::new(),
         }
     }
 
@@ -1113,6 +1184,73 @@ mod tests {
         );
     }
 
+    /// RFC 0256 §3.6: a writer outside the code warns on an incremental table; keeping the mode
+    /// answers it without changing the plan's digest, and a new writer opens it again.
+    #[test]
+    fn a_writer_warning_is_advice_and_keeping_the_mode_answers_it() {
+        use crate::writer_warnings::WriterFinding;
+        let engines = crate::engines::Engines::builtin();
+        let mut p = proposal(&signed(), 10);
+        let t = p
+            .plan
+            .tables
+            .iter()
+            .find(|t| matches!(t.decision.mode, LoadMode::Incremental { .. }))
+            .expect("an incremental table");
+        let q = format!("{}.{}", t.schema, t.table);
+        let finding = |role: &str| WriterFinding {
+            finding: "unexplained_writer".into(),
+            table: t.table.to_lowercase(),
+            actor: Some(format!("db_role:{role}")),
+            operations: vec!["update".into()],
+            detail: json!({"calls": 2, "window_end": "2026-11-11T00:00:00Z"}),
+        };
+        p.writer_findings = vec![finding("etl_nightly")];
+        let none = BTreeMap::new();
+        let before = finalize(&engines, &p, &[], &none);
+        assert_eq!(before.warnings.len(), 1);
+        assert!(before.warnings[0].is_open());
+        let v = show(Some(&p), Some(&before), None, Some(&q));
+        assert_eq!(v["summary"]["writer_warnings_open"], 1);
+        assert_eq!(v["warnings"][0]["role"], "etl_nightly");
+        assert!(
+            v["tables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["writer_warning"] == "open")
+        );
+        assert!(
+            v["selected"]["markdown"]
+                .as_str()
+                .unwrap()
+                .contains("Written outside the code")
+        );
+        // Nothing changed by the warning itself: the mode is the proposal's.
+        assert_eq!(before.plan, {
+            let mut plain = p.clone();
+            plain.writer_findings.clear();
+            finalize(&engines, &plain, &[], &none).plan
+        });
+        // Keeping the mode needs a warning to answer.
+        let mut keep = change("X", Change::Keep, Some("known nightly job"));
+        keep.table = q.clone();
+        let refused = finalize(&engines, &p, std::slice::from_ref(&keep), &none);
+        assert!(refused.applied[0].stale.is_some());
+        keep.answers = crate::writer_warnings::evidence_on(&before.warnings, &q);
+        let kept = finalize(&engines, &p, std::slice::from_ref(&keep), &none);
+        assert!(kept.stale().is_empty());
+        assert!(!kept.warnings[0].is_open());
+        assert_eq!(
+            kept.digest, before.digest,
+            "keeping is a decision, not a plan change"
+        );
+        // Another role writing is new evidence.
+        p.writer_findings.push(finding("loader"));
+        let again = finalize(&engines, &p, std::slice::from_ref(&keep), &none);
+        assert_eq!(again.warnings.iter().filter(|w| w.is_open()).count(), 1);
+    }
+
     fn change(table: &str, c: Change, reason: Option<&str>) -> TableChange {
         TableChange {
             table: format!("ADEMPIERE.{table}"),
@@ -1120,6 +1258,7 @@ mod tests {
             reason: reason.map(Into::into),
             by: "ana".into(),
             at: "t".into(),
+            answers: vec![],
         }
     }
 
