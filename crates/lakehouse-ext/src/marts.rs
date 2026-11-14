@@ -108,8 +108,14 @@ pub fn file_at(repo: &Path, rev: &str, path: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-pub fn model_path(mart: &str) -> String {
-    format!("dbt/models/gold/gold__{mart}.sql")
+/// The mart's model in the pipeline repository: in the dbt-trino project, or the dbt-duckdb one
+/// when gold is built on DuckDB (EKOS RFC 0259).
+pub fn model_path(engine: gold::GoldEngine, mart: &str) -> String {
+    gold::model_path(engine, mart)
+}
+
+fn engine_of(plan: Option<&Plan>) -> gold::GoldEngine {
+    plan.map(|p| p.settings.gold_engine).unwrap_or_default()
 }
 
 pub fn description_path(mart: &str) -> String {
@@ -194,7 +200,7 @@ pub fn facts(req_dir: &Path, dir: &Path, repo: &Path, plan: Option<&Plan>, mart:
     Facts {
         approved,
         proposed,
-        merged: file_at(repo, "HEAD", &model_path(mart)).is_some(),
+        merged: file_at(repo, "HEAD", &model_path(engine_of(plan), mart)).is_some(),
         run: read_run(dir, mart),
         reconciliation: read_reconciliation(dir, mart),
     }
@@ -376,7 +382,7 @@ pub fn chain(
     ekos_semantic::transform_ir::TransformGraph,
 )> {
     let (spec, resolved, c) = compiled(repo, plan, mart, &notes.instructions)?;
-    let path = model_path(mart);
+    let path = model_path(plan.settings.gold_engine, mart);
     let (sql, label) = match version {
         Version::Committed => (
             file_at(repo, "HEAD", &path)
@@ -395,6 +401,7 @@ pub fn chain(
         path: &path,
         dbt_sql: &sql,
         version: label,
+        engine: plan.settings.gold_engine,
         grain: &spec.grain,
         resolved: &resolved,
         clauses: &c.clauses,
@@ -413,8 +420,9 @@ fn selected(
     f: &Facts,
     instructions: &[gold::Instruction],
 ) -> Value {
-    let sql = file_at(repo, "HEAD", &model_path(mart))
-        .or_else(|| proposal_branch(repo, mart).and_then(|b| file_at(repo, &b, &model_path(mart))));
+    let path = model_path(plan.settings.gold_engine, mart);
+    let sql = file_at(repo, "HEAD", &path)
+        .or_else(|| proposal_branch(repo, mart).and_then(|b| file_at(repo, &b, &path)));
     let mut md = format!("### {mart} — {st}\n\n");
     md.push_str(
         "Generated from the approved requirement. The SQL is a template: terms marked \
@@ -777,6 +785,7 @@ mod note_tests {
             path: "dbt/models/gold/gold__sales.sql",
             dbt_sql: &c.dbt_sql,
             version: "proposed",
+            engine: Default::default(),
             grain: &spec.grain,
             resolved: &resolved,
             clauses: &c.clauses,

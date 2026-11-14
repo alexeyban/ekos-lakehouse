@@ -62,7 +62,7 @@ pub fn report(repo: &Path, request_json: &str) -> anyhow::Result<Value> {
         let resolved = gold::resolve(&spec, &plan);
         match gold::compile(&spec, &plan, &resolved, &BTreeMap::new()) {
             Ok(c) => {
-                let verdict = gold::check(&c);
+                let verdict = gold::check_on(plan.settings.gold_engine, &c);
                 out["sql"] = json!(c.plain_sql);
                 out["mart"] = json!(spec.mart);
                 out["invention"] = json!({

@@ -1301,7 +1301,7 @@ impl EkosExtension for LakehouseExtension {
                     Ok(deployed) => sync::expression_changes(&deployed, &plan),
                     Err(_) => Vec::new(),
                 };
-                let w = plan_cmd::write(&plan, &silver, &out)?;
+                let w = plan_cmd::write(&plan, &silver, &settings.duckdb_gold(), &out)?;
                 sync::commit_generated(&out, "lakehouse: generate")?;
                 // RFC 0227: rows written by an old expression are never rewritten incrementally.
                 let reload = if reload.is_empty() {
@@ -1473,6 +1473,7 @@ impl EkosExtension for LakehouseExtension {
                     repo: &repo,
                     live: &live,
                     silver: &silver,
+                    gold: &settings.duckdb_gold(),
                     policy: &settings.policy,
                     store: store.as_ref(),
                     git_remote: settings.git_remote.as_deref(),
@@ -1728,7 +1729,7 @@ impl EkosExtension for LakehouseExtension {
                     metrics.push(check::lineage(&plan, &silver, store.as_ref())?);
                 }
                 metrics.extend(check::coverage(&plan, &silver, &repo)?);
-                metrics.push(check::drift(&plan, &silver, &repo));
+                metrics.push(check::drift(&plan, &silver, &settings.duckdb_gold(), &repo));
                 if m.get_flag("lint") {
                     metrics.push(check::lint(&repo));
                 }
@@ -1999,9 +2000,10 @@ fn mart_edit_cmd(
         gates.extend(mart_edit::engine_verdicts(plans, dup, &totals));
         let (g, ir) = mart_graph::chain_ir(&mart_graph::MartSql {
             mart,
-            path: &marts::model_path(mart),
+            path: &marts::model_path(p.settings.gold_engine, mart),
             dbt_sql: &c.dbt_sql,
             version: "preview",
+            engine: p.settings.gold_engine,
             grain: &spec2.grain,
             resolved: &resolved2,
             clauses: &c.clauses,

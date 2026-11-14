@@ -46,7 +46,7 @@ fn edits_survive_and_dropped_tables_take_their_files() {
     let out = tmp("rules");
     let s = PlanSettings::default();
     let both = plan(&[table("a"), table("b")], &s);
-    let w = write(&both, &SilverSettings::default(), &out).unwrap();
+    let w = write(&both, &SilverSettings::default(), &Default::default(), &out).unwrap();
     assert!(w.kept.is_empty() && w.removed.is_empty());
 
     // A person edits table a's model and b's load.
@@ -66,7 +66,13 @@ fn edits_survive_and_dropped_tables_take_their_files() {
 
     // Regenerate without b: a's edit is kept; b's untouched files go, its edited one stays.
     let only_a = plan(&[table("a")], &s);
-    let w = write(&only_a, &SilverSettings::default(), &out).unwrap();
+    let w = write(
+        &only_a,
+        &SilverSettings::default(),
+        &Default::default(),
+        &out,
+    )
+    .unwrap();
     assert!(
         w.kept
             .contains(&"dbt/models/silver/public/public__a.sql".to_string()),
@@ -102,6 +108,7 @@ fn a_file_never_generated_here_is_refused() {
     let err = write(
         &plan(&[table("a")], &PlanSettings::default()),
         &SilverSettings::default(),
+        &Default::default(),
         &out,
     )
     .err()
@@ -113,4 +120,61 @@ fn a_file_never_generated_here_is_refused() {
         "select 1\n"
     );
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// EKOS RFC 0259 L1/L2: a Trino-gold plan writes exactly what it always did — no dbt-duckdb
+/// project, the lock without a gold engine; a DuckDB-gold plan adds the dbt-duckdb project and the
+/// `gold_duckdb` Dagster group; going back to Trino removes the project again.
+#[test]
+fn the_gold_engine_decides_the_dbt_duckdb_project() {
+    let out = tmp("gold-engine");
+    let trino = plan(&[table("a")], &PlanSettings::default());
+    write(
+        &trino,
+        &SilverSettings::default(),
+        &Default::default(),
+        &out,
+    )
+    .unwrap();
+    assert!(!out.join("gold-duckdb").exists());
+    let lock = std::fs::read_to_string(out.join("lakehouse.lock.json")).unwrap();
+    assert!(!lock.contains("gold-engine"));
+    let defs = std::fs::read_to_string(out.join("dagster/definitions.py")).unwrap();
+    assert!(!defs.contains("gold_duckdb"));
+
+    let duck = plan(
+        &[table("a")],
+        &PlanSettings {
+            gold_engine: ekos_lakehouse_bronze::GoldEngine::Duckdb,
+            ..Default::default()
+        },
+    );
+    let w = write(&duck, &SilverSettings::default(), &Default::default(), &out).unwrap();
+    assert!(w.kept.is_empty() && w.removed.is_empty());
+    for f in [
+        "gold-duckdb/dbt_project.yml",
+        "gold-duckdb/profiles.yml",
+        "gold-duckdb/models/_silver_sources.yml",
+        "gold-duckdb/macros/ekos_attach_silver.sql",
+    ] {
+        assert!(out.join(f).is_file(), "{f}");
+    }
+    let defs = std::fs::read_to_string(out.join("dagster/definitions.py")).unwrap();
+    assert!(defs.contains("group_name=\"gold_duckdb\""));
+    let lock = std::fs::read_to_string(out.join("lakehouse.lock.json")).unwrap();
+    assert!(lock.contains("\"gold-engine\": \"duckdb\""));
+
+    let w = write(
+        &trino,
+        &SilverSettings::default(),
+        &Default::default(),
+        &out,
+    )
+    .unwrap();
+    assert!(
+        w.removed.iter().any(|p| p == "gold-duckdb/profiles.yml"),
+        "{:?}",
+        w.removed
+    );
+    assert!(!out.join("gold-duckdb/profiles.yml").exists());
 }

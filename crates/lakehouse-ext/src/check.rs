@@ -4,7 +4,6 @@
 //! in memory and comparing; lint from `sqlfluff` when it is installed.
 
 use ekos_lakehouse_bronze::plan::Plan;
-use ekos_lakehouse_bronze::render;
 use ekos_lakehouse_silver::{MaskMethod, SilverSettings, model_name};
 use ekos_ledger::KnowledgeStore;
 use serde::Serialize;
@@ -279,9 +278,13 @@ pub fn coverage(plan: &Plan, silver: &SilverSettings, repo: &Path) -> anyhow::Re
 /// Drift (RFC 0190): generated files a person has edited since the last `generate`, and
 /// generated files that are out of date with the deployed plan. Reported, not a failure: the
 /// edits are kept, and `generate` works around them.
-pub fn drift(plan: &Plan, silver: &SilverSettings, repo: &Path) -> Metric {
-    let mut files = render::files(plan);
-    files.extend(ekos_lakehouse_silver::files(plan, silver).0);
+pub fn drift(
+    plan: &Plan,
+    silver: &SilverSettings,
+    gold: &ekos_lakehouse_gold::duckdb::DuckDbGold,
+    repo: &Path,
+) -> Metric {
+    let files = crate::plan_cmd::files(plan, silver, gold).0;
     let edited = crate::plan_cmd::edited_files(repo);
     let mut gaps: Vec<String> = edited
         .iter()

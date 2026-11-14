@@ -33,6 +33,8 @@ pub struct MartSql<'a> {
     pub dbt_sql: &'a str,
     /// `committed` (what runs) or `proposed` (what the compiler would write now).
     pub version: &'a str,
+    /// EKOS RFC 0259: the engine the mart is built on; its dialect parses the SQL.
+    pub engine: ekos_lakehouse_gold::GoldEngine,
     pub grain: &'a [String],
     pub resolved: &'a [Resolved],
     pub clauses: &'a [Clause],
@@ -45,6 +47,8 @@ pub struct MartSql<'a> {
 
 /// The model's SQL without its header lines, refs replaced by the model names they name
 /// (`{{ ref('ADEMPIERE__C_ORDER') }}` → `"ADEMPIERE__C_ORDER"`), and the file line it starts on.
+/// A DuckDB mart's silver sources name their table as the model (EKOS RFC 0259:
+/// `{{ source('silver_adempiere', 'ADEMPIERE__C_ORDER') }}`), and read the same.
 pub fn plain_sql(dbt: &str) -> (String, u32) {
     let mut lines = dbt.lines().enumerate().skip_while(|(_, l)| {
         let t = l.trim();
@@ -60,14 +64,25 @@ pub fn plain_sql(dbt: &str) -> (String, u32) {
     }
     let mut out = String::new();
     let mut rest = body.as_str();
-    while let Some(i) = rest.find("{{ ref('") {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + "{{ ref('".len()..];
+    loop {
+        let next = [("{{ ref('", false), ("{{ source('", true)]
+            .into_iter()
+            .filter_map(|(open, source)| rest.find(open).map(|i| (i, open, source)))
+            .min_by_key(|(i, _, _)| *i);
+        let Some((i, open, source)) = next else { break };
+        let after = &rest[i + open.len()..];
         let Some(j) = after.find("') }}") else {
             break;
         };
+        out.push_str(&rest[..i]);
+        // A source's arguments are `'<schema>', '<model>'`: the model is its last.
+        let name = if source {
+            after[..j].rsplit('\'').next().unwrap_or_default()
+        } else {
+            &after[..j]
+        };
         out.push('"');
-        out.push_str(&after[..j]);
+        out.push_str(name);
         out.push('"');
         rest = &after[j + "') }}".len()..];
     }
@@ -419,15 +434,14 @@ fn list(terms: &[String]) -> String {
 /// The parsed, split graph of a mart's SQL with the mart as its last step, and the plain SQL it
 /// was parsed from (with its first line in the file).
 pub fn mart_ir(m: &MartSql<'_>) -> anyhow::Result<(TransformGraph, String, u32)> {
-    use ekos_sql_dialect_sdk::SqlDialectParser;
     let (plain, start_line) = plain_sql(m.dbt_sql);
     anyhow::ensure!(!plain.is_empty(), "{}: the model has no SQL", m.path);
-    let trino = ekos_plugin_sql_dialect_trino::TrinoDialectParser;
+    let dialect = ekos_lakehouse_gold::parser(m.engine);
     let graphs = ekos_recovery::sql_transform_analyzer::parse_sql_to_statement_graphs(
-        &trino.preprocess(&plain),
+        &dialect.preprocess(&plain),
         m.path,
-        "trino",
-        &*trino.sqlparser_dialect(),
+        dialect.name(),
+        &*dialect.sqlparser_dialect(),
     );
     let graph = graphs
         .into_iter()
@@ -743,6 +757,7 @@ group by date_trunc('month', \"C_ORDER\".\"DATEORDERED\"), \"C_BPARTNER\".\"NAME
             path: "dbt/models/gold/gold__sales_by_month.sql",
             dbt_sql: sql,
             version: "committed",
+            engine: Default::default(),
             grain,
             resolved: &[],
             clauses,
@@ -859,5 +874,35 @@ group by date_trunc('month', \"C_ORDER\".\"DATEORDERED\"), \"C_BPARTNER\".\"NAME
                 .iter()
                 .any(|n| n["badge"] == "unmapped")
         );
+    }
+
+    /// EKOS RFC 0259 L1: a DuckDB mart reads silver as sources named after the models; parsed in
+    /// DuckDB's dialect, its chain is the Trino mart's chain, every step mapped.
+    #[test]
+    fn a_duckdb_mart_reads_and_maps_as_the_trino_one() {
+        let duck = SALES
+            .replace(
+                "{{ ref('ADEMPIERE__C_ORDER') }}",
+                "{{ source('silver_adempiere', 'ADEMPIERE__C_ORDER') }}",
+            )
+            .replace(
+                "{{ ref('ADEMPIERE__C_BPARTNER') }}",
+                "{{ source('silver_adempiere', 'ADEMPIERE__C_BPARTNER') }}",
+            );
+        assert_eq!(plain_sql(&duck), plain_sql(SALES));
+        let clauses = sales_clauses();
+        let grain = vec!["month".to_string(), "customer".to_string()];
+        let mut m = input(&duck, &clauses, &grain);
+        m.engine = ekos_lakehouse_gold::GoldEngine::Duckdb;
+        let g = chain(&m).unwrap();
+        let t = chain(&input(SALES, &clauses, &grain)).unwrap();
+        assert_eq!(g.counts.unmapped, 0, "{:#?}", g.nodes);
+        let types = |g: &ChainGraph| {
+            g.nodes
+                .iter()
+                .map(|n| (n.node_type.clone(), n.term.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(types(&g), types(&t));
     }
 }

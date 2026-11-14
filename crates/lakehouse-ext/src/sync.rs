@@ -219,6 +219,8 @@ pub struct SyncInputs<'a> {
     pub repo: &'a Path,
     pub live: &'a Plan,
     pub silver: &'a SilverSettings,
+    /// EKOS RFC 0259: where dbt-duckdb reads silver, for a plan whose gold is on DuckDB.
+    pub gold: &'a ekos_lakehouse_gold::duckdb::DuckDbGold,
     pub policy: &'a Policy,
     pub store: &'a dyn KnowledgeStore,
     /// Push proposal branches here and open pull requests with `gh` (RFC 0194 §4).
@@ -249,7 +251,7 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
     let next = apply_auto(&deployed, i.live, &changes);
     let mut committed = false;
     if next != deployed {
-        plan_cmd::write(&next, i.silver, repo)?;
+        plan_cmd::write(&next, i.silver, i.gold, repo)?;
         let applied: Vec<String> = changes
             .iter()
             .filter(|c| c.action == Action::Auto)
@@ -367,7 +369,7 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
             let body = proposal_markdown(&id, table, cs, &impact_lines);
             let built = (|| -> anyhow::Result<()> {
                 let proposed = with_table(&next, i.live, table);
-                plan_cmd::write(&proposed, i.silver, &wt)?;
+                plan_cmd::write(&proposed, i.silver, i.gold, &wt)?;
                 std::fs::create_dir_all(wt.join("proposals"))?;
                 std::fs::write(wt.join(format!("proposals/{id}.md")), &body)?;
                 commit_all(

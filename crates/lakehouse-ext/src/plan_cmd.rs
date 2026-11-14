@@ -178,16 +178,34 @@ pub struct Written {
     pub silver: ekos_lakehouse_silver::SilverReport,
 }
 
+/// Every generated file of the plan: bronze, the Dagster definitions, silver's dbt-trino project
+/// and — when gold is built on DuckDB (EKOS RFC 0259) — the dbt-duckdb project's own files.
+pub fn files(
+    p: &Plan,
+    silver: &ekos_lakehouse_silver::SilverSettings,
+    gold: &ekos_lakehouse_gold::duckdb::DuckDbGold,
+) -> (
+    std::collections::BTreeMap<String, String>,
+    ekos_lakehouse_silver::SilverReport,
+) {
+    let mut files = render::files(p);
+    let (silver_files, report) = ekos_lakehouse_silver::files(p, silver);
+    files.extend(silver_files);
+    if p.settings.gold_engine == ekos_lakehouse_bronze::GoldEngine::Duckdb {
+        files.extend(ekos_lakehouse_gold::duckdb::project_files(p, gold));
+    }
+    (files, report)
+}
+
 /// Write the plan's files under `out`. A file edited by hand since the last `generate` is kept
 /// and reported, never overwritten; a file that exists but was never generated here is refused.
 pub fn write(
     p: &Plan,
     silver: &ekos_lakehouse_silver::SilverSettings,
+    gold: &ekos_lakehouse_gold::duckdb::DuckDbGold,
     out: &Path,
 ) -> anyhow::Result<Written> {
-    let mut files = render::files(p);
-    let (silver_files, report) = ekos_lakehouse_silver::files(p, silver);
-    files.extend(silver_files);
+    let (files, report) = files(p, silver, gold);
     let mut manifest = read_manifest(out);
     let mut kept = Vec::new();
     let mut foreign = Vec::new();

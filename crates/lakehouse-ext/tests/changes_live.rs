@@ -135,6 +135,7 @@ fn run_sync(
         repo,
         live: &plan_now(),
         silver: &SilverSettings::default(),
+        gold: &Default::default(),
         policy: &Policy::new(),
         store,
         git_remote: None,
@@ -191,7 +192,7 @@ fn every_change_class_produces_its_action() {
             ))
             .unwrap();
     }
-    write(&p0, &SilverSettings::default(), &repo).unwrap();
+    write(&p0, &SilverSettings::default(), &Default::default(), &repo).unwrap();
     commit_generated(&repo, "lakehouse: generate").unwrap();
     for t in &p0.tables {
         load(&admin, t, &p0, "r0").unwrap();

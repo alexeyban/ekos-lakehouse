@@ -24,6 +24,35 @@ pub struct PlanSettings {
     /// RFC 0216. Not written for PostgreSQL, so a PostgreSQL lock file is unchanged.
     #[serde(skip_serializing_if = "SourceEngine::is_postgres")]
     pub source_engine: SourceEngine,
+    /// EKOS RFC 0259: the engine gold marts are built on. Not written for Trino, so an existing
+    /// lock file is unchanged byte for byte.
+    #[serde(skip_serializing_if = "GoldEngine::is_trino")]
+    pub gold_engine: GoldEngine,
+}
+
+/// EKOS RFC 0259 §3.2 L1: where gold marts are built. Bronze and silver are always Trino.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GoldEngine {
+    /// dbt-trino, gold tables in the Iceberg catalog (RFC 0195/0228).
+    #[default]
+    Trino,
+    /// dbt-duckdb reading silver from the Iceberg catalog, marts in one DuckDB file (RFC 0259).
+    Duckdb,
+}
+
+impl GoldEngine {
+    pub fn is_trino(&self) -> bool {
+        *self == GoldEngine::Trino
+    }
+
+    /// `trino` or `duckdb`: the name `ekos.toml` and the lock file use.
+    pub fn name(&self) -> &'static str {
+        match self {
+            GoldEngine::Trino => "trino",
+            GoldEngine::Duckdb => "duckdb",
+        }
+    }
 }
 
 impl Default for PlanSettings {
@@ -36,6 +65,7 @@ impl Default for PlanSettings {
             bronze_schedule: "0 * * * *".into(),
             maintenance_schedule: "0 3 * * *".into(),
             source_engine: SourceEngine::POSTGRES,
+            gold_engine: GoldEngine::Trino,
         }
     }
 }
@@ -381,6 +411,29 @@ mod engine_tests {
         assert_eq!(gold_schema("bronze_sales_"), "gold_sales");
         assert_eq!(layer_tag("raw_"), "raw_");
         assert_eq!(gold_schema("raw_"), "gold_raw");
+    }
+
+    /// EKOS RFC 0259 L1: the gold engine is written only when it is not Trino, so every lock file
+    /// written before it reads back and writes out byte for byte; a DuckDB plan names its engine.
+    #[test]
+    fn the_gold_engine_leaves_a_trino_lock_unchanged() {
+        let trino = plan(&[one_table()], &PlanSettings::default());
+        let text = serde_json::to_string_pretty(&trino).unwrap();
+        assert!(!text.contains("gold-engine"), "{text}");
+        let back: Plan = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.settings.gold_engine, GoldEngine::Trino);
+        assert_eq!(serde_json::to_string_pretty(&back).unwrap(), text);
+        let duck = plan(
+            &[one_table()],
+            &PlanSettings {
+                gold_engine: GoldEngine::Duckdb,
+                ..Default::default()
+            },
+        );
+        let text = serde_json::to_string_pretty(&duck).unwrap();
+        assert!(text.contains("\"gold-engine\": \"duckdb\""), "{text}");
+        let back: Plan = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.settings.gold_engine, GoldEngine::Duckdb);
     }
 
     fn one_table() -> SourceTable {

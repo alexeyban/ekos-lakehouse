@@ -14,8 +14,19 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub mod ask;
 pub mod assist;
 pub mod dashboard;
+pub mod duckdb;
 pub mod edits;
 pub mod requirements;
+
+pub use ekos_lakehouse_bronze::plan::GoldEngine;
+
+/// EKOS RFC 0259 L1: the SQL dialect gold is checked in follows the engine it is built on.
+pub fn parser(engine: GoldEngine) -> Box<dyn ekos_sql_dialect_sdk::SqlDialectParser> {
+    match engine {
+        GoldEngine::Trino => Box::new(ekos_plugin_sql_dialect_trino::TrinoDialectParser),
+        GoldEngine::Duckdb => Box::new(ekos_plugin_sql_dialect_duckdb::DuckDbDialectParser),
+    }
+}
 
 // ─────────────────────────────── the description ───────────────────────────────
 
@@ -754,13 +765,17 @@ pub fn resolve_with(
 /// — and use only the columns its own term names: the description's other columns belong to
 /// its other terms, and borrowing them states a meaning this term does not have.
 pub fn check_draft(term: &Term, expr: &str) -> Result<(), String> {
-    use ekos_sql_dialect_sdk::SqlDialectParser;
+    check_draft_on(GoldEngine::Trino, term, expr)
+}
+
+/// [`check_draft`] in the dialect of the engine the mart is built on (EKOS RFC 0259 L1).
+pub fn check_draft_on(engine: GoldEngine, term: &Term, expr: &str) -> Result<(), String> {
     let Term::Prose { mentions, .. } = term else {
         return Ok(());
     };
-    let trino = ekos_plugin_sql_dialect_trino::TrinoDialectParser;
-    let sql = trino.preprocess(&format!("select {expr}"));
-    let statements = sqlparser::parser::Parser::parse_sql(&*trino.sqlparser_dialect(), &sql)
+    let dialect = parser(engine);
+    let sql = dialect.preprocess(&format!("select {expr}"));
+    let statements = sqlparser::parser::Parser::parse_sql(&*dialect.sqlparser_dialect(), &sql)
         .map_err(|e| format!("unparseable SQL ({e})"))?;
     let single = match statements.as_slice() {
         [sqlparser::ast::Statement::Query(q)] => match q.body.as_ref() {
@@ -1469,13 +1484,18 @@ fn clauses_of(
 
 /// RFC 0195 §4: the finished statement against the description's own atoms.
 pub fn check(c: &Compiled) -> InventionReport {
+    check_on(GoldEngine::Trino, c)
+}
+
+/// [`check`], the statement read in the dialect of the engine the mart is built on (EKOS RFC
+/// 0259 L1): a mart DuckDB builds must parse as DuckDB.
+pub fn check_on(engine: GoldEngine, c: &Compiled) -> InventionReport {
     let source = sql_atoms(&c.source_sql).unwrap_or_default();
-    let trino = ekos_plugin_sql_dialect_trino::TrinoDialectParser;
-    use ekos_sql_dialect_sdk::SqlDialectParser;
+    let dialect = parser(engine);
     check_candidate_with(
         &source,
-        &trino.preprocess(&c.plain_sql),
-        &*trino.sqlparser_dialect(),
+        &dialect.preprocess(&c.plain_sql),
+        &*dialect.sqlparser_dialect(),
     )
 }
 
@@ -1691,6 +1711,60 @@ pub fn reconciliation_tests(
         );
         out.push((format!("gold__{}__{}_reconciles", spec.mart, r.term), sql));
     }
+    out
+}
+
+/// The model's path in the pipeline repository: the dbt-trino project's, or the dbt-duckdb
+/// project's (EKOS RFC 0259 L2).
+pub fn model_path(engine: GoldEngine, mart: &str) -> String {
+    match engine {
+        GoldEngine::Trino => format!("dbt/models/gold/gold__{mart}.sql"),
+        GoldEngine::Duckdb => format!("{}/models/gold/gold__{mart}.sql", duckdb::PROJECT_DIR),
+    }
+}
+
+/// Every file a proposal writes for one mart, by path in the pipeline repository: the model, its
+/// YAML, the reconciliation tests and the proposal. For Trino exactly the files RFC 0195 always
+/// wrote; for DuckDB the same model lowered to the dbt-duckdb project (silver as sources).
+pub fn mart_files(
+    engine: GoldEngine,
+    plan: &Plan,
+    spec: &MartSpec,
+    resolved: &[Resolved],
+    c: &Compiled,
+    report: &InventionReport,
+    drafted: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let (dir, lower): (&str, Box<dyn Fn(&str) -> String>) = match engine {
+        GoldEngine::Trino => ("dbt", Box::new(|s: &str| s.to_string())),
+        GoldEngine::Duckdb => (
+            duckdb::PROJECT_DIR,
+            Box::new(|s: &str| duckdb::lower(s, plan)),
+        ),
+    };
+    let mut out = vec![
+        (model_path(engine, &spec.mart), lower(&c.dbt_sql)),
+        (
+            format!("{dir}/models/gold/_gold__{}.yml", spec.mart),
+            model_yaml(spec, resolved),
+        ),
+    ];
+    for (name, sql) in reconciliation_tests(spec, resolved, c) {
+        out.push((format!("{dir}/tests/gold/{name}.sql"), lower(&sql)));
+    }
+    let mut proposal = proposal_markdown(spec, resolved, c, report, drafted);
+    if engine == GoldEngine::Duckdb {
+        proposal = proposal
+            .replacen(&c.dbt_sql, &lower(&c.dbt_sql), 1)
+            .replacen(
+                "\n## Terms",
+                "\nBuilt on **DuckDB** (EKOS RFC 0259): dbt-duckdb reads silver from the Iceberg \
+             catalog and writes the mart into the marts file, published only when its tests \
+             and its reconciliation with silver in Trino pass.\n\n## Terms",
+                1,
+            );
+    }
+    out.push((format!("proposals/gold-{}.md", spec.mart), proposal));
     out
 }
 

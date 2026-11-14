@@ -86,7 +86,7 @@ async fn translate_proposes_a_branch_and_generate_keeps_the_files() {
     );
     let repo = root.join("pipeline");
     std::fs::create_dir_all(&repo).unwrap();
-    write(&p, &SilverSettings::default(), &repo).unwrap();
+    write(&p, &SilverSettings::default(), &Default::default(), &repo).unwrap();
     std::fs::write(
         repo.join("lakehouse.lock.json"),
         serde_json::to_string_pretty(&p).unwrap(),
@@ -176,7 +176,7 @@ async fn translate_proposes_a_branch_and_generate_keeps_the_files() {
         repo.join("dbt/models/gold/pentaho/etl/gold__order_amounts.sql")
             .exists()
     );
-    let w = write(&p, &SilverSettings::default(), &repo).unwrap();
+    let w = write(&p, &SilverSettings::default(), &Default::default(), &repo).unwrap();
     assert!(w.removed.is_empty(), "generate removed {:?}", w.removed);
     assert!(
         repo.join("dbt/models/gold/pentaho/etl/gold__order_amounts.sql")

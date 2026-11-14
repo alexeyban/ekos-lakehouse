@@ -19,7 +19,7 @@ pub use model::{
     UpdateTrigger, ValueList, WriteFacts,
 };
 pub use plan::{
-    ColumnRename, Plan, TablePlan, attach_checks, attach_code, carry_renames, iceberg_name, plan,
-    plan_for, plan_with, safe_name,
+    ColumnRename, GoldEngine, Plan, TablePlan, attach_checks, attach_code, carry_renames,
+    iceberg_name, plan, plan_for, plan_with, safe_name,
 };
 pub use typemap::{CompareRule, Lossiness, Mapping};

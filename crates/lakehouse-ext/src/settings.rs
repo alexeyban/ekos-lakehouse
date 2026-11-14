@@ -101,6 +101,8 @@ pub struct Settings {
     /// EKOS RFC 0258: `[extensions.lakehouse.dashboards]` — the Superset dashboards whose health
     /// is evaluated, and whether the health is written onto them.
     pub dashboards: crate::dashboards::DashboardsSettings,
+    /// EKOS RFC 0259: `[extensions.lakehouse.gold]` — the engine gold marts are built on.
+    pub gold: GoldSettings,
     /// For `oracle`: the `[[databases]]` entry `source-database` names, filled in by [`load`].
     #[serde(skip)]
     pub database: Option<ekos_compiler_core::DatabaseConfig>,
@@ -108,6 +110,36 @@ pub struct Settings {
     /// `ekos.toml`: `source-engine` names one of them.
     #[serde(skip)]
     pub engines: crate::engines::Engines,
+}
+
+/// `[extensions.lakehouse.gold]` (EKOS RFC 0259). Endpoints and variable names only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
+pub struct GoldSettings {
+    /// `trino` (default) or `duckdb`.
+    pub engine: Option<ekos_lakehouse_bronze::GoldEngine>,
+    /// The published marts file, relative to the pipeline repository. Default
+    /// `.lakehouse/marts/marts.duckdb` (never committed). It is built beside itself as
+    /// `marts.next.duckdb` and replaced only when the build, its tests and its reconciliation pass.
+    pub marts_file: Option<String>,
+    /// Polaris' Iceberg REST endpoint. Default `http://127.0.0.1:58181/api/catalog`.
+    pub catalog_url: Option<String>,
+    /// The Iceberg catalog to attach. Default `lakehouse`.
+    pub warehouse: Option<String>,
+    /// Default `us-east-1`. The S3 endpoint is `s3-url`.
+    pub s3_region: Option<String>,
+    /// The environment variables (names, never values) holding the S3 key pair — default
+    /// `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — and the catalog's OAuth2 client — default
+    /// `EKOS_LH_POLARIS_CLIENT_ID` / `EKOS_LH_POLARIS_CLIENT_SECRET`.
+    pub s3_key_id_env: Option<String>,
+    pub s3_secret_env: Option<String>,
+    pub client_id_env: Option<String>,
+    pub client_secret_env: Option<String>,
+    /// The `dbt` executable with dbt-duckdb installed. Default `dbt`.
+    pub dbt: Option<String>,
+    /// The Python with the `duckdb` module that reads the marts file read-only for the
+    /// reconciliation. Default `python3`.
+    pub python: Option<String>,
 }
 
 impl Settings {
@@ -143,6 +175,30 @@ impl Settings {
                 .clone()
                 .unwrap_or(d.maintenance_schedule),
             source_engine: self.engine(),
+            gold_engine: self.gold.engine.unwrap_or_default(),
+        }
+    }
+
+    /// Where dbt-duckdb reads silver (EKOS RFC 0259 L2): the catalog and S3 endpoints, and the
+    /// names of the variables holding their credentials.
+    pub fn duckdb_gold(&self) -> ekos_lakehouse_gold::duckdb::DuckDbGold {
+        let d = ekos_lakehouse_gold::duckdb::DuckDbGold::default();
+        let g = &self.gold;
+        let (s3_endpoint, s3_use_ssl) = self
+            .s3_url
+            .as_deref()
+            .map(ekos_lakehouse_gold::duckdb::s3_endpoint_of)
+            .unwrap_or((d.s3_endpoint, d.s3_use_ssl));
+        ekos_lakehouse_gold::duckdb::DuckDbGold {
+            catalog_url: g.catalog_url.clone().unwrap_or(d.catalog_url),
+            warehouse: g.warehouse.clone().unwrap_or(d.warehouse),
+            s3_endpoint,
+            s3_use_ssl,
+            s3_region: g.s3_region.clone().unwrap_or(d.s3_region),
+            s3_key_id_env: g.s3_key_id_env.clone().unwrap_or(d.s3_key_id_env),
+            s3_secret_env: g.s3_secret_env.clone().unwrap_or(d.s3_secret_env),
+            client_id_env: g.client_id_env.clone().unwrap_or(d.client_id_env),
+            client_secret_env: g.client_secret_env.clone().unwrap_or(d.client_secret_env),
         }
     }
 

@@ -1698,7 +1698,7 @@ fn mart_step(
             json!({"status": "refused", "reason": "a mart term does not resolve", "gates": gates}),
         ));
     };
-    let inv = gold::check(&compiled);
+    let inv = gold::check_on(cx.plan.settings.gold_engine, &compiled);
     gates.push(json!({"gate": "0 invented atoms", "ok": inv.accepted(), "detail": format!("{} atoms checked", inv.checked)}));
     if !all_ok(&gates) {
         return Ok(MartOutcome::Stop(

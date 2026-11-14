@@ -13,6 +13,8 @@ ekos-lakehouse-silver.workspace = true
 ekos-migrate-logic.workspace = true
 ekos-sql-dialect-sdk = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-plugin-sql-dialect-trino = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-plugin-sql-dialect-duckdb = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+ekos-migrate-validate.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

@@ -22,6 +22,12 @@ no explanation, no code fence. Use only the columns, written exactly as listed (
 and only the functions sum, count, avg, min, max. Count rows with count(*). Do not add constants, \
 conditions or columns the request does not state.";
 
+/// EKOS RFC 0259: the same instructions for a mart DuckDB builds.
+const SYSTEM_DUCKDB: &str = "You write one SQL expression for DuckDB, nothing else: no SELECT, no FROM, \
+no explanation, no code fence. Use only the columns, written exactly as listed (\"table\".\"column\"), \
+and only the functions sum, count, avg, min, max. Count rows with count(*). Do not add constants, \
+conditions or columns the request does not state.";
+
 fn context(
     resolved: &[gold::Resolved],
     plan: &ekos_lakehouse_bronze::plan::Plan,
@@ -34,9 +40,15 @@ fn context(
                 .column_facts(&m.column)
                 .and_then(|f| f.comment.clone())
                 .unwrap_or_default();
+            // EKOS RFC 0259: the type as the engine that builds the mart names it.
+            let ty = match plan.settings.gold_engine {
+                gold::GoldEngine::Trino => m.iceberg_type.clone(),
+                gold::GoldEngine::Duckdb => gold::duckdb::duckdb_type(&m.iceberg_type)
+                    .unwrap_or_else(|| m.iceberg_type.clone()),
+            };
             s.push_str(&format!(
-                "- \"{}\".\"{}\" ({}) {desc}\n",
-                t.table, m.column, m.iceberg_type
+                "- \"{}\".\"{}\" ({ty}) {desc}\n",
+                t.table, m.column
             ));
         }
     }
@@ -106,6 +118,7 @@ pub async fn draft(
         );
     }
     let plan = read_lock(repo)?;
+    let engine = plan.settings.gold_engine;
     // EKOS RFC 0257 §3.4: the instructions in force on the tables the mart reads.
     let (spec, resolved, _) = gold::resolve_with(&spec, &plan, instructions);
     let mut outcome = DraftOutcome {
@@ -151,7 +164,10 @@ pub async fn draft(
             );
             let resp = provider
                 .complete(&LlmRequest {
-                    system: SYSTEM,
+                    system: match engine {
+                        gold::GoldEngine::Trino => SYSTEM,
+                        gold::GoldEngine::Duckdb => SYSTEM_DUCKDB,
+                    },
                     user: &user,
                     prompt_version: "lakehouse-gold-2",
                     max_tokens: 200,
@@ -161,7 +177,9 @@ pub async fn draft(
                 .map_err(|e| anyhow::anyhow!("drafting `{}` with {model}: {e}", r.term))?;
             let expr = clean(&resp.content);
             outcome.drafts.insert(r.term.clone(), attempt);
-            if let Err(why) = gold::check_draft(r.resolution.as_ref().expect("prose"), &expr) {
+            if let Err(why) =
+                gold::check_draft_on(engine, r.resolution.as_ref().expect("prose"), &expr)
+            {
                 feedback = format!(
                     "\nYour last answer `{expr}` was rejected: {why}. Answer again with one SQL \
                      expression over the columns this term names."
@@ -172,10 +190,12 @@ pub async fn draft(
             trial.insert(r.term.clone(), expr.clone());
             let c = gold::compile(&spec, &plan, &resolved, &trial)
                 .map_err(|q| anyhow::anyhow!("{q:?}"))?;
-            let report = gold::check(&c);
+            let report = gold::check_on(engine, &c);
             if report.accepted() {
                 // Nothing invented; now it must also run (RFC 0195: found when Trino refused
-                // `COUNT("ar".*)`, which every atom of passed).
+                // `COUNT("ar".*)`, which every atom of passed). A DuckDB mart is planned by Trino
+                // over the same silver tables too: what DuckDB alone refuses fails its build into
+                // `marts.next.duckdb`, which never replaces the published file (RFC 0259 L3).
                 let catalog = plan.settings.target_catalog.clone();
                 let sql = gold::engine_sql(&c, &catalog);
                 let conn = trino.clone();
@@ -235,7 +255,7 @@ pub async fn draft(
     }
     let c =
         gold::compile(&spec, &plan, &resolved, &drafted).map_err(|q| anyhow::anyhow!("{q:?}"))?;
-    let report = gold::check(&c);
+    let report = gold::check_on(engine, &c);
     anyhow::ensure!(
         report.accepted(),
         "the compiled mart invents {:?}",
@@ -308,21 +328,12 @@ pub async fn draft(
                 // A description kept outside the repository travels with its proposal.
                 write(&format!("marts/{}.md", spec.mart), &text)?;
             }
-            write(
-                &format!("dbt/models/gold/gold__{}.sql", spec.mart),
-                &c.dbt_sql,
-            )?;
-            write(
-                &format!("dbt/models/gold/_gold__{}.yml", spec.mart),
-                &gold::model_yaml(&spec, &resolved),
-            )?;
-            for (name, sql) in gold::reconciliation_tests(&spec, &resolved, &c) {
-                write(&format!("dbt/tests/gold/{name}.sql"), &sql)?;
+            // EKOS RFC 0259: the dbt-trino project's files, or the dbt-duckdb project's.
+            for (path, body) in
+                gold::mart_files(engine, &plan, &spec, &resolved, &c, &report, &drafted)
+            {
+                write(&path, &body)?;
             }
-            write(
-                &format!("proposals/gold-{}.md", spec.mart),
-                &gold::proposal_markdown(&spec, &resolved, &c, &report, &drafted),
-            )?;
             crate::sync::commit_all_pub(
                 &wt,
                 &format!(
