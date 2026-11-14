@@ -50,6 +50,12 @@ pub enum StepEdit {
     DropMeasure {
         name: String,
     },
+    /// EKOS RFC 0260 §2.2: a measure's definition replaced in place (`sum of table.column` or
+    /// `count of table`); always modifying — the values of an existing column change.
+    ChangeMeasure {
+        name: String,
+        definition: String,
+    },
 }
 
 impl StepEdit {
@@ -64,6 +70,7 @@ impl StepEdit {
             Self::DropDimension { .. } => "drop_dimension",
             Self::AddMeasure { .. } => "add_measure",
             Self::DropMeasure { .. } => "drop_measure",
+            Self::ChangeMeasure { .. } => "change_measure",
         }
     }
 
@@ -173,6 +180,22 @@ pub fn apply(spec: &MartSpec, e: &StepEdit) -> Result<(MartSpec, String), String
             }
             req::apply(&mut s, &Edit::DropTerm(name.clone()))?
         }
+        StepEdit::ChangeMeasure { name, definition } => {
+            let slot = s
+                .measures
+                .iter_mut()
+                .find(|(n, _)| n == name)
+                .ok_or_else(|| format!("`{name}` is not a measure of this mart"))?;
+            let new = definition.trim();
+            if new.is_empty() {
+                return Err("the new definition is empty".into());
+            }
+            if slot.1.trim() == new {
+                return Err(format!("`{name}` is already `{new}`: nothing to change"));
+            }
+            let old = std::mem::replace(&mut slot.1, new.to_string());
+            format!("measure `{name}` was `{old}`, is now `{new}`")
+        }
     };
     Ok((s, said))
 }
@@ -231,23 +254,27 @@ fn constraint(after: &MartSpec, resolved: &[crate::Resolved], e: &StepEdit) -> G
                 None => (false, format!("`{filter}` does not resolve")),
             }
         }
-        StepEdit::AddMeasure { name, .. } => match term("measures", name) {
-            Some(Term::Aggregate {
-                func,
-                distinct: false,
-                ..
-            }) if func == "sum" || func == "count" => {
-                (true, format!("{func}: additive, reconciled with silver"))
+        StepEdit::AddMeasure { name, .. } | StepEdit::ChangeMeasure { name, .. } => {
+            match term("measures", name) {
+                Some(Term::Aggregate {
+                    func,
+                    distinct: false,
+                    ..
+                }) if func == "sum" || func == "count" => {
+                    (true, format!("{func}: additive, reconciled with silver"))
+                }
+                Some(Term::Aggregate { func, .. }) => (
+                    false,
+                    format!(
+                        "`{func}` is not additive: a measure EKOS adds or changes is a sum or a count"
+                    ),
+                ),
+                _ => (
+                    false,
+                    format!("`{name}` is not `sum of table.column` or `count of table`"),
+                ),
             }
-            Some(Term::Aggregate { func, .. }) => (
-                false,
-                format!("`{func}` is not additive: a new measure is a sum or a count"),
-            ),
-            _ => (
-                false,
-                format!("`{name}` is not `sum of table.column` or `count of table`"),
-            ),
-        },
+        }
         StepEdit::AddDimension { name, .. } => match term("dimensions", name) {
             Some(Term::Column(_) | Term::TimeGrain { .. }) => (
                 true,

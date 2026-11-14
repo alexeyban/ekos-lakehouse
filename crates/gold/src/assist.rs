@@ -311,7 +311,8 @@ pub fn judge(text: &str, spec: &MartSpec, tables: &[String], plan: &Plan, reques
         .collect::<Vec<_>>();
     if let StepEdit::ChangeJoin { term, .. }
     | StepEdit::DropDimension { name: term }
-    | StepEdit::DropMeasure { name: term } = e
+    | StepEdit::DropMeasure { name: term }
+    | StepEdit::ChangeMeasure { name: term, .. } = e
         && !spec_terms.contains(term)
     {
         invented.push(format!("term {term}"));

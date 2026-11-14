@@ -723,6 +723,7 @@ impl EkosExtension for LakehouseExtension {
                                 .arg(opt("drop-dimension", "A dimension to remove"))
                                 .arg(opt("add-measure", "An additive measure to add (with --definition)"))
                                 .arg(opt("drop-measure", "A measure to remove"))
+                                .arg(opt("change-measure", "A measure whose definition changes (with --definition): modifying"))
                                 .arg(opt("definition", "The new term's definition"))
                                 .arg(
                                     clap::Arg::new("preview")
@@ -1964,6 +1965,7 @@ fn mart_edit_cmd(
         drop_dimension: arg("drop-dimension"),
         add_measure: arg("add-measure"),
         drop_measure: arg("drop-measure"),
+        change_measure: arg("change-measure"),
         definition: arg("definition"),
     })?;
     let notes = mart_notes(ctx, Some(p));
@@ -1996,36 +1998,108 @@ fn mart_edit_cmd(
     let class = gold::edits::classify(&before_spec, &after_spec, &e);
     let (mut gates, compiled) = gold::edits::static_gates(&after_spec, p, &notes.instructions, &e);
     let mut after_json = Value::Null;
+    let mut totals_json = Value::Null;
     if let Some(c) = &compiled {
         let (spec2, resolved2, _) = gold::resolve_with(&after_spec, p, &notes.instructions);
-        let eg = mart_edit::engine_gates(&spec2, &resolved2, c, mart_edit::catalog(p));
+        // EKOS RFC 0260 §2.3: the mart is planned, grain-checked and totalled on the engine it is
+        // built on; the reconciliation with silver stays in Trino, where silver is.
+        let duck = p.settings.gold_engine == ekos_lakehouse_bronze::plan::GoldEngine::Duckdb;
+        let run_sql = |c: &gold::Compiled| {
+            if duck {
+                gold::duckdb::engine_sql(c, p)
+            } else {
+                gold::engine_sql(c, mart_edit::catalog(p))
+            }
+        };
+        let eg = mart_edit::engine_gates(&spec2, &resolved2, c, mart_edit::catalog(p), &run_sql(c));
+        // X8: the measures' totals over the mart as it is now, on the same engine.
+        let before_totals = {
+            let (_, before_c) = gold::edits::static_gates(&before_spec, p, &notes.instructions, &e);
+            let (_, before_resolved, _) = gold::resolve_with(&before_spec, p, &notes.instructions);
+            before_c
+                .map(|bc| mart_edit::totals_sql(&before_resolved, &run_sql(&bc)))
+                .unwrap_or_default()
+        };
+        let engine = if duck { "DuckDB" } else { "Trino" };
         let conn = settings.trino_connection()?;
-        let (plans, dup, totals) = off_runtime(move || {
-            let client = ekos_lakehouse_trino::Client::new(conn.clone())?;
-            let plans = client
-                .execute(&eg.plans)
-                .map(|_| ())
-                .map_err(|e| e.to_string());
-            let r = ekos_lakehouse_trino::TrinoReader::new(conn)?;
-            let mut dup = None;
-            let mut totals = vec![];
-            if plans.is_ok() {
-                if let Some(g) = &eg.grain {
-                    let row = r.read(g)?.into_iter().next().unwrap_or_default();
-                    dup = row.first().and_then(|x| x.parse::<i64>().ok());
+        let reconcile = eg.reconcile.clone();
+        let mut on_engine: Vec<String> = vec![eg.plans.clone()];
+        on_engine.extend(eg.grain.clone());
+        on_engine.extend(eg.totals.iter().map(|(_, q)| q.clone()));
+        on_engine.extend(before_totals.iter().map(|(_, q)| q.clone()));
+        let duckdb = duck.then(|| gold_duckdb::IcebergDuckDb {
+            python: settings
+                .gold
+                .python
+                .clone()
+                .unwrap_or_else(|| "python3".into()),
+            gold: settings.duckdb_gold(),
+        });
+        let (answers, recon) = off_runtime(move || {
+            let r = ekos_lakehouse_trino::TrinoReader::new(conn.clone())?;
+            let answers: Vec<gold_duckdb::FirstRow> = match &duckdb {
+                Some(d) => d.first_rows(&on_engine)?,
+                None => {
+                    let client = ekos_lakehouse_trino::Client::new(conn)?;
+                    let mut out = vec![
+                        client
+                            .execute(&on_engine[0])
+                            .map(|_| vec![])
+                            .map_err(|e| e.to_string()),
+                    ];
+                    for q in &on_engine[1..] {
+                        if out[0].is_err() {
+                            out.push(Err("not run: the mart does not plan".into()));
+                            continue;
+                        }
+                        out.push(
+                            r.read(q)
+                                .map(|rows| {
+                                    rows.into_iter()
+                                        .next()
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .map(Some)
+                                        .collect()
+                                })
+                                .map_err(|e| e.to_string()),
+                        );
+                    }
+                    out
                 }
-                for (measure, sql) in &eg.reconcile {
+            };
+            let mut recon = vec![];
+            if answers[0].is_ok() {
+                for (measure, sql) in &reconcile {
                     let row = r.read(sql)?.into_iter().next().unwrap_or_default();
-                    totals.push((
+                    recon.push((
                         measure.clone(),
                         row.first().cloned().unwrap_or_default(),
                         row.get(1).cloned().unwrap_or_default(),
                     ));
                 }
             }
-            Ok((plans, dup, totals))
+            Ok((answers, recon))
         })?;
-        gates.extend(mart_edit::engine_verdicts(plans, dup, &totals));
+        let mut it = answers.into_iter();
+        let plans = it.next().expect("the plan query").map(|_| ());
+        let first = |a: gold_duckdb::FirstRow| a.ok().and_then(|r| r.into_iter().next().flatten());
+        let dup = eg.grain.as_ref().and_then(|_| {
+            it.next()
+                .and_then(first)
+                .and_then(|x| x.parse::<i64>().ok())
+        });
+        let after_t: Vec<(String, Option<String>)> = eg
+            .totals
+            .iter()
+            .map(|(m, _)| (m.clone(), it.next().and_then(first)))
+            .collect();
+        let before_t: Vec<(String, Option<String>)> = before_totals
+            .iter()
+            .map(|(m, _)| (m.clone(), it.next().and_then(first)))
+            .collect();
+        totals_json = json!(mart_edit::totals_block(&before_t, &after_t));
+        gates.extend(mart_edit::engine_verdicts(engine, plans, dup, &recon));
         let (g, ir) = mart_graph::chain_ir(&mart_graph::MartSql {
             mart,
             path: &marts::model_path(p.settings.gold_engine, mart),
@@ -2055,6 +2129,7 @@ fn mart_edit_cmd(
     out["requires_signoff"] = json!(settings.require_plan_approval.unwrap_or(false));
     out["before"] = before_json;
     out["after"] = after_json;
+    out["totals"] = totals_json;
     let blocked = out["blocked"].as_str().map(str::to_string);
     let print = |out: &Value| {
         if m.get_flag("json") {
@@ -2072,6 +2147,9 @@ fn mart_edit_cmd(
                     g["gate"].as_str().unwrap_or_default(),
                     g["detail"].as_str().unwrap_or_default()
                 );
+            }
+            for t in out["totals"].as_array().into_iter().flatten() {
+                println!("  total  {}", t["line"].as_str().unwrap_or_default());
             }
             for (side, key) in [("before", "before"), ("after", "after")] {
                 let steps: Vec<String> = out[key]["nodes"]

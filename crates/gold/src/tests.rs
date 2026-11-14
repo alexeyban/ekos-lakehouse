@@ -1044,6 +1044,50 @@ mod step_edits {
     }
 
     #[test]
+    fn a_changed_measure_is_modifying_keeps_its_place_and_must_stay_additive() {
+        // EKOS RFC 0260 §2.2.
+        let e = StepEdit::ChangeMeasure {
+            name: "total".into(),
+            definition: "count of c_order".into(),
+        };
+        let before = sales();
+        let (after, said) = edit(&before, &e).unwrap();
+        assert_eq!(
+            after.measures,
+            [("total".to_string(), "count of c_order".to_string())]
+        );
+        assert!(said.contains("was `sum of c_order.grandtotal`"), "{said}");
+        let (c, g) = run(&e);
+        assert_eq!(c.class, "modifying");
+        assert!(passed(&g), "{g:?}");
+        let (_, g) = run(&StepEdit::ChangeMeasure {
+            name: "total".into(),
+            definition: "avg of c_order.grandtotal".into(),
+        });
+        assert!(
+            !passed(&g),
+            "a changed measure stays a sum or a count: {g:?}"
+        );
+        for bad in [
+            StepEdit::ChangeMeasure {
+                name: "nope".into(),
+                definition: "count of c_order".into(),
+            },
+            StepEdit::ChangeMeasure {
+                name: "total".into(),
+                definition: " sum of c_order.grandtotal ".into(),
+            },
+        ] {
+            assert!(edit(&before, &bad).is_err(), "{bad:?}");
+        }
+        let j: StepEdit = serde_json::from_str(
+            r#"{"edit":"change_measure","name":"total","definition":"count of c_order"}"#,
+        )
+        .unwrap();
+        assert_eq!(j, e);
+    }
+
+    #[test]
     fn the_edit_json_is_closed() {
         let e: StepEdit =
             serde_json::from_str(r#"{"edit":"add_filter","filter":"c_order.docstatus = 'CO'"}"#)

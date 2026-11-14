@@ -175,6 +175,48 @@ pub fn lower(dbt_sql: &str, plan: &Plan) -> String {
     out
 }
 
+/// EKOS RFC 0260 §2.3: the mart as DuckDB runs it, for `EXPLAIN` and the edit gates — every silver
+/// `{{ ref('<model>') }}` becomes the attached catalog's table (`"lh"."<silver schema>"."<iceberg
+/// table>"`, what dbt-duckdb's source resolves to), the config and comment lines dropped. A gold
+/// ref is left as written (the gates run one mart at a time).
+pub fn engine_sql(c: &Compiled, plan: &Plan) -> String {
+    let mut out = String::new();
+    let mut rest = c.dbt_sql.as_str();
+    while let Some(i) = rest.find("{{ ref('") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + "{{ ref('".len()..];
+        let Some(j) = after.find("') }}") else {
+            out.push_str(&rest[i..]);
+            rest = "";
+            break;
+        };
+        let model = &after[..j];
+        let (schema, table) = match plan
+            .tables
+            .iter()
+            .find(|t| ekos_lakehouse_silver::model_name(t) == model)
+        {
+            Some(t) => (
+                ekos_lakehouse_silver::silver_schema(t),
+                ekos_lakehouse_bronze::iceberg_name(&t.table),
+            ),
+            None => source_of(plan, model),
+        };
+        out.push_str(&format!(
+            "{}.{}.{}",
+            ident(ALIAS),
+            ident(&schema),
+            ident(&table)
+        ));
+        rest = &after[j + "') }}".len()..];
+    }
+    out.push_str(rest);
+    out.lines()
+        .filter(|l| !l.starts_with("--") && !l.starts_with("{{ config("))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ─────────────────────────────── the dbt-duckdb project ───────────────────────────────
 
 fn yaml_quote(s: &str) -> String {

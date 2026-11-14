@@ -275,6 +275,115 @@ impl DuckDbRunner {
     }
 }
 
+/// EKOS RFC 0260 §2.3: queries against silver in DuckDB, the engine gold marts are built on — an
+/// in-memory database with the Iceberg catalog attached read-only, as the generated `profiles.yml`
+/// attaches it: the same endpoints (overridable by the same variables) and credentials read from
+/// the variables it names, never written anywhere. Extensions are loaded, never installed.
+pub struct IcebergDuckDb {
+    pub python: String,
+    pub gold: ekos_lakehouse_gold::duckdb::DuckDbGold,
+}
+
+const ICEBERG_SCRIPT: &str = r#"
+import json, os, sys
+import duckdb
+cfg = json.loads(sys.argv[1])
+def lit(v):
+    return "'" + str(v).replace("'", "''") + "'"
+def env(name):
+    v = os.environ.get(name)
+    if not v:
+        raise SystemExit("the variable " + name + " is not set: it holds a credential for the Iceberg catalog")
+    return v
+con = duckdb.connect(":memory:", config={
+    "autoinstall_known_extensions": "false",
+    "autoload_known_extensions": "false",
+    "extension_directory": os.path.expanduser(cfg["extension_directory"]),
+})
+for ext in ("httpfs", "iceberg"):
+    try:
+        con.execute("LOAD " + ext)
+    except Exception as e:
+        raise SystemExit("DuckDB's " + ext + " extension is not installed (" + str(e).splitlines()[0] + "): INSTALL " + ext + " once")
+con.execute("CREATE SECRET ekos_lh_s3 (TYPE s3, KEY_ID " + lit(env(cfg["s3_key_id_env"])) +
+            ", SECRET " + lit(env(cfg["s3_secret_env"])) + ", ENDPOINT " + lit(cfg["s3_endpoint"]) +
+            ", URL_STYLE 'path', USE_SSL " + ("true" if cfg["s3_use_ssl"] else "false") +
+            ", REGION " + lit(cfg["s3_region"]) + ")")
+con.execute("CREATE SECRET ekos_lh_iceberg (TYPE iceberg, CLIENT_ID " + lit(env(cfg["client_id_env"])) +
+            ", CLIENT_SECRET " + lit(env(cfg["client_secret_env"])) +
+            ", OAUTH2_SERVER_URI " + lit(cfg["catalog_url"] + "/v1/oauth/tokens") +
+            ", OAUTH2_SCOPE 'PRINCIPAL_ROLE:ALL')")
+con.execute("ATTACH " + lit(cfg["warehouse"]) + " AS lh (TYPE iceberg, ENDPOINT " + lit(cfg["catalog_url"]) +
+            ", SECRET ekos_lh_iceberg, ACCESS_DELEGATION_MODE 'none', READ_ONLY)")
+out = []
+for q in json.load(sys.stdin):
+    try:
+        row = con.execute(q).fetchone()
+        out.append({"ok": [] if row is None else [None if v is None else str(v) for v in row]})
+    except Exception as e:
+        out.append({"error": str(e).strip().splitlines()[0][:500]})
+con.close()
+print(json.dumps(out))
+"#;
+
+/// One query's first row (every value as text), or the engine's error.
+pub type FirstRow = Result<Vec<Option<String>>, String>;
+
+impl IcebergDuckDb {
+    /// The endpoints the script attaches with: the configured ones, overridden by the variables
+    /// the generated `profiles.yml` reads (so the CLI and dbt-duckdb reach the same catalog).
+    fn config(&self) -> serde_json::Value {
+        let g = &self.gold;
+        let or_env = |var: &str, v: &str| std::env::var(var).unwrap_or_else(|_| v.to_string());
+        serde_json::json!({
+            "catalog_url": or_env("EKOS_LH_ICEBERG_URL", &g.catalog_url),
+            "warehouse": or_env("EKOS_LH_ICEBERG_WAREHOUSE", &g.warehouse),
+            "s3_endpoint": or_env("EKOS_LH_S3_ENDPOINT", &g.s3_endpoint),
+            "s3_use_ssl": g.s3_use_ssl,
+            "s3_region": g.s3_region,
+            "s3_key_id_env": g.s3_key_id_env,
+            "s3_secret_env": g.s3_secret_env,
+            "client_id_env": g.client_id_env,
+            "client_secret_env": g.client_secret_env,
+            "extension_directory": or_env("EKOS_LH_DUCKDB_EXTENSIONS", "~/.duckdb/extensions"),
+        })
+    }
+
+    /// Each query's first row, or its error; an error attaching the catalog fails the whole call.
+    pub fn first_rows(&self, queries: &[String]) -> anyhow::Result<Vec<FirstRow>> {
+        use std::io::Write;
+        let mut child = std::process::Command::new(&self.python)
+            .arg("-I")
+            .arg("-c")
+            .arg(ICEBERG_SCRIPT)
+            .arg(self.config().to_string())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("starting {} for DuckDB: {e}", self.python))?;
+        child
+            .stdin
+            .take()
+            .expect("piped")
+            .write_all(serde_json::to_string(queries)?.as_bytes())?;
+        let out = child.wait_with_output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "DuckDB with the Iceberg catalog attached: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| match r.get("ok") {
+                Some(v) => Ok(serde_json::from_value(v.clone()).unwrap_or_default()),
+                None => Err(r["error"].as_str().unwrap_or("no answer").to_string()),
+            })
+            .collect())
+    }
+}
+
 /// dbt, DuckDB and Trino, as `lakehouse gold publish` runs them.
 pub struct LiveSteps {
     /// The pipeline repository.

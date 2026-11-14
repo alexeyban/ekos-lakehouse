@@ -312,3 +312,20 @@ fn the_dagster_image_pins_the_shared_duckdb_version() {
         "{dockerfile}"
     );
 }
+
+/// EKOS RFC 0260 §2.3: the edit gates run the mart in DuckDB against the attached catalog's tables —
+/// the Iceberg table each silver model's source names — with no dbt syntax left.
+#[test]
+fn the_engine_sql_reads_the_attached_silver_tables() {
+    let (_, _, c, _) = compiled();
+    let sql = engine_sql(&c, &ledger());
+    assert!(!sql.contains("{{"), "{sql}");
+    assert!(
+        sql.contains("from \"lh\".\"silver_public\".\"ar\" as \"ar\""),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("\"lh\".\"silver_public\".\"transactions\""),
+        "{sql}"
+    );
+}

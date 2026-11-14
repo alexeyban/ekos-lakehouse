@@ -29,6 +29,7 @@ pub struct EditArgs<'a> {
     pub drop_dimension: Option<&'a str>,
     pub add_measure: Option<&'a str>,
     pub drop_measure: Option<&'a str>,
+    pub change_measure: Option<&'a str>,
     pub definition: Option<&'a str>,
 }
 
@@ -43,7 +44,8 @@ pub fn edit_from(a: &EditArgs<'_>) -> anyhow::Result<StepEdit> {
         found.push(serde_json::from_str(j).map_err(|e| {
             anyhow::anyhow!(
                 "--edit is not one of the edits (add_filter, change_filter, drop_filter, \
-                 change_join, add_dimension, drop_dimension, add_measure, drop_measure): {e}"
+                 change_join, add_dimension, drop_dimension, add_measure, drop_measure, \
+                 change_measure): {e}"
             )
         })?);
     }
@@ -83,12 +85,18 @@ pub fn edit_from(a: &EditArgs<'_>) -> anyhow::Result<StepEdit> {
     if let Some(n) = a.drop_measure {
         found.push(StepEdit::DropMeasure { name: n.into() });
     }
+    if let Some(n) = a.change_measure {
+        found.push(StepEdit::ChangeMeasure {
+            name: n.into(),
+            definition: need(a.definition, "--definition")?,
+        });
+    }
     match found.len() {
         1 => Ok(found.remove(0)),
         0 => anyhow::bail!(
             "no edit: --add-filter, --change-filter/--to, --drop-filter, --join-term/--via, \
              --add-dimension/--definition, --drop-dimension, --add-measure/--definition, \
-             --drop-measure, or --edit <json>. Anything else is a comment on the step \
+             --drop-measure, --change-measure/--definition, or --edit <json>. Anything else is a comment on the step \
              (`ekos annotate add <table> comment …`)"
         ),
         _ => anyhow::bail!("one edit at a time"),
@@ -110,21 +118,28 @@ pub fn on_step(e: &StepEdit, step_type: &str) -> Result<(), String> {
 
 /// The SQL of the engine gates, over the edited mart's own SQL (never a stored table).
 pub struct EngineGates {
+    /// On the engine the mart is built on.
     pub plans: String,
-    /// `None` when the mart has no grain.
+    /// `None` when the mart has no grain. On the engine the mart is built on.
     pub grain: Option<String>,
-    /// (measure, SQL returning `mart_total, silver_total` as text).
+    /// (measure, SQL returning `mart_total, silver_total` as text) — always Trino, where silver
+    /// is: both sides of the comparison on one engine (RFC 0257).
     pub reconcile: Vec<(String, String)>,
+    /// EKOS RFC 0260 §2.2 (X8): (measure, SQL returning the measure's total) over the edited
+    /// mart, on the engine the mart is built on.
+    pub totals: Vec<(String, String)>,
 }
 
-/// Pure: the engine gates' SQL.
+/// Pure: the engine gates' SQL. `run_sql` is the edited mart as the gold engine runs it
+/// (`gold::engine_sql` on Trino, `gold::duckdb::engine_sql` on DuckDB, RFC 0260 §2.3).
 pub fn engine_gates(
     spec: &MartSpec,
     resolved: &[gold::Resolved],
     c: &Compiled,
     catalog: &str,
+    run_sql: &str,
 ) -> EngineGates {
-    let engine = gold::engine_sql(c, catalog);
+    let trino = gold::engine_sql(c, catalog);
     let grain = (!spec.grain.is_empty()).then(|| {
         let g = spec
             .grain
@@ -133,7 +148,7 @@ pub fn engine_gates(
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "select count(*) from (select {g} from ({engine}) m group by {g} having count(*) > 1) d"
+            "select count(*) from (select {g} from ({run_sql}) m group by {g} having count(*) > 1) d"
         )
     });
     // RFC 0228's reconciliation queries, read against the edited SQL instead of the built table.
@@ -146,17 +161,42 @@ pub fn engine_gates(
     );
     let reconcile = gold::reconcile_sql(spec, resolved, c, catalog, PREVIEW)
         .into_iter()
-        .map(|(m, sql)| (m, sql.replace(&table, &format!("({engine}) m"))))
+        .map(|(m, sql)| (m, sql.replace(&table, &format!("({trino}) m"))))
         .collect();
     EngineGates {
-        plans: format!("EXPLAIN {engine}"),
+        plans: format!("EXPLAIN {run_sql}"),
         grain,
         reconcile,
+        totals: totals_sql(resolved, run_sql),
     }
 }
 
-/// The gates' verdicts from what the engine answered.
+/// EKOS RFC 0260 §2.2: each additive measure's total over a mart's SQL, as text. A sum of the
+/// mart's sums (or counts) is the measure's total, whatever the grain.
+pub fn totals_sql(resolved: &[gold::Resolved], mart_sql: &str) -> Vec<(String, String)> {
+    resolved
+        .iter()
+        .filter(|r| r.section == "measures")
+        .filter(|r| {
+            matches!(&r.resolution, Ok(gold::Term::Aggregate { func, distinct: false, .. })
+                if func == "sum" || func == "count")
+        })
+        .map(|r| {
+            (
+                r.term.clone(),
+                format!(
+                    "select cast(sum({}) as varchar) from ({mart_sql}) m",
+                    ident(&r.term)
+                ),
+            )
+        })
+        .collect()
+}
+
+/// The gates' verdicts from what the engines answered. `engine` names the one the mart is built
+/// on (`Trino`, `DuckDB`).
 pub fn engine_verdicts(
+    engine: &str,
     plans: Result<(), String>,
     duplicates: Option<i64>,
     totals: &[(String, String, String)],
@@ -165,8 +205,8 @@ pub fn engine_verdicts(
         gate: "engine",
         passed: plans.is_ok(),
         detail: match plans {
-            Ok(()) => "Trino plans the edited mart".into(),
-            Err(e) => format!("Trino cannot plan it: {e}"),
+            Ok(()) => format!("{engine} plans the edited mart"),
+            Err(e) => format!("{engine} cannot plan it: {e}"),
         },
     }];
     if let Some(d) = duplicates {
@@ -174,9 +214,9 @@ pub fn engine_verdicts(
             gate: "grain",
             passed: d == 0,
             detail: if d == 0 {
-                "one row per grain (the dbt uniqueness test)".into()
+                format!("one row per grain in {engine} (the dbt uniqueness test)")
             } else {
-                format!("{d} grain value(s) repeat: the grain is not unique")
+                format!("{d} grain value(s) repeat in {engine}: the grain is not unique")
             },
         });
     }
@@ -188,6 +228,66 @@ pub fn engine_verdicts(
         });
     }
     out
+}
+
+/// EKOS RFC 0260 §2.2 (X8): each measure's total before and after the edit, in measure order
+/// (before's first, then the ones only after has). Shown, never a gate.
+pub fn totals_block(
+    before: &[(String, Option<String>)],
+    after: &[(String, Option<String>)],
+) -> Vec<Value> {
+    let mut names: Vec<&str> = before.iter().map(|(m, _)| m.as_str()).collect();
+    for (m, _) in after {
+        if !names.contains(&m.as_str()) {
+            names.push(m);
+        }
+    }
+    let get = |side: &[(String, Option<String>)], m: &str| {
+        side.iter().find(|(n, _)| n == m).map(|(_, v)| v.clone())
+    };
+    names
+        .into_iter()
+        .map(|m| {
+            let (b, a) = (get(before, m), get(after, m));
+            let line = match (&b, &a) {
+                (Some(b), Some(a)) => {
+                    let (bs, as_) = (
+                        b.as_deref().unwrap_or("null"),
+                        a.as_deref().unwrap_or("null"),
+                    );
+                    match difference(bs, as_) {
+                        Some(d) => format!("{m}: before {bs} → after {as_} ({d})"),
+                        None => format!("{m}: before {bs} → after {as_}"),
+                    }
+                }
+                (Some(b), None) => {
+                    format!("{m}: before {} (dropped)", b.as_deref().unwrap_or("null"))
+                }
+                (None, Some(a)) => format!("{m}: after {} (new)", a.as_deref().unwrap_or("null")),
+                (None, None) => m.to_string(),
+            };
+            json!({
+                "measure": m,
+                "before": b.flatten(),
+                "after": a.flatten(),
+                "line": line,
+            })
+        })
+        .collect()
+}
+
+/// `after − before` with the inputs' own number of decimals, signed; `None` unless both are
+/// numbers.
+fn difference(before: &str, after: &str) -> Option<String> {
+    let (b, a): (f64, f64) = (before.trim().parse().ok()?, after.trim().parse().ok()?);
+    let decimals = |s: &str| s.split_once('.').map_or(0, |(_, f)| f.len()).min(10);
+    let places = decimals(before).max(decimals(after));
+    let d = a - b;
+    if d == 0.0 {
+        return Some("no change".into());
+    }
+    let sign = if d > 0.0 { "+" } else { "−" };
+    Some(format!("{sign}{:.*}", places, d.abs()))
 }
 
 /// What the preview shows and the record keeps.
@@ -243,6 +343,40 @@ pub fn catalog(plan: &Plan) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn totals_before_and_after_with_the_difference() {
+        let t = |m: &str, v: &str| (m.to_string(), Some(v.to_string()));
+        let b = totals_block(
+            &[t("revenue", "308227.75"), t("orders", "567")],
+            &[
+                t("revenue", "301940.1"),
+                t("orders", "567"),
+                t("discount", "12.50"),
+            ],
+        );
+        let lines: Vec<&str> = b.iter().map(|x| x["line"].as_str().unwrap()).collect();
+        assert_eq!(
+            lines,
+            [
+                "revenue: before 308227.75 → after 301940.1 (−6287.65)",
+                "orders: before 567 → after 567 (no change)",
+                "discount: after 12.50 (new)",
+            ]
+        );
+        assert_eq!(b[0]["before"], "308227.75");
+        let dropped = totals_block(&[t("x", "1")], &[]);
+        assert_eq!(dropped[0]["line"], "x: before 1 (dropped)");
+    }
+
+    #[test]
+    fn the_verdict_names_the_engine_the_mart_is_built_on() {
+        let g = engine_verdicts("DuckDB", Ok(()), Some(0), &[]);
+        assert_eq!(g[0].detail, "DuckDB plans the edited mart");
+        assert!(g[1].detail.contains("in DuckDB"));
+        let g = engine_verdicts("DuckDB", Err("Binder Error: x".into()), None, &[]);
+        assert!(!g[0].passed && g[0].detail.starts_with("DuckDB cannot plan it"));
+    }
 
     #[test]
     fn flags_name_exactly_one_edit_and_json_is_checked() {
@@ -309,6 +443,7 @@ mod tests {
         );
         assert!(v["blocked"].is_null());
         let failed = engine_verdicts(
+            "Trino",
             Ok(()),
             Some(0),
             &[("total".into(), "10".into(), "11".into())],

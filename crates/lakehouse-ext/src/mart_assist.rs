@@ -112,6 +112,9 @@ fn describe(e: &StepEdit) -> String {
             format!("add the measure `{name}`: {definition}")
         }
         StepEdit::DropMeasure { name } => format!("remove the measure `{name}`"),
+        StepEdit::ChangeMeasure { name, definition } => {
+            format!("change the measure `{name}` to: {definition}")
+        }
     }
 }
 
