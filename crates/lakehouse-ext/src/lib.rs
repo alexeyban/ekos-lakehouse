@@ -1545,6 +1545,9 @@ impl EkosExtension for LakehouseExtension {
                         if let Some(pr) = &p.pull_request {
                             println!("          pull request: {pr}");
                         }
+                        for line in &p.impact {
+                            println!("          impact: {line}");
+                        }
                     }
                     let held: Vec<String> = outcome
                         .status

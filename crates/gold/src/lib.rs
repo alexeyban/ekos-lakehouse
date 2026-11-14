@@ -16,6 +16,7 @@ pub mod assist;
 pub mod dashboard;
 pub mod duckdb;
 pub mod edits;
+pub mod impact;
 pub mod requirements;
 
 pub use ekos_lakehouse_bronze::plan::GoldEngine;

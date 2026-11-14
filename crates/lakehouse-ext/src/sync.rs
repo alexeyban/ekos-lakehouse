@@ -122,6 +122,8 @@ pub struct Proposal {
     /// Rebuilt on the current HEAD because another proposal was merged first.
     pub rebuilt: bool,
     pub pull_request: Option<String>,
+    /// What reads the changed columns: silver, gold marts, dashboards (RFC 0194 §6, RFC 0260 §2.1).
+    pub impact: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -213,6 +215,79 @@ pub fn impact(store: &dyn KnowledgeStore, c: &Change) -> anyhow::Result<Vec<Stri
         );
     }
     Ok(out)
+}
+
+/// EKOS RFC 0260 §2.1: the gold marts whose committed requirement names the changed column (or,
+/// for a whole-table change, any column of the table), and the recorded dashboards whose charts read
+/// one of those marts. A change no mart reads says so.
+pub fn downstream(
+    repo: &Path,
+    store: &dyn KnowledgeStore,
+    c: &Change,
+) -> anyhow::Result<Vec<String>> {
+    let mut readings = vec![];
+    for mart in committed_marts(repo) {
+        let Some(text) =
+            crate::marts::file_at(repo, "HEAD", &crate::marts::description_path(&mart))
+        else {
+            continue;
+        };
+        // A description that does not parse is not a mart anything builds.
+        if let Ok(spec) = ekos_lakehouse_gold::parse(&text) {
+            readings.extend(ekos_lakehouse_gold::impact::terms_reading(
+                &spec,
+                &c.table,
+                c.column.as_deref(),
+            ));
+        }
+    }
+    let mut out: Vec<String> = readings
+        .iter()
+        .map(|r| {
+            if r.section == "filter" {
+                format!("gold `{}`: filter `{}`", r.mart, r.term)
+            } else {
+                format!(
+                    "gold `{}`: {} `{}` = {}",
+                    r.mart, r.section, r.term, r.definition
+                )
+            }
+        })
+        .collect();
+    if readings.is_empty() {
+        out.push("no gold mart reads it".into());
+        return Ok(out);
+    }
+    let marts: std::collections::BTreeSet<&str> =
+        readings.iter().map(|r| r.mart.as_str()).collect();
+    let (records, _) = crate::dashboards::read(store)?;
+    for d in records.iter().filter(|d| !d.removed) {
+        for ch in &d.charts {
+            for mart in ch.reads.iter().filter_map(|t| {
+                let last = t.rsplit('.').next().unwrap_or(t);
+                marts.get(last).copied()
+            }) {
+                out.push(format!(
+                    "dashboard `{}` ({}): chart `{}` reads gold `{mart}`",
+                    d.title, d.dashboard_id, ch.name
+                ));
+            }
+        }
+    }
+    out.dedup();
+    Ok(out)
+}
+
+/// The marts with a description committed at `HEAD` (`marts/<mart>.md`).
+fn committed_marts(repo: &Path) -> Vec<String> {
+    git(repo, &["ls-tree", "--name-only", "HEAD", "marts/"])
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| l.strip_prefix("marts/")?.strip_suffix(".md"))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub struct SyncInputs<'a> {
@@ -342,15 +417,18 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
         if exists && !current {
             git(repo, &["branch", "-D", &branch])?;
         }
-        if !current {
-            let mut impact_lines = vec![];
-            for c in cs {
-                for line in impact(i.store, c)? {
-                    if !impact_lines.contains(&line) {
-                        impact_lines.push(line);
-                    }
+        let mut impact_lines = vec![];
+        for c in cs {
+            for line in impact(i.store, c)?
+                .into_iter()
+                .chain(downstream(repo, i.store, c)?)
+            {
+                if !impact_lines.contains(&line) {
+                    impact_lines.push(line);
                 }
             }
+        }
+        if !current {
             let wt: PathBuf = std::env::temp_dir().join(format!("ekos-lh-proposal-{id}"));
             let _ = std::fs::remove_dir_all(&wt);
             git(repo, &["worktree", "prune"])?;
@@ -418,6 +496,7 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
             new: !exists,
             rebuilt: exists && !current,
             pull_request,
+            impact: impact_lines,
         });
     }
     // A table with no open change keeps no proposal branch (its proposal was merged, or the
