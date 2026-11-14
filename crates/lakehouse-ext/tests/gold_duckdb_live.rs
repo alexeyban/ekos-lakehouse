@@ -162,8 +162,15 @@ fn a_duckdb_mart_builds_reconciles_and_publishes() {
     );
     assert_eq!(p.tables.len(), 1, "{:?}", p.refused);
 
-    let repo = std::env::temp_dir().join(format!("ekos-lh-duckdb-live-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&repo);
+    // `EKOS_LH_DUCKDB_KEEP=<dir>` keeps the generated pipeline repository there (with the mart's
+    // description), to run `lakehouse gold publish` against it by hand.
+    let keep = std::env::var_os("EKOS_LH_DUCKDB_KEEP").map(std::path::PathBuf::from);
+    let repo = keep.clone().unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("ekos-lh-duckdb-live-{}", std::process::id()))
+    });
+    if keep.is_none() {
+        let _ = std::fs::remove_dir_all(&repo);
+    }
     std::fs::create_dir_all(&repo).unwrap();
     let duck = DuckDbGold {
         catalog_url: env_or(
@@ -299,5 +306,10 @@ fn a_duckdb_mart_builds_reconciles_and_publishes() {
             .filter(|r| r.layer == "gold")
             .all(|r| r.status == "failed")
     );
-    let _ = std::fs::remove_dir_all(&repo);
+    if keep.is_some() {
+        std::fs::create_dir_all(repo.join("marts")).unwrap();
+        std::fs::write(repo.join("marts/invoices_by_status.md"), MART).unwrap();
+    } else {
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }

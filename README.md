@@ -301,6 +301,45 @@ started. The console's **Marts** page shows the SQL beside the requirement, whic
 the totals and the lineage. Generated schedules are on by default: on a test machine, decide whether they should run
 before starting Dagster.
 
+### Gold marts on DuckDB (EKOS RFC 0259)
+
+Bronze and silver stay on Trino. Gold can be built by dbt-duckdb instead, into one DuckDB file a
+BI tool reads without a server:
+
+```toml
+[extensions.lakehouse.gold]
+engine      = "duckdb"                                  # default "trino"
+catalog-url = "http://127.0.0.1:58181/api/catalog"     # Polaris' Iceberg REST endpoint
+warehouse   = "lakehouse"
+marts-file  = ".lakehouse/marts/marts.duckdb"           # in the pipeline repository, never committed
+# Credentials by variable name only (these are the defaults):
+s3-key-id-env      = "AWS_ACCESS_KEY_ID"
+s3-secret-env      = "AWS_SECRET_ACCESS_KEY"
+client-id-env      = "EKOS_LH_POLARIS_CLIENT_ID"
+client-secret-env  = "EKOS_LH_POLARIS_CLIENT_SECRET"
+dbt    = "dbt"        # with dbt-duckdb 1.11.1
+python = "python3"    # with duckdb 1.5.6, reads the marts file read-only for the reconciliation
+```
+
+`lakehouse generate` then writes a dbt-duckdb project to `gold-duckdb/`: `profiles.yml` loads
+`httpfs` and `iceberg`, creates the S3 and Iceberg secrets from the variables it names, and an
+`on-run-start` macro attaches the Polaris catalog as `lh`; silver is a dbt source read from it. A
+mart proposal (`gold draft`, `marts propose`) writes its model there, checked in DuckDB's dialect.
+Endpoints can be overridden at run time with `EKOS_LH_S3_ENDPOINT`, `EKOS_LH_ICEBERG_URL` and
+`EKOS_LH_ICEBERG_WAREHOUSE`.
+
+```bash
+ekos-lakehouse lakehouse gold publish   # build into marts.next.duckdb, test, reconcile, publish
+```
+
+`gold publish` builds every mart into `marts.next.duckdb`, runs the dbt tests, reconciles each
+additive measure's total in the file with the same aggregate over silver in Trino (both rendered in
+RFC 0155's canonical form), and only then renames the file over `marts.duckdb`. Any failure leaves
+the published file as it was and says which step failed and why. Each mart's run and reconciliation
+is recorded like a dbt-trino build's, so the Marts page, health and freshness read DuckDB marts the
+same way. In Dagster the marts are the `gold_duckdb` asset group, after silver, in the scheduled job.
+The live suite is `EKOS_LH_DUCKDB_LIVE=1 cargo test -p ekos-lakehouse-ext --test gold_duckdb_live`.
+
 ### Documentation (EKOS RFC 0230)
 
 Step 2 publishes the source-estate documentation EKOS generates from the ledger (EKOS RFC 0214):
