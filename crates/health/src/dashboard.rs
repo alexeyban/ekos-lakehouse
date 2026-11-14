@@ -261,6 +261,24 @@ impl Ctx<'_> {
             .get(&(layer.to_string(), table.to_ascii_lowercase()))
             .copied()
     }
+
+    /// A mart's requirement names its tables without the schema (`c_invoice`), while the facts
+    /// are keyed `schema.table`. A bare name is the one table of that name in the layer; with
+    /// none or several it is kept as written, so the chain reports it unverified.
+    fn qualify(&self, layer: &str, table: &str) -> String {
+        if table.contains('.') {
+            return table.to_string();
+        }
+        let name = table.to_ascii_lowercase();
+        let mut found = self
+            .tables
+            .keys()
+            .filter(|(l, t)| l == layer && t.rsplit_once('.').is_some_and(|(_, n)| n == name));
+        match (found.next(), found.next()) {
+            (Some((_, t)), None) => t.clone(),
+            _ => table.to_string(),
+        }
+    }
 }
 
 /// The mart's reconciliation for its latest build, as findings.
@@ -375,8 +393,8 @@ fn chart_health(ctx: &Ctx<'_>, known: &BTreeSet<(String, String)>, c: &ChartReco
                     _ => vec![],
                 };
                 for t in upstream {
-                    push(&mut chain, "silver", &t);
-                    push(&mut chain, "bronze", &t);
+                    push(&mut chain, "silver", &ctx.qualify("silver", &t));
+                    push(&mut chain, "bronze", &ctx.qualify("bronze", &t));
                 }
                 if layer == "silver" {
                     push(&mut chain, "bronze", &table);
@@ -708,6 +726,31 @@ mod tests {
             ]
         );
         assert_eq!(d.charts[0].not_evaluated.len(), NOT_EVALUATED.len());
+    }
+
+    /// A mart's requirement reads tables by bare name (`orders`); the facts are keyed
+    /// `schema.table`. The one table of that name is the one meant.
+    #[test]
+    fn a_bare_table_name_in_a_mart_resolves_to_its_one_loaded_table() {
+        let marts = mart(&["ORDERS", "customers"], "gold-99600", true);
+        let d = eval(healthy_runs(), &marts);
+        assert_eq!(d.state, DashState::Trusted, "{:#?}", d.evidence);
+        assert!(
+            d.charts[0]
+                .chain
+                .iter()
+                .any(|n| n.layer == "bronze" && n.table == "public.orders")
+        );
+    }
+
+    #[test]
+    fn a_bare_name_two_schemas_hold_stays_unverified() {
+        let mut runs = healthy_runs();
+        runs.push(run("archive.orders", "bronze", true, NOW - 600));
+        runs.push(run("archive.orders", "silver", true, NOW - 500));
+        let marts = mart(&["orders", "public.customers"], "gold-99600", true);
+        let d = eval(runs, &marts);
+        assert_eq!(d.state, DashState::Unverified, "{:#?}", d.evidence);
     }
 
     fn eval_with(
