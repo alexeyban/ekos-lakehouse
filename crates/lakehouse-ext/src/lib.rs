@@ -20,6 +20,7 @@ pub mod engines;
 pub mod extraction;
 pub mod facts;
 mod gold_cmd;
+pub mod gold_duckdb;
 pub mod install;
 pub mod mart_assist;
 pub mod mart_edit;
@@ -464,6 +465,20 @@ impl EkosExtension for LakehouseExtension {
                                         .required(true)
                                         .value_parser(clap::value_parser!(std::path::PathBuf))
                                         .help("marts/<name>.md"),
+                                ),
+                        )
+                        .subcommand(
+                            clap::Command::new("publish")
+                                .about(
+                                    "Gold on DuckDB (EKOS RFC 0259): build every mart into \
+                                     marts.next.duckdb, run its tests, reconcile each measure \
+                                     with silver in Trino, then replace the published marts \
+                                     file; any failure leaves it as it was",
+                                )
+                                .arg(
+                                    clap::Arg::new("run-id")
+                                        .long("run-id")
+                                        .help("The orchestrator's run (default: publish-<time>)"),
                                 ),
                         )
                         .subcommand(
@@ -1238,6 +1253,9 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse gold draft", Class::External, true),
             // EKOS RFC 0248: reads the deployed plan and the marts' descriptions; no model, no write.
             ("lakehouse gold ask", Class::Read, false),
+            // EKOS RFC 0259: runs dbt-duckdb (reads the Iceberg catalog), reads Trino, replaces
+            // the marts file and records runs and reconciliations in the ledger.
+            ("lakehouse gold publish", Class::External, false),
             // Reads the repository and the ledger; writes metric facts.
             ("lakehouse check", Class::Write, false),
             // Reads the project's own source files (redacted), nothing else.
@@ -1554,6 +1572,13 @@ impl EkosExtension for LakehouseExtension {
                 );
                 let repo = pipeline_dir(&settings, ctx);
                 ask_cmd::run(&repo, &request, m.get_flag("json"))
+            }
+            Some(("gold", g)) if matches!(g.subcommand(), Some(("publish", _))) => {
+                let Some(("publish", m)) = g.subcommand() else {
+                    unreachable!()
+                };
+                let settings = settings::load_with(ctx.config, engines)?;
+                gold_publish(ctx, &settings, m.get_one::<String>("run-id").cloned())
             }
             Some(("gold", g)) => {
                 let Some(("draft", m)) = g.subcommand() else {
@@ -2165,6 +2190,190 @@ fn mart_notes(
     }
 }
 
+/// The marts file `lakehouse gold publish` replaces (EKOS RFC 0259).
+fn marts_file(settings: &settings::Settings, repo: &std::path::Path) -> std::path::PathBuf {
+    repo.join(
+        settings
+            .gold
+            .marts_file
+            .as_deref()
+            .unwrap_or(gold_duckdb::DEFAULT_MARTS_FILE),
+    )
+}
+
+/// The marts of the dbt-duckdb project, compiled from their committed descriptions.
+fn duckdb_marts(
+    ctx: &CommandContext<'_>,
+    repo: &std::path::Path,
+    plan: &ekos_lakehouse_bronze::plan::Plan,
+) -> anyhow::Result<Vec<gold_duckdb::MartToCheck>> {
+    let notes = mart_notes(ctx, Some(plan));
+    gold_duckdb::marts_in(repo)
+        .into_iter()
+        .map(|mart| {
+            let (spec, resolved, compiled) =
+                marts::compiled(repo, plan, &mart, &notes.instructions)?;
+            Ok(gold_duckdb::MartToCheck {
+                spec,
+                resolved,
+                compiled,
+            })
+        })
+        .collect()
+}
+
+/// `lakehouse gold publish` (EKOS RFC 0259 L3): build, test, reconcile, then publish — or leave
+/// the published marts file as it was and say why. Each mart's run and reconciliation is
+/// recorded as RFC 0196/0228 record a dbt-trino build's, so health and freshness (RFC 0258) see
+/// DuckDB marts as they see Trino ones.
+fn gold_publish(
+    ctx: &CommandContext<'_>,
+    settings: &settings::Settings,
+    run: Option<String>,
+) -> anyhow::Result<()> {
+    let repo = pipeline_dir(settings, ctx);
+    let plan = plan_cmd::read_lock(&repo)?;
+    anyhow::ensure!(
+        plan.settings.gold_engine == ekos_lakehouse_bronze::GoldEngine::Duckdb,
+        "gold is built on {} in this plan: set `engine = \"duckdb\"` in \
+         [extensions.lakehouse.gold] and run `lakehouse generate`",
+        plan.settings.gold_engine.name()
+    );
+    let marts = duckdb_marts(ctx, &repo, &plan)?;
+    anyhow::ensure!(
+        !marts.is_empty(),
+        "no mart in {}/models/gold: propose one with `lakehouse marts propose`",
+        ekos_lakehouse_gold::duckdb::PROJECT_DIR
+    );
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let run = run.unwrap_or_else(|| format!("publish-{stamp}"));
+    let paths = gold_duckdb::Paths::of(&marts_file(settings, &repo));
+    let target = std::env::temp_dir().join(format!(
+        "ekos-lh-gold-duckdb-{stamp}-{}",
+        std::process::id()
+    ));
+    let mut steps = gold_duckdb::LiveSteps {
+        repo: repo.clone(),
+        dbt: settings.gold.dbt.clone().unwrap_or_else(|| "dbt".into()),
+        duckdb: gold_duckdb::DuckDbRunner {
+            python: settings
+                .gold
+                .python
+                .clone()
+                .unwrap_or_else(|| "python3".into()),
+        },
+        trino: settings.trino_connection()?,
+        plan,
+        marts,
+        target: target.clone(),
+    };
+    let p = off_runtime(|| Ok(gold_duckdb::publish(&paths, &mut steps)))?;
+    let _ = std::fs::remove_dir_all(&target);
+    let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+    let marts_dir = marts::state_dir(ctx.config, ctx.cwd);
+    let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    for mut r in p.reports.clone() {
+        r.run_id = run.clone();
+        facts::record_run(store.as_ref(), &r)?;
+        if let Some(mart) = marts::mart_of(&r.table) {
+            marts::write_run(
+                &marts_dir,
+                mart,
+                &marts::LastRun {
+                    run_id: run.clone(),
+                    at: at.clone(),
+                    status: r.status.clone(),
+                    rows: r.rows,
+                    message: r.message.clone(),
+                },
+            )?;
+        }
+    }
+    for m in &p.reconciliations {
+        let r = marts::Reconciliation {
+            mart: m.mart.clone(),
+            at: at.clone(),
+            run_id: Some(run.clone()),
+            measures: m.totals.clone(),
+        };
+        facts::record_mart_reconciliation(store.as_ref(), &r)?;
+        marts::write_reconciliation(&marts_dir, &r)?;
+        for t in &r.measures {
+            println!(
+                "{}.{}: mart {} / silver {} — {}",
+                m.mart,
+                t.measure,
+                t.mart_total,
+                t.silver_total,
+                if t.equal { "equal" } else { "DIFFERS" }
+            );
+        }
+    }
+    ekos_common::run_log::emit(
+        "gold",
+        if p.published { "published" } else { "refused" },
+        &serde_json::json!({
+            "run": run,
+            "marts": p.reports.iter().map(|r| &r.table).collect::<Vec<_>>(),
+            "file": paths.published,
+            "bytes": p.bytes,
+            "refused": p.refused.as_ref().map(|(step, why)| serde_json::json!({"step": step, "why": why})),
+        }),
+    );
+    match &p.refused {
+        None => {
+            println!(
+                "published {} mart(s) to {} ({} bytes)",
+                p.reports.iter().filter(|r| r.layer == "gold").count(),
+                paths.published.display(),
+                p.bytes.unwrap_or(0)
+            );
+            Ok(())
+        }
+        Some((step, why)) => anyhow::bail!(
+            "not published ({step}): {why}. {} is unchanged; the build is in {}",
+            paths.published.display(),
+            paths.next.display()
+        ),
+    }
+}
+
+/// `lakehouse marts reconcile` for a DuckDB mart (EKOS RFC 0259 L5): its measures in the
+/// published marts file against silver in Trino.
+fn duckdb_totals(
+    settings: &settings::Settings,
+    repo: &std::path::Path,
+    plan: &ekos_lakehouse_bronze::plan::Plan,
+    m: gold_duckdb::MartToCheck,
+) -> anyhow::Result<Vec<marts::Totals>> {
+    let file = marts_file(settings, repo);
+    anyhow::ensure!(
+        file.is_file(),
+        "{} is not published yet: `lakehouse gold publish`",
+        file.display()
+    );
+    let mut steps = gold_duckdb::LiveSteps {
+        repo: repo.to_path_buf(),
+        dbt: String::new(),
+        duckdb: gold_duckdb::DuckDbRunner {
+            python: settings
+                .gold
+                .python
+                .clone()
+                .unwrap_or_else(|| "python3".into()),
+        },
+        trino: settings.trino_connection()?,
+        plan: plan.clone(),
+        marts: vec![m],
+        target: std::path::PathBuf::new(),
+    };
+    let out = off_runtime(|| gold_duckdb::Steps::reconcile(&mut steps, &file))?;
+    Ok(out.into_iter().flat_map(|m| m.totals).collect())
+}
+
 /// `lakehouse marts show|graph|propose|merge|build|reconcile` (EKOS RFC 0228, 0257).
 async fn marts_cmd(
     ctx: &CommandContext<'_>,
@@ -2406,41 +2615,60 @@ async fn marts_cmd(
                 .ok_or_else(|| anyhow::anyhow!("no deployed plan"))?;
             let (spec, resolved, c) =
                 marts::compiled(&repo, &p, &mart, &mart_notes(ctx, Some(&p)).instructions)?;
-            let queries = ekos_lakehouse_gold::reconcile_sql(
-                &spec,
-                &resolved,
-                &c,
-                &p.settings.target_catalog,
-                &ekos_lakehouse_bronze::plan::gold_schema(&p.settings.namespace_prefix),
-            );
-            anyhow::ensure!(
-                !queries.is_empty(),
-                "{mart} has no additive measure (sum or count) to reconcile"
-            );
-            let conn = settings.trino_connection()?;
-            let rows = off_runtime(|| {
-                let r = ekos_lakehouse_trino::TrinoReader::new(conn)?;
-                queries
-                    .iter()
-                    .map(|(measure, sql)| {
-                        let row = r.read(sql)?.into_iter().next().unwrap_or_default();
-                        Ok((measure.clone(), row))
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()
-            })?;
-            let measures: Vec<marts::Totals> = rows
-                .into_iter()
-                .map(|(measure, row)| {
-                    let mart_total = row.first().cloned().unwrap_or_default();
-                    let silver_total = row.get(1).cloned().unwrap_or_default();
-                    marts::Totals {
-                        equal: marts::totals_equal(&mart_total, &silver_total),
-                        measure,
-                        mart_total,
-                        silver_total,
-                    }
-                })
-                .collect();
+            let measures: Vec<marts::Totals> =
+                if p.settings.gold_engine == ekos_lakehouse_bronze::GoldEngine::Duckdb {
+                    // EKOS RFC 0259 L5: the published marts file against silver in Trino.
+                    let totals = duckdb_totals(
+                        &settings,
+                        &repo,
+                        &p,
+                        gold_duckdb::MartToCheck {
+                            spec,
+                            resolved,
+                            compiled: c,
+                        },
+                    )?;
+                    anyhow::ensure!(
+                        !totals.is_empty(),
+                        "{mart} has no additive measure (sum or count) to reconcile"
+                    );
+                    totals
+                } else {
+                    let queries = ekos_lakehouse_gold::reconcile_sql(
+                        &spec,
+                        &resolved,
+                        &c,
+                        &p.settings.target_catalog,
+                        &ekos_lakehouse_bronze::plan::gold_schema(&p.settings.namespace_prefix),
+                    );
+                    anyhow::ensure!(
+                        !queries.is_empty(),
+                        "{mart} has no additive measure (sum or count) to reconcile"
+                    );
+                    let conn = settings.trino_connection()?;
+                    let rows = off_runtime(|| {
+                        let r = ekos_lakehouse_trino::TrinoReader::new(conn)?;
+                        queries
+                            .iter()
+                            .map(|(measure, sql)| {
+                                let row = r.read(sql)?.into_iter().next().unwrap_or_default();
+                                Ok((measure.clone(), row))
+                            })
+                            .collect::<anyhow::Result<Vec<_>>>()
+                    })?;
+                    rows.into_iter()
+                        .map(|(measure, row)| {
+                            let mart_total = row.first().cloned().unwrap_or_default();
+                            let silver_total = row.get(1).cloned().unwrap_or_default();
+                            marts::Totals {
+                                equal: marts::totals_equal(&mart_total, &silver_total),
+                                measure,
+                                mart_total,
+                                silver_total,
+                            }
+                        })
+                        .collect()
+                };
             let r = marts::Reconciliation {
                 mart: mart.clone(),
                 at: now(),

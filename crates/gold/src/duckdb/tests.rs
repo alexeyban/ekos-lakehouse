@@ -229,7 +229,7 @@ fn the_project_names_secrets_and_attaches_the_catalog() {
         .as_sequence()
         .unwrap()
         .iter()
-        .find(|t| t["name"] == serde_yaml::Value::from("public__ar"))
+        .find(|t| t["name"] == "public__ar")
         .unwrap();
     assert_eq!(ar["identifier"], serde_yaml::Value::from("ar"));
 }

@@ -218,6 +218,10 @@ fn attach_macro(s: &DuckDbGold) -> String {
 
 fn profiles(s: &DuckDbGold) -> String {
     let env = |name: &str| format!("\"{{{{ env_var('{name}') }}}}\"");
+    let oauth = format!(
+        "\"{{{{ env_var('EKOS_LH_ICEBERG_URL', {}) }}}}/v1/oauth/tokens\"",
+        yaml_quote(&s.catalog_url)
+    );
     let env_or = |name: &str, default: &str| {
         format!("\"{{{{ env_var('{name}', {}) }}}}\"", yaml_quote(default))
     };
@@ -257,10 +261,7 @@ fn profiles(s: &DuckDbGold) -> String {
         region = yaml_quote(&s.s3_region),
         client = env(&s.client_id_env),
         client_secret = env(&s.client_secret_env),
-        oauth = format!(
-            "\"{{{{ env_var('EKOS_LH_ICEBERG_URL', {}) }}}}/v1/oauth/tokens\"",
-            yaml_quote(&s.catalog_url)
-        ),
+        oauth = oauth,
     )
 }
 

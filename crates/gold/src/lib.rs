@@ -1735,12 +1735,13 @@ pub fn mart_files(
     report: &InventionReport,
     drafted: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
-    let (dir, lower): (&str, Box<dyn Fn(&str) -> String>) = match engine {
-        GoldEngine::Trino => ("dbt", Box::new(|s: &str| s.to_string())),
-        GoldEngine::Duckdb => (
-            duckdb::PROJECT_DIR,
-            Box::new(|s: &str| duckdb::lower(s, plan)),
-        ),
+    let dir = match engine {
+        GoldEngine::Trino => "dbt",
+        GoldEngine::Duckdb => duckdb::PROJECT_DIR,
+    };
+    let lower = |s: &str| match engine {
+        GoldEngine::Trino => s.to_string(),
+        GoldEngine::Duckdb => duckdb::lower(s, plan),
     };
     let mut out = vec![
         (model_path(engine, &spec.mart), lower(&c.dbt_sql)),
