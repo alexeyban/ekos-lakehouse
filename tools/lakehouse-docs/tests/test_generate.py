@@ -141,3 +141,39 @@ def test_plan_settings_reach_the_pages(docs):
     assert "| Bronze loads | `0 * * * *` |" in runbook, runbook
     assert "| Iceberg maintenance | `0 3 * * *` |" in runbook
     assert "namespace `bronze_<schema>`" in (docs / "architecture/index.md").read_text()
+
+
+def test_a_duckdb_mart_is_parsed_in_duckdbs_dialect(pipeline, tmp_path):
+    """EKOS RFC 0259 L7: a gold mart of the dbt-duckdb project reads silver as sources named after
+    the silver models; its lineage is parsed with sqlglot's DuckDB dialect and still reaches the
+    source column through every layer."""
+    trino_sql = (pipeline / "dbt/models/gold/gold__rentals_by_customer_month.sql").read_text()
+    duck = pipeline / "gold-duckdb/models/gold"
+    duck.mkdir(parents=True)
+    duck_sql = re.sub(r"\{\{ ref\('(public__\w+)'\) \}\}", r"{{ source('silver_public', '\1') }}", trino_sql)
+    # DuckDB-only syntax: a `::` cast and GROUP BY ALL.
+    duck_sql = duck_sql.replace('sum("payment"."amount")', 'sum("payment"."amount")::decimal(18, 2)')
+    duck_sql = duck_sql.replace("group by 1, 2, 3", "group by all")
+    (duck / "gold__rentals_by_customer_month.sql").write_text(duck_sql)
+    (pipeline / "dbt/models/gold/_gold__rentals_by_customer_month.yml").rename(
+        duck / "_gold__rentals_by_customer_month.yml")
+    (pipeline / "dbt/models/gold/gold__rentals_by_customer_month.sql").unlink()
+
+    p = project.load(pipeline, FIX / "evidence")
+    mart = p.models["gold__rentals_by_customer_month"]
+    assert mart.engine == "duckdb" and mart.layer == "gold"
+    assert "public__payment" in mart.refs and mart.sources == []
+    lin = lineage.build(p)
+    assert lin.dialects["gold__rentals_by_customer_month"] == "duckdb"
+    assert lin.dialects["public__payment"] == "trino"
+    assert lin.unresolved == []
+    assert not [f for f in lin.fallbacks if f.startswith("gold__")], lin.fallbacks
+    roots = lin.roots(Node("gold", "gold__rentals_by_customer_month", "revenue"))
+    assert [n.label for n, _ in roots] == ["public.payment.amount"]
+    month = lin.roots(Node("gold", "gold__rentals_by_customer_month", "month"))
+    assert month[0][0].label == "public.rental.rental_date"
+
+    out = tmp_path / "docs-duck"
+    generate(pipeline, out, FIX / "evidence", FIX / "lakehouse-docs.toml")
+    page = (out / "lineage/index.md").read_text()
+    assert "parsed in DuckDB's dialect" in page

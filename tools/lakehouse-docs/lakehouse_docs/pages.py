@@ -823,7 +823,11 @@ class Site:
                          self.link(here, self.model_page(silver), silver.name) if silver else "—",
                          ", ".join(self.link(here, self.model_page(p.models[g]), g) for g in gold)))
         body += "\n" + table(["Source", "Bronze", "Silver", "Read by"], rows)
-        body += "\n## How lineage is derived\n\n- **source → bronze:** the deployed plan's column mapping (`expr`, lossiness).\n- **bronze → silver → gold:** the dbt SQL parsed in Trino's dialect (sqlglot), `select *` expanded with upstream columns.\n- Edges marked _by name_ were matched on column names because the SQL did not parse.\n"
+        duck = sorted(m for m, d in self.lin.dialects.items() if d == "duckdb")
+        body += "\n## How lineage is derived\n\n- **source → bronze:** the deployed plan's column mapping (`expr`, lossiness).\n- **bronze → silver → gold:** the dbt SQL parsed in Trino's dialect (sqlglot), `select *` expanded with upstream columns.\n"
+        if duck:
+            body += f"- **silver → gold on DuckDB** (EKOS RFC 0259): {', '.join(code(m) for m in duck)} parsed in DuckDB's dialect; their silver sources are the silver models.\n"
+        body += "- Edges marked _by name_ were matched on column names because the SQL did not parse.\n"
         if self.lin.fallbacks:
             body += f"\n{len(self.lin.fallbacks)} column(s) resolved by name:\n\n" + "\n".join(f"- `{x}`" for x in self.lin.fallbacks[:50]) + "\n"
         if self.lin.unresolved:

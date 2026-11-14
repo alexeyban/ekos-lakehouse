@@ -872,6 +872,12 @@ mod tests {
             r("iceberg.gold_sales.m"),
             Some(("gold".into(), "gold.m".into()))
         );
+        // EKOS RFC 0259: a mart in the DuckDB marts file (catalog `marts`) is the same gold table,
+        // so its runs from `lakehouse gold publish` give its health and freshness.
+        assert_eq!(
+            r("marts.gold.sales"),
+            Some(("gold".into(), "gold.sales".into()))
+        );
         assert_eq!(
             r("silver_sales_public.film"),
             Some(("silver".into(), "public.film".into())),

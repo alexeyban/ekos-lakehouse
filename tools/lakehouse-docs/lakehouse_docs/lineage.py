@@ -2,9 +2,10 @@
 
 * source → bronze comes from the plan: every bronze column is the mapping's ``expr`` over one
   source column, with its lossiness class.
-* bronze → silver and model → model come from the SQL itself, parsed with sqlglot in Trino's
-  dialect after the dbt Jinja is resolved (``source()``/``ref()`` → relations, ``var()`` → a
-  literal). ``select *`` is expanded with the upstream schema, so the generated silver shape
+* bronze → silver and model → model come from the SQL itself, parsed with sqlglot in the
+  dialect of the engine that builds the model — Trino's, or DuckDB's for a gold mart of the
+  dbt-duckdb project (EKOS RFC 0259) — after the dbt Jinja is resolved (``source()``/``ref()`` →
+  relations, ``var()`` → a literal; a DuckDB mart's silver sources are the silver models). ``select *`` is expanded with the upstream schema, so the generated silver shape
   (CTE over ``select *``) resolves to real columns.
 * When a statement does not parse, the model falls back to matching column names with its
   upstream relations and the edge is marked ``inferred``.
@@ -47,6 +48,7 @@ class Lineage:
         self.down: dict[Node, list[Edge]] = defaultdict(list)
         self.unresolved: list[str] = []
         self.fallbacks: list[str] = []   # columns resolved by name because the SQL did not parse
+        self.dialects: dict[str, str] = {}   # model → the sqlglot dialect its SQL was parsed in
 
     def add(self, e: Edge) -> None:
         if e in self.up[e.dst]:
@@ -108,12 +110,17 @@ def _is_plain(expr: str, column: str) -> bool:
     return e == column or re.fullmatch(rf'(\w+\.)?"?{re.escape(column)}"?', expr.strip()) is not None
 
 
-def _resolve_jinja(sql: str) -> str:
+def dialect_of(m: Model) -> str:
+    """The sqlglot dialect of the engine that builds ``m`` (EKOS RFC 0259)."""
+    return "duckdb" if m.engine == "duckdb" else "trino"
+
+
+def _resolve_jinja(sql: str, sources_are_models: bool = False) -> str:
     sql = re.sub(r"\{\{\s*config\(.*?\)\s*\}\}", "", sql, flags=re.S)
     sql = re.sub(r"\{#.*?#\}", "", sql, flags=re.S)
     sql = re.sub(
         r"\{\{\s*source\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)\s*\}\}",
-        r'"\1"."\2"',
+        r'"__ref__"."\2"' if sources_are_models else r'"\1"."\2"',
         sql,
     )
     sql = re.sub(r"\{\{\s*ref\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\}\}", r'"__ref__"."\1"', sql)
@@ -160,7 +167,9 @@ def build(p: Project) -> Lineage:
         for r in m.refs:
             sch.setdefault("__ref__", {})[r] = {c: "varchar" for c in model_cols.get(r, [])}
             upstream[f"__ref__.{r}".lower()] = (layer_of.get(r, "other"), r)
-        sql = _resolve_jinja(m.sql)
+        sql = _resolve_jinja(m.sql, sources_are_models=m.engine == "duckdb")
+        dialect = dialect_of(m)
+        lin.dialects[m.name] = dialect
         out_cols = [c.name for c in m.columns]
         for col in out_cols:
             dst = Node(m.layer, m.name, col)
@@ -168,8 +177,8 @@ def build(p: Project) -> Lineage:
             parsed_expr: str | None = None   # set when the SQL parsed but read no column (a constant)
             if sg_lineage is not None:
                 try:
-                    node = sg_lineage(col, sql, schema=sch, dialect="trino")
-                    expr_sql = node.expression.sql(dialect="trino")
+                    node = sg_lineage(col, sql, schema=sch, dialect=dialect)
+                    expr_sql = node.expression.sql(dialect=dialect)
                     expr_sql = re.sub(r'\s+AS\s+"?[\w]+"?\s*$', "", expr_sql, flags=re.I)
                     leaves = [n for n in node.walk() if not n.downstream]
                     parsed_expr = expr_sql

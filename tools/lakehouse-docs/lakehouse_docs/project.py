@@ -150,6 +150,9 @@ class Model:
     schema: str = ""
     alias: str = ""
     materialized: str = "table"
+    # The engine that builds it: "trino", or "duckdb" for a gold mart of the dbt-duckdb project
+    # (EKOS RFC 0259); its SQL is parsed in that engine's dialect.
+    engine: str = "trino"
 
     @property
     def relation(self) -> str:
@@ -375,22 +378,44 @@ def _layer(path: Path) -> str:
 def _load_dbt(root: Path) -> tuple[dict[str, Model], list[Snapshot]]:
     dbt = root / "dbt"
     models: dict[str, Model] = {}
-    if not (dbt / "models").exists():
-        return models, []
+    snapshots: list[Snapshot] = []
+    if (dbt / "models").exists():
+        snapshots = _load_project(root, dbt, models, "trino")
+        _enrich_from_manifest(dbt, models)
+    # EKOS RFC 0259: gold marts built on DuckDB live in their own dbt-duckdb project.
+    duck = root / DUCKDB_PROJECT
+    if (duck / "models").exists():
+        _load_project(root, duck, models, "duckdb")
+        _enrich_from_manifest(duck, models)
+    return models, snapshots
+
+
+DUCKDB_PROJECT = "gold-duckdb"
+
+
+def _load_project(root: Path, dbt: Path, models: dict[str, Model], engine: str) -> list[Snapshot]:
     for sql_path in sorted((dbt / "models").rglob("*.sql")):
         sql = sql_path.read_text(encoding="utf-8")
         rel = sql_path.relative_to(root)
         cfg = _config_kw(sql)
+        refs = set(_REF.findall(sql))
+        sources = set(_SOURCE.findall(sql))
+        if engine == "duckdb":
+            # Silver is read from the Iceberg catalog as sources named after the silver models:
+            # for lineage they are the models themselves.
+            refs |= {table for _, table in sources}
+            sources = set()
         models[sql_path.stem] = Model(
             name=sql_path.stem,
-            layer=_layer(sql_path.relative_to(dbt / "models")),
+            layer="gold" if engine == "duckdb" else _layer(sql_path.relative_to(dbt / "models")),
             path=str(rel),
             sql=sql,
-            refs=sorted(set(_REF.findall(sql))),
-            sources=sorted(set(_SOURCE.findall(sql))),
+            refs=sorted(refs),
+            sources=sorted(sources),
             schema=cfg.get("schema", ""),
             alias=cfg.get("alias", ""),
             materialized=cfg.get("materialized", "table"),
+            engine=engine,
         )
     snapshots: list[Snapshot] = []
     ymls = list((dbt / "models").rglob("*.yml"))
@@ -400,7 +425,7 @@ def _load_dbt(root: Path) -> tuple[dict[str, Model], list[Snapshot]]:
         doc = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
         for m in doc.get("models", []) or []:
             model = models.get(m.get("name"))
-            if model is None:
+            if model is None or model.engine != engine:
                 continue
             model.description = (m.get("description") or "").strip()
             model.meta = ((m.get("config") or {}).get("meta") or m.get("meta") or {})
@@ -425,8 +450,7 @@ def _load_dbt(root: Path) -> tuple[dict[str, Model], list[Snapshot]]:
                     alias=cfg.get("alias", ""),
                 )
             )
-    _enrich_from_manifest(dbt, models)
-    return models, snapshots
+    return snapshots
 
 
 def _enrich_from_manifest(dbt: Path, models: dict[str, Model]) -> None:
