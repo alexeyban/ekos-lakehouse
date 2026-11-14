@@ -36,6 +36,7 @@ pub mod run_cmd;
 pub mod settings;
 pub mod source;
 pub mod source_oracle;
+pub mod spec;
 pub mod sync;
 pub mod workflow;
 pub mod writer_warnings;
@@ -999,6 +1000,25 @@ impl EkosExtension for LakehouseExtension {
                         ),
                 )
                 .subcommand(
+                    clap::Command::new("spec")
+                        .about(
+                            "The specification as one Markdown document: marts, sources, extraction, \
+                             schedule, checks, review, approvals with dates, open items (RFC 0260)",
+                        )
+                        .arg(
+                            clap::Arg::new("out")
+                                .long("out")
+                                .value_name("FILE")
+                                .help("Write the document here instead of printing it"),
+                        )
+                        .arg(
+                            clap::Arg::new("json")
+                                .long("json")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("The gathered inputs as JSON"),
+                        ),
+                )
+                .subcommand(
                     clap::Command::new("proposals")
                         .about(
                             "Schema changes and gold marts waiting for a merge, from the pipeline \
@@ -1219,6 +1239,9 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse marts reconcile", Class::External, false),
             ("lakehouse install", Class::Local, false),
             ("lakehouse proposals", Class::Read, false),
+            // RFC 0260 §2.4: reads the requirements, the plans, the ledger's review; writes only
+            // the file it is given.
+            ("lakehouse spec", Class::Read, false),
             // Reach a webhook / a collector outside the home.
             ("lakehouse alert", Class::External, false),
             // EKOS RFC 0258: status reads the ledger only; sync reads Superset and records facts;
@@ -1674,6 +1697,7 @@ impl EkosExtension for LakehouseExtension {
                 }
                 Ok(())
             }
+            Some(("spec", m)) => spec_cmd(ctx, engines, m),
             Some(("proposals", m)) => {
                 let settings = settings::load_with(ctx.config, engines)?;
                 let v = console::proposals(&pipeline_dir(&settings, ctx));
@@ -1937,6 +1961,167 @@ async fn gold_draft(
             questions_path.display()
         )
     }
+}
+
+/// EKOS RFC 0260 §2.4: `lakehouse spec` — the inputs gathered from the project's records.
+fn spec_cmd(
+    ctx: &CommandContext<'_>,
+    engines: &engines::Engines,
+    m: &clap::ArgMatches,
+) -> anyhow::Result<()> {
+    use ekos_semantic::review::SignState;
+    let settings = settings::load_with(ctx.config, engines)?;
+    let repo = pipeline_dir(&settings, ctx);
+    let plan = plan_cmd::read_lock(&repo).ok();
+    let req_dir = requirements::state_dir(ctx.config, ctx.cwd);
+    let mut marts = vec![];
+    for mart in requirements::list(&req_dir) {
+        let Some(d) = requirements::read(&req_dir, &mart)? else {
+            continue;
+        };
+        let v = requirements::show(&req_dir, &repo, plan.as_ref(), Some(&mart))?;
+        let reconciled = plan
+            .as_ref()
+            .map(|p| {
+                requirements::evaluate(&d.spec, p)
+                    .resolved
+                    .iter()
+                    .filter(|r| r.section == "measures")
+                    .filter(|r| {
+                        matches!(&r.resolution, Ok(ekos_lakehouse_gold::Term::Aggregate { func, distinct: false, .. })
+                            if func == "sum" || func == "count")
+                    })
+                    .map(|r| r.term.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        marts.push(spec::MartPart {
+            mart: mart.clone(),
+            prose: d.spec.prose.clone(),
+            requirement: v["selected"]["markdown"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+            state: v["selected"]["state"].as_str().unwrap_or_default().into(),
+            grain: d.spec.grain.clone(),
+            reconciled,
+        });
+    }
+    let dir = extraction::state_dir(ctx.config, ctx.cwd);
+    let proposal = extraction::read_proposal(&dir)?;
+    let changes = extraction::read_changes(&dir)?;
+    let f = proposal
+        .as_ref()
+        .map(|p| extraction::finalize(&settings.engines, p, &changes, &settings.pii));
+    let a = extraction::read_approved(&dir)?;
+    let extraction = extraction::show(proposal.as_ref(), f.as_ref(), a.as_ref(), None);
+    let mut tests = vec![];
+    for (layer, sub) in [("silver", "dbt/models"), ("gold", "gold-duckdb/models")] {
+        let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+        for e in walk_yml(&repo.join(sub)) {
+            let text = std::fs::read_to_string(&e).unwrap_or_default();
+            for (t, n) in spec::count_tests(&text) {
+                *counts.entry(t).or_default() += n;
+            }
+        }
+        tests.extend(counts.into_iter().map(|(t, n)| (layer.to_string(), t, n)));
+    }
+    let review = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)
+        .and_then(|store| ekos::commands::review::subject_statuses(ctx.config, ctx.cwd, &*store))
+        .map(|st| {
+            st.into_iter()
+                .map(|x| {
+                    let (state, by, at) = match x.signoff {
+                        SignState::None => ("not signed", None, None),
+                        SignState::Valid {
+                            signed_by,
+                            signed_at,
+                        } => ("signed", Some(signed_by), Some(signed_at)),
+                        SignState::Stale {
+                            signed_by,
+                            signed_at,
+                            ..
+                        } => ("stale", Some(signed_by), Some(signed_at)),
+                        SignState::Revoked {
+                            signed_by,
+                            signed_at,
+                            ..
+                        } => ("revoked", Some(signed_by), Some(signed_at)),
+                    };
+                    spec::Signoff {
+                        subject: x.subject,
+                        state: state.into(),
+                        by,
+                        at,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let input = spec::SpecInput {
+        project: ctx
+            .config
+            .location
+            .as_ref()
+            .map(|l| format!("{}/{}", l.tenant, l.project))
+            .unwrap_or_else(|| ctx.cwd.display().to_string()),
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        marts,
+        sources: ctx
+            .config
+            .sources
+            .iter()
+            .map(|x| (x.name.clone(), x.kind.as_str().to_string()))
+            .collect(),
+        databases: ctx
+            .config
+            .databases
+            .iter()
+            .map(|x| (x.name.clone(), format!("{:?}", x.kind).to_lowercase()))
+            .collect(),
+        extraction,
+        schedule: plan.as_ref().map(|p| p.settings.bronze_schedule.clone()),
+        gold_engine: plan
+            .as_ref()
+            .map(|p| format!("{:?}", p.settings.gold_engine).to_lowercase())
+            .unwrap_or_default(),
+        tests,
+        review,
+    };
+    if m.get_flag("json") {
+        println!("{}", serde_json::to_string(&input)?);
+        return Ok(());
+    }
+    let md = spec::render(&input);
+    match m.get_one::<String>("out") {
+        Some(out) => {
+            std::fs::write(out, &md)?;
+            println!(
+                "wrote the specification to {out} ({} open item(s))",
+                spec::open_items(&input).len()
+            );
+        }
+        None => print!("{md}"),
+    }
+    Ok(())
+}
+
+/// Every `.yml` file under `dir`, sorted.
+fn walk_yml(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![];
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "yml") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// EKOS RFC 0257 §3.5: `lakehouse marts edit` — preview, gates, and the requirement change.
