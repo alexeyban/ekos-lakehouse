@@ -252,27 +252,43 @@ pub fn render(i: &SpecInput) -> String {
 /// `- not_null`, `- <macro>:`).
 pub fn count_tests(text: &str) -> Vec<(String, usize)> {
     let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
-    let mut in_tests = None::<usize>;
+    // (the `tests:` key's indent, the indent of its list items once the first is seen)
+    let mut open: Option<(usize, Option<usize>)> = None;
     for line in text.lines() {
-        let indent = line.len() - line.trim_start().len();
         let t = line.trim();
-        if t == "tests:" || t == "data_tests:" {
-            in_tests = Some(indent);
+        if t.is_empty() {
             continue;
         }
-        match in_tests {
-            Some(i) if indent > i && t.starts_with("- ") => {
-                let name = t[2..]
-                    .split([':', ' '])
-                    .next()
-                    .unwrap_or_default()
-                    .trim_start_matches("dbt_utils.");
-                if !name.is_empty() {
-                    *counts.entry(name.to_string()).or_default() += 1;
-                }
+        let indent = line.len() - line.trim_start().len();
+        if t == "tests:" || t == "data_tests:" {
+            open = Some((indent, None));
+            continue;
+        }
+        let Some((key, items)) = open else { continue };
+        let item = t.starts_with("- ");
+        // YAML puts a key's list items at the key's indent or deeper.
+        let at = match items {
+            None if item && indent >= key => {
+                open = Some((key, Some(indent)));
+                indent
             }
-            Some(i) if indent <= i && !t.is_empty() => in_tests = None,
-            _ => {}
+            Some(i) => i,
+            None => {
+                open = None;
+                continue;
+            }
+        };
+        if indent < at || (indent == at && !item) {
+            open = None;
+        } else if indent == at {
+            let name = t[2..]
+                .split([':', ' '])
+                .next()
+                .unwrap_or_default()
+                .trim_start_matches("dbt_utils.");
+            if !name.is_empty() {
+                *counts.entry(name.to_string()).or_default() += 1;
+            }
         }
     }
     counts.into_iter().collect()
@@ -369,6 +385,16 @@ mod tests {
     #[test]
     fn tests_are_counted_by_name() {
         let yml = "models:\n  - name: a\n    columns:\n      - name: id\n        data_tests:\n          - unique\n          - not_null\n      - name: s\n        tests:\n          - accepted_values:\n              values: ['A']\n          - not_null\n  - name: b\n";
+        // As the generator writes them: items at the key's indent, arguments nested below.
+        let generated = "    columns:\n    - name: isactive\n      data_tests:\n      - accepted_values:\n          arguments:\n            values:\n            - Y\n            - N\n      - not_null\n    - name: id\n      data_tests:\n      - unique\n";
+        assert_eq!(
+            count_tests(generated),
+            [
+                ("accepted_values".to_string(), 1),
+                ("not_null".to_string(), 1),
+                ("unique".to_string(), 1)
+            ]
+        );
         assert_eq!(
             count_tests(yml),
             [

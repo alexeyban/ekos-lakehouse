@@ -2052,7 +2052,15 @@ fn spec_cmd(
                         subject: x.subject,
                         state: state.into(),
                         by,
-                        at,
+                        // to the second, as every other date in the document
+                        at: at.map(|a| {
+                            chrono::DateTime::parse_from_rfc3339(&a)
+                                .map(|d| {
+                                    d.to_utc()
+                                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                                })
+                                .unwrap_or(a)
+                        }),
                     }
                 })
                 .collect()
