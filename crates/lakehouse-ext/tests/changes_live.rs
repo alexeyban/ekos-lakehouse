@@ -139,6 +139,7 @@ fn run_sync(
         policy: &Policy::new(),
         store,
         git_remote: None,
+        hold_new_tables: false,
     })
     .unwrap()
 }

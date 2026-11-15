@@ -41,6 +41,14 @@ pub struct Step3 {
     masks: BTreeMap<String, Option<MaskMethod>>,
     /// Lowercase table → the overridden write-behaviour fields.
     overrides: BTreeMap<String, serde_json::Map<String, Value>>,
+    /// The scope subject's sign-off: `Some(true)` valid, `Some(false)` stale or revoked, `None`
+    /// never signed.
+    scope_signed: Option<bool>,
+    /// Every table the signed scope decided on, in or out (lowercase review keys).
+    reviewed: BTreeSet<String>,
+    /// Under a stale scope sign-off: the tables the current decisions put out, used only when
+    /// there is no deployed plan to hold to.
+    stale_out: BTreeSet<String>,
 }
 
 /// A table step 3 put out of scope.
@@ -80,12 +88,42 @@ pub fn step3(statuses: &[SubjectStatus], items: &BTreeMap<String, Vec<Item>>) ->
             Some(SignState::Revoked { .. }) => (false, "its sign-off was revoked".into()),
             Some(SignState::None) | None => (false, "not signed off".into()),
         };
+        let stale = matches!(
+            status.map(|x| &x.signoff),
+            Some(SignState::Stale { .. } | SignState::Revoked { .. })
+        );
+        let why = if s == Subject::Scope && stale {
+            format!("{why}; until then the plan keeps the deployed plan's tables")
+        } else {
+            why
+        };
         out.subjects.push(SubjectUse {
             subject: name.into(),
             used,
             why,
             digest: status.filter(|_| used).map(|x| x.digest.clone()),
         });
+        if s == Subject::Scope {
+            out.scope_signed = if used {
+                Some(true)
+            } else {
+                stale.then_some(false)
+            };
+            if stale {
+                for i in items.get(name).map(Vec::as_slice).unwrap_or(&[]) {
+                    let scope = i
+                        .decision
+                        .as_ref()
+                        .and_then(|d| text(d, "scope"))
+                        .or(i.proposed.as_deref());
+                    if scope == Some("out")
+                        && let Some(t) = i.facts.get("table").and_then(Value::as_str)
+                    {
+                        out.stale_out.insert(t.to_ascii_lowercase());
+                    }
+                }
+            }
+        }
         if !used {
             continue;
         }
@@ -99,6 +137,7 @@ pub fn step3(statuses: &[SubjectStatus], items: &BTreeMap<String, Vec<Item>>) ->
             let decision = i.decision.as_ref();
             match s {
                 Subject::Scope => {
+                    out.reviewed.insert(table.clone());
                     let scope = decision
                         .and_then(|d| text(d, "scope"))
                         .or(i.proposed.as_deref());
@@ -236,6 +275,67 @@ impl Step3 {
                 ));
             }
         }
+        excluded
+    }
+
+    /// EKOS RFC 0260 demo (gaps 3 and 4): what the signed scope does not cover waits.
+    ///
+    /// - Scope signed: a table the review never saw (a customization's new table, before EKOS
+    ///   compiled it) and the deployed plan does not have is not in the signed scope, so it
+    ///   waits for a review instead of joining the plan, and the build, at once.
+    /// - Scope sign-off stale or revoked: the deployed plan's tables are kept and nothing else
+    ///   is planned; without a deployed plan, the current decisions apply. Before, a stale
+    ///   sign-off meant no scope at all: every table of the source was planned.
+    pub fn hold_unsigned(&self, plan: &mut Plan, deployed: Option<&Plan>) -> Vec<Excluded> {
+        let in_deployed = |schema: &str, table: &str, oid: u32| {
+            deployed.is_some_and(|d| {
+                d.tables
+                    .iter()
+                    .any(|t| (oid != 0 && t.oid == oid) || (t.schema == schema && t.table == table))
+            })
+        };
+        enum Hold {
+            Unreviewed,
+            NotDeployed,
+            DecidedOut,
+        }
+        let (hold, reason) = match self.scope_signed {
+            Some(true) if !self.reviewed.is_empty() => (
+                Hold::Unreviewed,
+                "not in step 3's signed scope (new since the review): compile it, decide its \
+                 scope and sign the scope off again",
+            ),
+            Some(false) if deployed.is_some() => (
+                Hold::NotDeployed,
+                "waiting for step 3's scope to be signed off again (its sign-off is stale); \
+                 the deployed plan's tables are kept",
+            ),
+            Some(false) => (
+                Hold::DecidedOut,
+                "out of scope (step 3, decided since its last sign-off)",
+            ),
+            _ => return vec![],
+        };
+        let held = |s: &str, t: &str, oid: u32| match hold {
+            Hold::Unreviewed => {
+                !in_deployed(s, t, oid) && !keys(s, t).iter().any(|k| self.reviewed.contains(k))
+            }
+            Hold::NotDeployed => !in_deployed(s, t, oid),
+            Hold::DecidedOut => keys(s, t).iter().any(|k| self.stale_out.contains(k)),
+        };
+        let mut excluded = vec![];
+        plan.tables.retain(|t| {
+            let out = held(&t.schema, &t.table, t.oid);
+            if out {
+                excluded.push(Excluded {
+                    table: format!("{}.{}", t.schema, t.table),
+                    reason: reason.to_string(),
+                });
+            }
+            !out
+        });
+        // A refused table is never built; it stays listed with its reason (a table the source
+        // user may not read says so).
         excluded
     }
 
@@ -421,6 +521,125 @@ pub struct Approval {
     /// Per-table digests, to name what changed later (kept in the state file only).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tables: BTreeMap<String, String>,
+    /// EKOS RFC 0260 X5: the digest of the plan's format and settings, which a per-table approval
+    /// cannot change. Absent in approvals recorded before it: those are whole-plan only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<String>,
+    /// The tables a per-table approval approved (empty for a whole-plan approval).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+}
+
+/// The digest of what a per-table approval leaves as it was: the plan's format and settings.
+pub fn settings_digest(plan: &Plan) -> String {
+    sha256(&json!({"format": plan.format, "settings": plan.settings}).to_string())
+}
+
+/// Pure, EKOS RFC 0260 X5: the last approval with `names` approved as they are in `f` now; the
+/// other tables keep what was approved before. Refused when the plan's settings changed (they
+/// apply to every table: approve the whole plan), or a name is no table of either.
+pub fn approve_tables(
+    prev: &Approval,
+    f: &Final,
+    names: &[String],
+    by: &str,
+    at: &str,
+    note: Option<String>,
+) -> anyhow::Result<Approval> {
+    let Some(settings) = prev.settings.as_ref().filter(|_| !prev.tables.is_empty()) else {
+        anyhow::bail!(
+            "the last approval was recorded before per-table approvals: approve the whole plan"
+        );
+    };
+    anyhow::ensure!(
+        *settings == settings_digest(&f.plan),
+        "the plan's settings changed since the last approval (they apply to every table): approve \
+         the whole plan"
+    );
+    let stale: Vec<&str> = f
+        .stale()
+        .iter()
+        .filter(|a| {
+            names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&a.change.table))
+        })
+        .map(|a| a.change.table.as_str())
+        .collect();
+    anyhow::ensure!(
+        stale.is_empty(),
+        "these changes no longer fit the plan; undo or redo them first: {}",
+        stale.join(", ")
+    );
+    let mut tables = prev.tables.clone();
+    let mut only = vec![];
+    for n in names {
+        let key = f
+            .tables
+            .keys()
+            .chain(prev.tables.keys())
+            .find(|k| k.eq_ignore_ascii_case(n))
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("{n} is no table of the plan or of the last approval")
+            })?;
+        match f.tables.get(&key) {
+            Some(d) => tables.insert(key.clone(), d.clone()),
+            None => tables.remove(&key),
+        };
+        only.push(key);
+    }
+    Ok(Approval {
+        by: by.into(),
+        at: at.into(),
+        note,
+        digest: sha256(&json!({"settings": settings, "tables": tables}).to_string()),
+        proposed_at: prev.proposed_at.clone(),
+        counts: counts(f),
+        changes: prev.changes.clone(),
+        step3: prev.step3.clone(),
+        tables,
+        settings: Some(settings.clone()),
+        only,
+    })
+}
+
+/// Pure, EKOS RFC 0260 X5: the plan `generate` builds under an approval. The whole plan when the
+/// approval is of it; else, when the approval has per-table digests and the same settings, every
+/// table whose digest is approved, the deployed version of a table whose change is not, and
+/// no unapproved new table — each held one named. `None`: neither, the plan is not approved.
+pub fn buildable(f: &Final, a: &Approval, deployed: Option<&Plan>) -> Option<(Plan, Vec<String>)> {
+    if a.digest == f.digest {
+        return Some((f.plan.clone(), vec![]));
+    }
+    if a.tables.is_empty() || a.settings.as_deref() != Some(settings_digest(&f.plan).as_str()) {
+        return None;
+    }
+    let mut plan = f.plan.clone();
+    let mut held = vec![];
+    let mut kept = vec![];
+    for t in &plan.tables {
+        let key = format!("{}.{}", t.schema, t.table);
+        if a.tables.get(&key) == f.tables.get(&key) {
+            kept.push(t.clone());
+            continue;
+        }
+        match deployed.and_then(|d| {
+            d.tables.iter().find(|x| {
+                x.oid == t.oid && x.oid != 0 || (x.schema == t.schema && x.table == t.table)
+            })
+        }) {
+            Some(old) if a.tables.contains_key(&key) => {
+                held.push(format!(
+                    "{key}: its change is not approved; the deployed version is kept"
+                ));
+                kept.push(old.clone());
+            }
+            _ => held.push(format!("{key}: not approved yet; not built")),
+        }
+    }
+    plan.tables = kept;
+    Some((plan, held))
 }
 
 /// Pure: the approval of `f`, or why it cannot be approved.
@@ -460,6 +679,8 @@ pub fn approve(
         changes: changes.to_vec(),
         step3: p.step3.clone(),
         tables: f.tables.clone(),
+        settings: Some(settings_digest(&f.plan)),
+        only: vec![],
     })
 }
 
@@ -1001,6 +1222,7 @@ mod tests {
                     item("table:t_temp", json!({"table":"t_temp"}), Some("out"), None),
                     item("table:a", json!({"table":"a"}), Some("in"), None),
                     item("table:b", json!({"table":"b"}), Some("in"), Some(json!({"scope":"out"}))),
+                    item("table:c", json!({"table":"c"}), Some("in"), None),
                 ],
             ),
             (
@@ -1184,6 +1406,69 @@ mod tests {
         );
     }
 
+    fn planned(p: &Plan) -> Vec<&str> {
+        p.tables.iter().map(|t| t.table.as_str()).collect()
+    }
+
+    /// EKOS RFC 0260 demo, gap 4: a table the signed review never saw waits, unless it is
+    /// already deployed.
+    #[test]
+    fn a_table_the_signed_scope_never_saw_waits() {
+        let s3 = step3(&signed(), &review());
+        let mut plan = proposal(&signed(), 10).plan;
+        let mut new = plan.tables[0].clone();
+        new.table = "XX_LOYALTY_TXN".into();
+        new.oid = 77;
+        plan.tables.push(new);
+        let mut held = plan.clone();
+        let out = s3.hold_unsigned(&mut held, None);
+        assert_eq!(planned(&held), ["A", "C"]);
+        assert_eq!(out[0].table, "ADEMPIERE.XX_LOYALTY_TXN");
+        assert!(out[0].reason.contains("not in step 3's signed scope"));
+        // Already deployed: kept.
+        let mut kept = plan.clone();
+        assert!(s3.hold_unsigned(&mut kept, Some(&plan)).is_empty());
+        assert_eq!(kept.tables.len(), 3);
+    }
+
+    /// EKOS RFC 0260 demo, gap 3: a stale scope sign-off keeps the deployed plan's tables; it
+    /// used to mean no scope at all, and every table of the source was planned.
+    #[test]
+    fn a_stale_scope_keeps_the_deployed_tables() {
+        let stale = vec![status(
+            "scope",
+            SignState::Stale {
+                signed_by: "ana".into(),
+                signed_at: "x".into(),
+                added: vec![],
+                removed: vec![],
+                changed: vec![],
+            },
+        )];
+        let s3 = step3(&stale, &review());
+        assert!(
+            s3.subjects[0]
+                .why
+                .contains("keeps the deployed plan's tables")
+        );
+        let mut everything = proposal(&stale, 10).plan;
+        assert_eq!(
+            everything.tables.len(),
+            4,
+            "the stale scope is not applied alone"
+        );
+        let mut deployed = everything.clone();
+        deployed.tables.retain(|t| t.table == "A" || t.table == "C");
+        let mut held = everything.clone();
+        let out = s3.hold_unsigned(&mut held, Some(&deployed));
+        assert_eq!(planned(&held), ["A", "C"]);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].reason.contains("signed off again"));
+        // No deployed plan: the current decisions (B decided out, T_TEMP proposed out).
+        s3.hold_unsigned(&mut everything, None);
+        assert_eq!(planned(&everything), ["A", "C"]);
+    }
+
     /// RFC 0256 §3.6: a writer outside the code warns on an incremental table; keeping the mode
     /// answers it without changing the plan's digest, and a new writer opens it again.
     #[test]
@@ -1298,6 +1583,70 @@ mod tests {
         assert_eq!(f.masks.len(), 1);
         assert!(f.notes[0].contains("wins over step 3"));
         assert_ne!(f.digest, base.digest);
+    }
+
+    /// EKOS RFC 0260 X5: approving single tables builds those; a table whose change is not
+    /// approved keeps its deployed version, a new one waits; a settings change needs the whole plan.
+    #[test]
+    fn per_table_approval_builds_only_what_was_approved() {
+        let engines = crate::engines::Engines::builtin();
+        let p0 = proposal(&signed(), 10);
+        let f0 = finalize(&engines, &p0, &[], &BTreeMap::new());
+        let a0 = approve(&p0, &f0, &[], "ana", "t0", None).unwrap();
+        let deployed = f0.plan.clone();
+        // Later: a new table, and a change on C.
+        let mut p1 = p0.clone();
+        let mut new = p1.plan.tables[0].clone();
+        new.table = "XX_LOYALTY_TXN".into();
+        new.oid = 77;
+        p1.plan.tables.push(new);
+        let full_c = vec![change("C", Change::Mode(ModeChoice::Full), None)];
+        let f1 = finalize(&engines, &p1, &full_c, &BTreeMap::new());
+        let names = |p: &Plan| p.tables.iter().map(|t| t.table.clone()).collect::<Vec<_>>();
+        let mode_of_c = |p: &Plan| {
+            p.tables
+                .iter()
+                .find(|t| t.table == "C")
+                .unwrap()
+                .decision
+                .mode
+                .clone()
+        };
+
+        let (built, held) = buildable(&f1, &a0, Some(&deployed)).unwrap();
+        assert_eq!(names(&built), ["A", "C"]);
+        assert_eq!(mode_of_c(&built), mode_of_c(&deployed), "C's change waits");
+        assert_eq!(held.len(), 2);
+
+        let a1 = approve_tables(
+            &a0,
+            &f1,
+            &["adempiere.xx_loyalty_txn".into()],
+            "ana",
+            "t1",
+            None,
+        )
+        .unwrap();
+        assert_eq!(a1.only, ["ADEMPIERE.XX_LOYALTY_TXN"]);
+        let (built, held) = buildable(&f1, &a1, Some(&deployed)).unwrap();
+        assert_eq!(names(&built), ["A", "C", "XX_LOYALTY_TXN"]);
+        assert_eq!(mode_of_c(&built), mode_of_c(&deployed));
+        assert_eq!(held.len(), 1);
+        assert!(held[0].contains("ADEMPIERE.C"));
+
+        let a2 = approve_tables(&a1, &f1, &["ADEMPIERE.C".into()], "ana", "t2", None).unwrap();
+        let (built, held) = buildable(&f1, &a2, Some(&deployed)).unwrap();
+        assert!(held.is_empty());
+        assert_eq!(mode_of_c(&built), LoadMode::Full);
+
+        assert!(approve_tables(&a0, &f1, &["NOPE".into()], "ana", "t", None).is_err());
+        let mut other = f1.clone();
+        other.plan.settings.namespace_prefix = "elsewhere_".into();
+        let e = approve_tables(&a0, &other, &["ADEMPIERE.C".into()], "ana", "t", None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("settings changed"), "{e}");
+        assert!(buildable(&other, &a0, Some(&deployed)).is_none());
     }
 
     #[test]

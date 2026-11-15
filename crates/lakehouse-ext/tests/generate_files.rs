@@ -48,6 +48,13 @@ fn edits_survive_and_dropped_tables_take_their_files() {
     let both = plan(&[table("a"), table("b")], &s);
     let w = write(&both, &SilverSettings::default(), &Default::default(), &out).unwrap();
     assert!(w.kept.is_empty() && w.removed.is_empty());
+    // EKOS RFC 0260 §2.5: the lock is rewritten every time, so its hash is not in the manifest
+    // (every proposal changed it, and two proposals always conflicted there); each model has its
+    // own YAML, so two tables share no generated model file.
+    let manifest = ekos_lakehouse_ext::plan_cmd::read_manifest(&out);
+    assert!(!manifest.contains_key("lakehouse.lock.json"));
+    assert!(manifest.contains_key("dbt/models/silver/public/public__a.yml"));
+    assert!(manifest.contains_key("dbt/models/silver/public/public__b.yml"));
 
     // A person edits table a's model and b's load.
     let a_model = out.join("dbt/models/silver/public/public__a.sql");

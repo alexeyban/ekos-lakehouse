@@ -173,6 +173,77 @@ fn post(base: &str, query: &str, variables: Value) -> anyhow::Result<Value> {
     Ok(r.json()?)
 }
 
+/// Where the pipeline repository records the commit Dagster last loaded (run-time state).
+pub const LOADED_MARKER: &str = ".lakehouse/dagster-loaded";
+
+/// Pure: whether the commit Dagster loaded is not the repository's `HEAD`.
+pub fn needs_reload(head: &str, loaded: Option<&str>) -> bool {
+    loaded.map(str::trim) != Some(head.trim())
+}
+
+/// Pure: a reload mutation's answer, as the load status or the error.
+pub fn reloaded(answer: &Value) -> anyhow::Result<String> {
+    let t = &answer["data"]["reloadRepositoryLocation"];
+    if t["__typename"] != "WorkspaceLocationEntry" {
+        anyhow::bail!(
+            "Dagster could not reload the code location: {}",
+            t["message"].as_str().unwrap_or("no answer")
+        );
+    }
+    Ok(t["loadStatus"].as_str().unwrap_or("LOADED").to_string())
+}
+
+/// EKOS RFC 0260 demo, gap 7: Dagster reads the generated definitions when it loads the code
+/// location, so after `generate` (or a sync that regenerated) a job it launches still has the
+/// old assets — new tables had no bronze asset, and their silver models failed. When the
+/// repository's `HEAD` is not the commit last loaded, reload the location that has `job` and wait
+/// until it has loaded. `Ok(false)`: nothing to reload.
+pub fn reload_if_changed(base: &str, repo: &std::path::Path, job: &str) -> anyhow::Result<bool> {
+    let head = crate::sync::git(repo, &["rev-parse", "HEAD"])?;
+    let marker = repo.join(LOADED_MARKER);
+    let loaded = std::fs::read_to_string(&marker).ok();
+    if !needs_reload(&head, loaded.as_deref()) {
+        return Ok(false);
+    }
+    let j = find_job(&post(base, REPOSITORIES, json!({}))?, job, None)?;
+    let mut status = reloaded(&post(base, RELOAD, json!({"l": j.location}))?)?;
+    let started = std::time::Instant::now();
+    while status != "LOADED" {
+        if started.elapsed() > Duration::from_secs(600) {
+            anyhow::bail!("{} did not finish loading in 10 minutes", j.location);
+        }
+        std::thread::sleep(Duration::from_secs(5));
+        if find_job(
+            &post(base, REPOSITORIES, json!({}))?,
+            job,
+            Some(&j.location),
+        )
+        .is_ok()
+        {
+            status = "LOADED".into();
+        }
+    }
+    if let Some(dir) = marker.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&marker, format!("{head}\n"))?;
+    Ok(true)
+}
+
+/// [`reload_if_changed`] for a command whose own work is done: a failure is a warning, since
+/// Dagster may be down or not reachable from where the command runs.
+pub fn reload_after(base: Option<&str>, repo: &std::path::Path) {
+    let Some(base) = base else { return };
+    match reload_if_changed(base, repo, "bronze") {
+        Ok(true) => println!("Dagster reloaded the pipeline's code location"),
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "warning: Dagster was not reloaded ({e}); reload the code location before the next \
+             run, or new tables have no assets"
+        ),
+    }
+}
+
 /// Launch `job`, print where to follow it, and with `wait` poll until it ends. Blocking: the
 /// caller runs it off the async runtime.
 pub fn run(
@@ -314,6 +385,14 @@ mod tests {
     #[test]
     fn a_launch_answers_with_a_run_id_or_the_reason() {
         let ok = json!({"data": {"launchRun": {"__typename": "LaunchRunSuccess", "run": {"runId": "r1"}}}});
+        // EKOS RFC 0260 demo, gap 7: reload only when HEAD moved since the last load.
+        assert!(needs_reload("abc", None));
+        assert!(needs_reload("abc", Some("def\n")));
+        assert!(!needs_reload("abc", Some("abc\n")));
+        let entry = json!({"data": {"reloadRepositoryLocation": {"__typename": "WorkspaceLocationEntry", "loadStatus": "LOADING"}}});
+        assert_eq!(reloaded(&entry).unwrap(), "LOADING");
+        let missing = json!({"data": {"reloadRepositoryLocation": {"__typename": "RepositoryLocationNotFound", "message": "no x"}}});
+        assert!(reloaded(&missing).unwrap_err().to_string().contains("no x"));
         assert_eq!(launched(&ok).unwrap(), "r1");
         let bad = json!({"data": {"launchRun": {"__typename": "RunConfigValidationInvalid", "errors": [{"message": "missing ops"}]}}});
         let e = launched(&bad).unwrap_err().to_string();

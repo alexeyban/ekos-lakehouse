@@ -292,3 +292,36 @@ fn every_class_has_a_name_and_ids_are_stable() {
         "{md}"
     );
 }
+
+#[test]
+fn a_source_only_type_change_is_recorded() {
+    // EKOS RFC 0260 demo (scenario A2): varchar(40) → varchar(60) lands as Iceberg `varchar`
+    // either way; it was neither applied nor reported.
+    let with = |pg: &str| {
+        let mut t = orders();
+        t.columns.push(col("code", 5, pg, "varchar"));
+        t
+    };
+    assert_eq!(
+        classes(
+            vec![with("character varying(40)")],
+            vec![with("character varying(60)")]
+        ),
+        [(Class::Widening, Some("code".into()), Action::Auto)]
+    );
+    assert_eq!(
+        classes(vec![with("character varying(40)")], vec![with("text")]),
+        [(Class::Widening, Some("code".into()), Action::Auto)]
+    );
+    // Narrower in the source: every value still fits what bronze lands it as.
+    assert!(
+        classes(
+            vec![with("character varying(60)")],
+            vec![with("character varying(40)")]
+        )
+        .is_empty()
+    );
+    assert!(source_widens("numeric(10,2)", "numeric(12,2)"));
+    assert!(!source_widens("numeric(10,2)", "numeric(12,3)"));
+    assert!(source_widens("character varying(40)", "character varying"));
+}

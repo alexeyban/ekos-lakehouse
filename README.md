@@ -137,10 +137,13 @@ is asked back), and its draft is one expression over the columns it names. A tab
 reach along more than one foreign-key path is asked about: name the column on the path you mean.
 The mart is proposed on a branch with grain and reconciliation tests.
 
-`sync` commits a new table, a new nullable column and a widened type on the pipeline
-repository's branch; a rename, a drop, a narrowed type, a new required column, a key change or
-a changed watermark trigger becomes a branch `ekos/change/<table>/<id>` with
-`proposals/<id>.md` (the change, its evidence, the silver columns and tests it reaches).
+`sync` commits a new table, a new nullable column and a widened type (also one in the source alone,
+`varchar(40)` → `varchar(60)`) on the pipeline repository's branch; a rename, a drop, a narrowed type, a new
+required column, a key change or a changed watermark trigger becomes a branch `ekos/change/<table>/<id>` with
+`proposals/<id>.md` (the change, its evidence, and its impact: the silver models, columns and tests it reaches
+read from the model YAML, the gold mart terms that read it, and the dashboard charts that read those marts —
+EKOS RFC 0260). Silver has one YAML per model and the lock is not in `.generated.json`, so two proposals merge
+one after the other without a conflict.
 Merging the branch is the approval; a merged rename renames the bronze column in place, so the
 rows already loaded keep their values. With `git-remote = "origin"` the branch is pushed and a
 pull request opened with `gh` (signed in, with rights on the repository); `sync` then starts by
@@ -226,6 +229,7 @@ ekos-lakehouse lakehouse extraction change --table C_BPARTNER --full --reason "r
 ekos-lakehouse lakehouse extraction change --table A_ASSET --incremental --reason "the raw update is an upgrade script"
 ekos-lakehouse lakehouse extraction change --table C_BPARTNER --undo
 ekos-lakehouse lakehouse extraction approve --note "first review"
+ekos-lakehouse lakehouse extraction approve --table adempiere.xx_loyalty_txn --note "the new table only"
 ```
 
 A change (mode, `--deletes-every-run`/`--deletes-audit`, `--keep-purged`/`--remove-purged`) keeps who made it and why,
@@ -238,7 +242,20 @@ require-plan-approval = true
 ```
 
 `generate` builds only the approved plan; when the source, step 3 or a change has moved since, it refuses and names the
-tables. The console's **Extraction** page does all of this, with a reason typed beside each change.
+tables. `approve --table` (EKOS RFC 0260 X5) approves single tables on top of the last approval: `generate` then
+builds those, keeps the deployed version of a table whose change is not approved and leaves an unapproved new table
+out, naming each (`held:`); a change of the plan's settings still needs the whole plan approved. The console's
+**Extraction** page does all of this, with a reason typed beside each change.
+
+What the plan and `sync` do with tables step 3 has not covered (EKOS RFC 0260 §2.5):
+
+- a table the source user may not read (no `SELECT`) is refused in the plan with the reason, instead of failing the read;
+- with the scope sign-off stale, the plan keeps the deployed plan's tables until it is signed again;
+- a table the signed review never saw (a customization's new table) waits outside the scope;
+- under `require-plan-approval`, `sync` lists new tables as `waiting` instead of adding them: plan, approve, generate.
+
+`generate`, a `sync` that committed, and `lakehouse run` reload Dagster's code location when the pipeline repository's
+`HEAD` is not the commit Dagster last loaded.
 
 ### Silver from the source model (EKOS RFC 0227)
 
@@ -295,6 +312,13 @@ ekos-lakehouse lakehouse marts build --mart sales_by_region --wait   # only this
 ekos-lakehouse lakehouse marts reconcile --mart sales_by_region   # each measure: mart total vs silver
 ekos-lakehouse lakehouse marts show --mart sales_by_region
 ```
+
+Changing a mart (EKOS RFC 0257, 0260): `lakehouse marts edit --mart M --step N` with `--add-measure`,
+`--change-measure <name> --definition '…'`, `--add-filter` and the other edits. The preview shows each step's rows and
+each measure's total before and after (`revenue: before 324286.35 → after 323863.20 (−423.15)`); on DuckDB gold the
+plans and grain gates run in DuckDB. A modifying edit needs `--confirm` and a new approval; an additive one (a new
+column) to an approved requirement carries the approval forward, recorded under the editor's name. `lakehouse spec
+[--out spec.md]` writes the specification from the project's records.
 
 `lakehouse run --asset <name>` launches one asset, reloading Dagster's code location when the asset was added after it
 started. The console's **Marts** page shows the SQL beside the requirement, which terms a model drafted, the tests,

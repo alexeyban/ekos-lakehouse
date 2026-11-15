@@ -107,6 +107,42 @@ fn widens(from: &str, to: &str) -> bool {
     matches!((dec(from), dec(to)), (Some((p1, s1)), Some((p2, s2))) if s1 == s2 && p2 >= p1)
 }
 
+/// A source type that holds every value of the deployed one: the same type with a larger length
+/// or precision at the same scale (`character varying(40)` → `character varying(60)`,
+/// `numeric(10,2)` → `numeric(12,2)`), the length limit removed, or a character type to `text`.
+fn source_widens(from: &str, to: &str) -> bool {
+    let split = |t: &str| -> (String, Option<Vec<u32>>) {
+        match t.split_once('(') {
+            Some((base, rest)) => (
+                base.trim().to_string(),
+                rest.strip_suffix(')').and_then(|r| {
+                    r.split(',')
+                        .map(|x| x.trim().parse().ok())
+                        .collect::<Option<Vec<u32>>>()
+                }),
+            ),
+            None => (t.trim().to_string(), None),
+        }
+    };
+    let ((fb, fa), (tb, ta)) = (split(from), split(to));
+    let text_like = |b: &str| matches!(b, "character varying" | "varchar" | "character" | "char");
+    if tb == "text" && text_like(&fb) {
+        return true;
+    }
+    if fb != tb {
+        return false;
+    }
+    match (fa, ta) {
+        (Some(_), None) => true,
+        (Some(f), Some(t)) => match (f.as_slice(), t.as_slice()) {
+            ([a], [b]) => b >= a,
+            ([p1, s1], [p2, s2]) => s1 == s2 && p2 >= p1,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// The watermark's proof alone — the trigger and its function body (RFC 0192 §3). Other
 /// evidence (the key's sentence) changes with renames, which are their own class.
 fn proof(t: &TablePlan) -> Option<Vec<&String>> {
@@ -190,23 +226,23 @@ pub fn diff(deployed: &Plan, live: &Plan, policy: &Policy) -> Vec<Change> {
                 vec![format!("table oid {oid} is now named {}", qualified(l))],
             );
         }
-        let attnums = |t: &TablePlan| -> BTreeMap<i32, (String, bool, bool, String)> {
+        let attnums = |t: &TablePlan| -> BTreeMap<i32, (String, bool, bool, String, String)> {
             t.facts
                 .columns
                 .iter()
                 .map(|f| {
-                    let ty = t
-                        .columns
-                        .iter()
-                        .find(|m| m.column == f.name)
-                        .map(|m| m.iceberg_type.clone())
-                        .unwrap_or_default();
-                    (f.attnum, (f.name.clone(), f.not_null, f.has_default, ty))
+                    let m = t.columns.iter().find(|m| m.column == f.name);
+                    let ty = m.map(|m| m.iceberg_type.clone()).unwrap_or_default();
+                    let src = m.map(|m| m.pg_type.clone()).unwrap_or_default();
+                    (
+                        f.attnum,
+                        (f.name.clone(), f.not_null, f.has_default, ty, src),
+                    )
                 })
                 .collect()
         };
         let (dc, lc) = (attnums(d), attnums(l));
-        for (n, (name, not_null, has_default, ty)) in &lc {
+        for (n, (name, not_null, has_default, ty, src)) in &lc {
             match dc.get(n) {
                 None => {
                     let class = if !not_null && !has_default {
@@ -231,7 +267,7 @@ pub fn diff(deployed: &Plan, live: &Plan, policy: &Policy) -> Vec<Change> {
                         )],
                     );
                 }
-                Some((dname, _, _, dty)) => {
+                Some((dname, _, _, dty, dsrc)) => {
                     if dname != name {
                         push(
                             Class::Rename,
@@ -255,6 +291,22 @@ pub fn diff(deployed: &Plan, live: &Plan, policy: &Policy) -> Vec<Change> {
                             Some(dty.clone()),
                             Some(ty.clone()),
                             vec![format!("{name} lands as {ty}, deployed as {dty}")],
+                        );
+                    } else if dsrc != src && source_widens(dsrc, src) {
+                        // A widening in the source alone (varchar(40) → varchar(60)): Iceberg's
+                        // type is the same, so the load is unaffected, but the plan takes the new
+                        // type and says so. A source-side narrowing is not one for bronze: every
+                        // value still fits what it lands as.
+                        push(
+                            Class::Widening,
+                            qualified(d),
+                            Some(name.clone()),
+                            Some(dsrc.clone()),
+                            Some(src.clone()),
+                            vec![format!(
+                                "{name} is {src} in the source, deployed as {dsrc}; it lands as \
+                                 {ty} either way"
+                            )],
                         );
                     }
                 }

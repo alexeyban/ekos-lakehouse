@@ -978,6 +978,15 @@ impl EkosExtension for LakehouseExtension {
                                     "Approve the plan as it would be built now: a ledger fact with \
                                      its digest; `generate` under require-plan-approval builds only it",
                                 )
+                                .arg(
+                                    clap::Arg::new("table")
+                                        .long("table")
+                                        .action(clap::ArgAction::Append)
+                                        .help(
+                                            "Approve only this table (schema.table; repeatable); the \
+                                             others keep the last approval (EKOS RFC 0260 X5)",
+                                        ),
+                                )
                                 .arg(clap::Arg::new("note").long("note").help("A note kept with it"))
                                 .arg(
                                     clap::Arg::new("by")
@@ -1331,13 +1340,36 @@ impl EkosExtension for LakehouseExtension {
                 };
                 let mut silver = settings.silver_settings();
                 let plan = if m.get_flag("from-lock") {
+                    // The masks the deployed silver was built with: `ekos.toml`'s and step 3's, as
+                    // the last plan read them. Without them silver would be rendered unmasked
+                    // (EKOS RFC 0260 §2.5).
+                    let dir = extraction::state_dir(ctx.config, ctx.cwd);
+                    match extraction::read_proposal(&dir)? {
+                        Some(p) => {
+                            let changes = extraction::read_changes(&dir)?;
+                            silver.pii = extraction::finalize(
+                                &settings.engines,
+                                &p,
+                                &changes,
+                                &settings.pii,
+                            )
+                            .masks;
+                        }
+                        None => eprintln!(
+                            "note: no plan read here yet: silver is masked by ekos.toml's \
+                             [extensions.lakehouse] pii only"
+                        ),
+                    }
                     plan_cmd::read_lock_for(&out, &settings)?
                 } else {
                     let f = fresh(&settings, ctx, &out)?;
                     print_final(&f);
-                    plan_gate(&settings, ctx, &f)?;
+                    let (plan, held) = plan_gate(&settings, ctx, &f, &out)?;
+                    for h in &held {
+                        println!("held: {h}");
+                    }
                     silver.pii = f.masks.clone();
-                    f.plan
+                    plan
                 };
                 let reload = match plan_cmd::read_lock(&out) {
                     Ok(deployed) => sync::expression_changes(&deployed, &plan),
@@ -1364,7 +1396,10 @@ impl EkosExtension for LakehouseExtension {
                     println!("removed (no longer in the plan): {r}");
                 }
                 println!("wrote {n} files under {}", out.display());
-                Ok(())
+                off_runtime(|| {
+                    run_cmd::reload_after(settings.dagster_url.as_deref(), &out);
+                    Ok(())
+                })
             }
             Some(("deletes", m)) => deletes_cmd(ctx, m, engines),
             Some(("extraction", m)) => extraction_cmd(ctx, m, engines),
@@ -1382,7 +1417,13 @@ impl EkosExtension for LakehouseExtension {
                 let wait = m.get_flag("wait");
                 let in_process = m.get_flag("in-process");
                 let asset = m.get_one::<String>("asset").cloned();
+                let repo = pipeline_dir(&settings, ctx);
                 off_runtime(|| {
+                    // A run launched on definitions older than the repository builds the old
+                    // pipeline (EKOS RFC 0260 demo, gap 7).
+                    if let Err(e) = run_cmd::reload_if_changed(&url, &repo, &job) {
+                        eprintln!("warning: Dagster was not reloaded before the run: {e}");
+                    }
                     run_cmd::run(
                         &url,
                         &job,
@@ -1519,6 +1560,7 @@ impl EkosExtension for LakehouseExtension {
                     policy: &settings.policy,
                     store: store.as_ref(),
                     git_remote: settings.git_remote.as_deref(),
+                    hold_new_tables: settings.require_plan_approval.unwrap_or(false),
                 })?;
                 for c in &outcome.applied {
                     facts::record_change(store.as_ref(), &run, c, None)?;
@@ -1537,6 +1579,12 @@ impl EkosExtension for LakehouseExtension {
                         &state,
                         proposal.as_deref(),
                     )?;
+                }
+                if outcome.committed {
+                    off_runtime(|| {
+                        run_cmd::reload_after(settings.dagster_url.as_deref(), &repo);
+                        Ok(())
+                    })?;
                 }
                 if m.get_flag("json") {
                     println!("{}", serde_json::to_string(&outcome)?);
@@ -1579,7 +1627,17 @@ impl EkosExtension for LakehouseExtension {
                         .filter(|(_, (s, _))| *s != sync::TableState::Active)
                         .map(|(t, (s, _))| format!("{t} {s:?}").to_lowercase())
                         .collect();
-                    if outcome.applied.is_empty() && outcome.proposals.is_empty() {
+                    for t in &outcome.waiting {
+                        println!(
+                            "waiting   {:<22} {t}  → not built before the plan has it: \
+                             `lakehouse plan`, approve, `lakehouse generate` (require-plan-approval)",
+                            "new_table"
+                        );
+                    }
+                    if outcome.applied.is_empty()
+                        && outcome.proposals.is_empty()
+                        && outcome.waiting.is_empty()
+                    {
                         println!("no changes: the source matches the deployed plan");
                     }
                     if !held.is_empty() {
@@ -2371,6 +2429,18 @@ fn mart_edit_cmd(
             marts::description_path(mart)
         );
     };
+    // Approved as it stands, before this edit: the approval's digest is the current text and
+    // the committed one.
+    let prior = requirements::read_approval(&req_dir, mart)?;
+    let was_approved = prior.as_ref().is_some_and(|a| {
+        let before_text = ekos_lakehouse_gold::requirements::render(&d.spec);
+        requirements::state(
+            &before_text,
+            &requirements::evaluate(&d.spec, p),
+            Some(a),
+            requirements::committed(repo, mart).as_deref(),
+        ) == "approved"
+    });
     d.spec = after_spec;
     let by = reviewer(m.get_one::<String>("by"))?;
     d.record.log.push(requirements::Logged {
@@ -2380,6 +2450,31 @@ fn mart_edit_cmd(
     });
     let ev = requirements::evaluate(&d.spec, p);
     let text = ekos_lakehouse_gold::requirements::render(&d.spec);
+    // EKOS RFC 0260 demo, gap 8: an additive edit (a new column; every existing one keeps its
+    // values, the gates passed) to an approved requirement carries the approval forward, so it
+    // goes to propose → merge → build without a second review. A modifying edit still waits.
+    let carried = if let (true, true, true, Some(a)) = (
+        class.class == "additive",
+        was_approved,
+        ev.questions.is_empty(),
+        prior.as_ref(),
+    ) {
+        Some(commit_approval(
+            ctx,
+            repo,
+            &req_dir,
+            mart,
+            &text,
+            &ev.needs,
+            &by,
+            Some(format!(
+                "additive edit ({said}); the approval of {} at {} carried forward",
+                a.by, a.at
+            )),
+        )?)
+    } else {
+        None
+    };
     let a = requirements::read_approval(&req_dir, mart)?;
     d.record.state = requirements::state(
         &text,
@@ -2397,7 +2492,16 @@ fn mart_edit_cmd(
     );
     out["recorded"] = json!(true);
     out["state"] = json!(d.record.state);
+    out["approval_carried"] = json!(carried.is_some());
     print(&out);
+    if let Some(a) = carried {
+        println!(
+            "{mart}: additive edit — the approval carries forward (digest {}, by {by}); propose, \
+             merge, build and reconcile",
+            &a.digest[..16]
+        );
+        return Ok(());
+    }
     println!(
         "{mart}: the requirement changed ({}); approve it again, then propose, merge, build and \
          reconcile{}",
@@ -3125,12 +3229,15 @@ fn fresh(
     }
     // Over a deployed plan: keep its approved renames, and rename in place what the source
     // renamed since, rather than add an empty column.
-    if let Ok(deployed) = plan_cmd::read_lock(repo) {
-        ekos_lakehouse_bronze::carry_renames(&mut plan, &deployed);
+    let deployed = plan_cmd::read_lock(repo).ok();
+    if let Some(deployed) = &deployed {
+        ekos_lakehouse_bronze::carry_renames(&mut plan, deployed);
     }
     // RFC 0227: what the application model says about each column, for silver.
     ekos_lakehouse_bronze::attach_code(&mut plan, &ledger.code);
-    let excluded = step3.apply_plan(&mut plan);
+    let mut excluded = step3.apply_plan(&mut plan);
+    excluded.extend(step3.hold_unsigned(&mut plan, deployed.as_ref()));
+    excluded.sort_by(|a, b| a.table.cmp(&b.table));
     let masks = step3.masks_for(&plan);
     let p = extraction::Proposal {
         at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -3231,14 +3338,16 @@ fn print_final(f: &extraction::Final) {
     }
 }
 
-/// RFC 0226 §2.5: under `require-plan-approval`, only the approved plan is built.
+/// RFC 0226 §2.5: under `require-plan-approval`, only the approved plan is built. EKOS RFC 0260
+/// X5: under a per-table approval, the approved tables are; the rest is held and named.
 fn plan_gate(
     settings: &settings::Settings,
     ctx: &CommandContext<'_>,
     f: &extraction::Final,
-) -> anyhow::Result<()> {
+    repo: &std::path::Path,
+) -> anyhow::Result<(ekos_lakehouse_bronze::plan::Plan, Vec<String>)> {
     if !settings.require_plan_approval.unwrap_or(false) {
-        return Ok(());
+        return Ok((f.plan.clone(), vec![]));
     }
     let store = ekos::commands::store::open_store_read_only(ctx.config, ctx.cwd)?;
     let Some(o) = store.get_object(&facts::plan_approval_id())? else {
@@ -3253,7 +3362,16 @@ fn plan_gate(
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     if approved == f.digest {
-        return Ok(());
+        return Ok((f.plan.clone(), vec![]));
+    }
+    let dir = extraction::state_dir(ctx.config, ctx.cwd);
+    let recorded = extraction::read_approved(&dir)?.filter(|a| a.digest == approved);
+    let deployed = plan_cmd::read_lock(repo).ok();
+    if let Some(built) = recorded
+        .as_ref()
+        .and_then(|a| extraction::buildable(f, a, deployed.as_ref()))
+    {
+        return Ok(built);
     }
     let by = o
         .properties
@@ -3265,14 +3383,14 @@ fn plan_gate(
         .get("at")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    let dir = extraction::state_dir(ctx.config, ctx.cwd);
-    let diff = match extraction::read_approved(&dir)?.filter(|a| a.digest == approved) {
+    let diff = match &recorded {
         Some(a) => extraction::differences(&a.tables, &f.tables),
         None => "the approved plan's tables are not recorded here".into(),
     };
     anyhow::bail!(
         "the plan differs from the one {by} approved at {at} ({diff}): the source, step 3 or a \
-         change moved since. Review the plan and approve it again"
+         change moved since. Review the plan and approve it again, or approve single tables \
+         (`lakehouse extraction approve --table <schema.table>`)"
     )
 }
 
@@ -3421,14 +3539,38 @@ fn extraction_cmd(
             let p = need()?;
             let f = extraction::finalize(&settings.engines, &p, &changes, &settings.pii);
             let by = reviewer(m.get_one::<String>("by"))?;
-            let a = extraction::approve(
-                &p,
-                &f,
-                &changes,
-                &by,
-                &now(),
-                m.get_one::<String>("note").cloned(),
-            )?;
+            let only: Vec<String> = m
+                .get_many::<String>("table")
+                .map(|v| v.cloned().collect())
+                .unwrap_or_default();
+            let a = if only.is_empty() {
+                extraction::approve(
+                    &p,
+                    &f,
+                    &changes,
+                    &by,
+                    &now(),
+                    m.get_one::<String>("note").cloned(),
+                )?
+            } else {
+                let Some(prev) = extraction::read_approved(&dir)? else {
+                    anyhow::bail!("no earlier approval: approve the whole plan first");
+                };
+                extraction::approve_tables(
+                    &prev,
+                    &f,
+                    &only,
+                    &by,
+                    &now(),
+                    m.get_one::<String>("note").cloned(),
+                )?
+            };
+            if !a.only.is_empty() {
+                println!(
+                    "approved only: {} — every other table keeps what was approved before",
+                    a.only.join(", ")
+                );
+            }
             let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
             facts::record_plan_approval(store.as_ref(), &a)?;
             extraction::write_approved(&dir, &a)?;
@@ -3680,40 +3822,17 @@ async fn requirements_cmd(
                 );
             }
             let by = reviewer(m.get_one::<String>("by"))?;
-            // Into the pipeline repository: RFC 0195 drafts gold from a committed description.
             let rel = format!("marts/{mart}.md");
-            std::fs::create_dir_all(repo.join("marts"))?;
-            std::fs::write(repo.join(&rel), &d.text)?;
-            sync::git(&repo, &["add", &rel])?;
-            if sync::git(&repo, &["diff", "--cached", "--quiet", "--", &rel]).is_err() {
-                sync::git(
-                    &repo,
-                    &[
-                        "commit",
-                        "-q",
-                        "-m",
-                        &format!("lakehouse: approve the requirement for mart {mart} (RFC 0215)"),
-                        "--",
-                        &rel,
-                    ],
-                )?;
-            }
-            let a = rq::Approval {
-                mart: mart.clone(),
-                by: by.clone(),
-                at: now(),
-                note: m.get_one::<String>("note").cloned(),
-                digest: rq::sha256(&d.text),
-                needs: ev.needs.clone(),
-            };
-            let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
-            facts::record_requirement_approval(store.as_ref(), &a)?;
-            rq::write_approval(&dir, &a)?;
-            ekos_common::run_log::emit(
-                "requirements",
-                "approved",
-                &serde_json::json!({ "mart": mart, "digest": a.digest }),
-            );
+            let a = commit_approval(
+                ctx,
+                &repo,
+                &dir,
+                mart,
+                &d.text,
+                &ev.needs,
+                &by,
+                m.get_one::<String>("note").cloned(),
+            )?;
             d.record.log.push(rq::Logged {
                 at: a.at.clone(),
                 by: by.clone(),
@@ -3728,6 +3847,55 @@ async fn requirements_cmd(
         }
         _ => anyhow::bail!("lakehouse requirements: show, draft, edit or approve"),
     }
+}
+
+/// A requirement's approval: the description committed to the pipeline repository (RFC 0195
+/// drafts gold from a committed description), the approval file and its ledger fact.
+#[allow(clippy::too_many_arguments)]
+fn commit_approval(
+    ctx: &CommandContext<'_>,
+    repo: &std::path::Path,
+    dir: &std::path::Path,
+    mart: &str,
+    text: &str,
+    needs: &[String],
+    by: &str,
+    note: Option<String>,
+) -> anyhow::Result<requirements::Approval> {
+    let rel = format!("marts/{mart}.md");
+    std::fs::create_dir_all(repo.join("marts"))?;
+    std::fs::write(repo.join(&rel), text)?;
+    sync::git(repo, &["add", &rel])?;
+    if sync::git(repo, &["diff", "--cached", "--quiet", "--", &rel]).is_err() {
+        sync::git(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                &format!("lakehouse: approve the requirement for mart {mart} (RFC 0215)"),
+                "--",
+                &rel,
+            ],
+        )?;
+    }
+    let a = requirements::Approval {
+        mart: mart.to_string(),
+        by: by.to_string(),
+        at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        note,
+        digest: requirements::sha256(text),
+        needs: needs.to_vec(),
+    };
+    let store = facts::open_store_waiting(ctx.config, ctx.cwd)?;
+    facts::record_requirement_approval(store.as_ref(), &a)?;
+    requirements::write_approval(dir, &a)?;
+    ekos_common::run_log::emit(
+        "requirements",
+        "approved",
+        &serde_json::json!({ "mart": mart, "digest": a.digest }),
+    );
+    Ok(a)
 }
 
 fn write_failed_draft(

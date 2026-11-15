@@ -52,6 +52,7 @@ pub fn build_plan_checked(
     )?;
     let spec = provider.spec();
     let mut plan = ekos_lakehouse_bronze::plan_for(spec.as_ref(), &sources, &ps, facts);
+    refuse_unreadable(&mut plan, src.unreadable(&s.schemas())?);
     ekos_lakehouse_bronze::attach_checks(&mut plan, &src.value_lists(&s.schemas(), redaction)?);
     let report = crate::capabilities::conformance(provider.as_ref(), src.as_ref());
     let caps = crate::capabilities::record(provider.as_ref(), s, &sources, report.as_ref());
@@ -60,6 +61,31 @@ pub fn build_plan_checked(
         .map(|t| (format!("{}.{}", t.schema, t.name), t.row_estimate))
         .collect();
     Ok((plan, caps, rows))
+}
+
+/// Tables the source user may not read are refused with the reason (EKOS RFC 0260 demo: a
+/// customization's new table without a grant failed the whole read, and so every table's load).
+/// A refused table is no schema change (RFC 0192 §2), so a deployed one that lost its grant is
+/// not proposed as dropped either.
+pub fn refuse_unreadable(plan: &mut Plan, unreadable: Vec<(String, String, u32)>) {
+    for (schema, table, oid) in unreadable {
+        if plan.tables.iter().any(|t| t.oid == oid) || plan.refused.iter().any(|r| r.oid == oid) {
+            continue;
+        }
+        plan.refused
+            .push(ekos_lakehouse_bronze::plan::RefusedTable {
+                schema,
+                table,
+                oid,
+                reasons: vec![
+                    "the source user may not read it (no SELECT privilege): grant SELECT on it to \
+                 the user lakehouse reads with"
+                        .into(),
+                ],
+            });
+    }
+    plan.refused
+        .sort_by(|a, b| (&a.schema, &a.table).cmp(&(&b.schema, &b.table)));
 }
 
 /// The source engine, connected read-only (RFC 0216 §2.1), through its provider (RFC 0255 §3.3).
@@ -146,6 +172,9 @@ pub fn render_summary(p: &Plan) -> String {
 /// matches was edited by a person (RFC 0190: "drift from generated").
 pub const MANIFEST: &str = ".generated.json";
 
+/// The deployed plan, beside the files rendered from it.
+const LOCK: &str = "lakehouse.lock.json";
+
 pub fn sha256(text: &str) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(text.as_bytes()))
@@ -212,7 +241,7 @@ pub fn write(
     for (path, content) in &files {
         // The lock records what the SQL beside it was rendered from: kept apart from that SQL
         // it would describe another pipeline, so it is always rewritten (EKOS RFC 0227).
-        if path == "lakehouse.lock.json" {
+        if path == LOCK {
             continue;
         }
         let Ok(have) = std::fs::read_to_string(out.join(path)) else {
@@ -240,7 +269,14 @@ pub fn write(
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(&full, content)?;
-        manifest.insert(path.clone(), sha256(content));
+        // The lock is always rewritten, never kept, so its hash protects nothing; recorded, it
+        // changed on every proposal branch and made any two proposals conflict in the manifest
+        // (EKOS RFC 0260 §2.5).
+        if path == LOCK {
+            manifest.remove(path);
+        } else {
+            manifest.insert(path.clone(), sha256(content));
+        }
     }
     // A file generated before that the plan no longer produces (a table refused or dropped)
     // would keep feeding the old state to dbt: remove it, unless a person has edited it.
@@ -298,4 +334,25 @@ pub fn render_silver_report(r: &ekos_lakehouse_silver::SilverReport) -> String {
         &r.skipped_foreign_keys,
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unreadable_table_is_refused_with_the_reason_once() {
+        let mut plan = Plan {
+            format: 1,
+            settings: Default::default(),
+            tables: vec![],
+            refused: vec![],
+        };
+        let t = ("adempiere".to_string(), "xx_loyalty_txn".to_string(), 7u32);
+        refuse_unreadable(&mut plan, vec![t.clone()]);
+        refuse_unreadable(&mut plan, vec![t]);
+        assert_eq!(plan.refused.len(), 1);
+        assert_eq!(plan.refused[0].table, "xx_loyalty_txn");
+        assert!(plan.refused[0].reasons[0].contains("no SELECT privilege"));
+    }
 }

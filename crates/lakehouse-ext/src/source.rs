@@ -30,6 +30,14 @@ pub trait Source {
     /// `true` when the server refuses this session's writes, as it must.
     fn writes_refused(&self) -> anyhow::Result<bool>;
 
+    /// EKOS RFC 0260 demo: tables of `schemas` this session may not read, `(schema, table, oid)`.
+    /// They are left out of [`Source::read_tables`] and refused in the plan with the reason, so
+    /// one table without a grant (a customization's new table) does not stop every table's
+    /// load. None by default.
+    fn unreadable(&self, _schemas: &[String]) -> anyhow::Result<Vec<(String, String, u32)>> {
+        Ok(vec![])
+    }
+
     /// EKOS RFC 0227: check constraints of the form `column IN ('a', …)` in `schemas`. None by
     /// default: PostgreSQL states its value sets as enum types, which `read_tables` reads.
     fn value_lists(
@@ -74,6 +82,22 @@ impl Source for Postgres {
     fn writes_refused(&self) -> anyhow::Result<bool> {
         Ok(self.0.check_write_refused()?.is_safe())
     }
+
+    fn unreadable(&self, schemas: &[String]) -> anyhow::Result<Vec<(String, String, u32)>> {
+        Ok(self
+            .0
+            .rows(&format!(
+                "SELECT n.nspname, c.relname, c.oid \
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname IN ({}) AND c.relkind IN ('r', 'p') AND NOT c.relispartition \
+                   AND NOT has_table_privilege(c.oid, 'SELECT') \
+                 ORDER BY 1, 2",
+                in_list(schemas)
+            ))?
+            .into_iter()
+            .map(|r| (r[0].clone(), r[1].clone(), r[2].parse().unwrap_or(0)))
+            .collect())
+    }
 }
 
 fn lit(s: &str) -> String {
@@ -106,6 +130,7 @@ pub fn read(
                 COALESCE(obj_description(c.oid, 'pg_class'), ''), c.oid \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname IN ({list}) AND c.relkind IN ('r', 'p') AND NOT c.relispartition \
+           AND has_table_privilege(c.oid, 'SELECT') \
          ORDER BY 1, 2"
     ))? {
         tables.insert(

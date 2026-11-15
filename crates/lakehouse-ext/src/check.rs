@@ -141,18 +141,29 @@ pub fn coverage(plan: &Plan, silver: &SilverSettings, repo: &Path) -> anyhow::Re
         schemas.insert(&t.schema);
     }
     for schema in schemas {
-        let path = repo.join(format!("dbt/models/silver/{schema}/_{schema}__models.yml"));
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        let doc: Value = serde_yaml::from_str(&text)?;
-        for m in doc
-            .get("models")
-            .and_then(Value::as_sequence)
-            .into_iter()
+        // One YAML per model since EKOS RFC 0260 §2.5; a repository generated before has one
+        // per schema. Every `.yml` of the schema's directory is read either way.
+        let dir = repo.join(format!("dbt/models/silver/{schema}"));
+        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?
             .flatten()
-        {
-            if let Some(n) = m.get("name").and_then(Value::as_str) {
-                docs.insert(n.to_string(), m.clone());
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "yml"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            let doc: Value = serde_yaml::from_str(&text)?;
+            for m in doc
+                .get("models")
+                .and_then(Value::as_sequence)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(n) = m.get("name").and_then(Value::as_str) {
+                    docs.insert(n.to_string(), m.clone());
+                }
             }
         }
     }

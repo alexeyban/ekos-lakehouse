@@ -806,7 +806,6 @@ pub fn files(plan: &Plan, s: &SilverSettings) -> (BTreeMap<String, String>, Silv
         yaml(&sources_yaml(plan, s)),
     );
 
-    let mut by_schema: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
     let mut snapshots: Vec<Value> = vec![];
     for t in &plan.tables {
         let dir = format!("dbt/models/silver/{}", t.schema);
@@ -814,22 +813,22 @@ pub fn files(plan: &Plan, s: &SilverSettings) -> (BTreeMap<String, String>, Silv
             format!("{dir}/{}.sql", model_name(t)),
             model_sql(t, s, &mut report),
         );
-        by_schema
-            .entry(t.schema.as_str())
-            .or_default()
-            .push(model_yaml(t, plan, s, &mut report));
+        // One YAML per model, beside its SQL (EKOS RFC 0260 §2.5): two proposals for two tables of
+        // one schema then change no common file, so they merge without a conflict in the
+        // generated-file manifest, where one schema-wide file's hash was changed by both.
+        let mut root = Mapping::new();
+        root.insert("version".into(), 2.into());
+        root.insert(
+            "models".into(),
+            Value::Sequence(vec![model_yaml(t, plan, s, &mut report)]),
+        );
+        out.insert(
+            format!("{dir}/{}.yml", model_name(t)),
+            yaml(&Value::Mapping(root)),
+        );
         if s.history.contains(&format!("{}.{}", t.schema, t.table)) && !t.primary_key.is_empty() {
             snapshots.push(snapshot_yaml(t));
         }
-    }
-    for (schema, models) in by_schema {
-        let mut root = Mapping::new();
-        root.insert("version".into(), 2.into());
-        root.insert("models".into(), Value::Sequence(models));
-        out.insert(
-            format!("dbt/models/silver/{schema}/_{schema}__models.yml"),
-            yaml(&Value::Mapping(root)),
-        );
     }
     if !snapshots.is_empty() {
         let mut root = Mapping::new();
@@ -848,6 +847,36 @@ pub fn files(plan: &Plan, s: &SilverSettings) -> (BTreeMap<String, String>, Silv
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every model YAML of `schema`, as one document (the files are one per model).
+    fn schema_yml(f: &BTreeMap<String, String>, schema: &str) -> String {
+        let dir = format!("dbt/models/silver/{schema}/");
+        let mut models = vec![];
+        for (path, text) in f {
+            if path.starts_with(&dir) && path.ends_with(".yml") {
+                let doc: Value = serde_yaml::from_str(text).unwrap();
+                models.extend(doc["models"].as_sequence().unwrap().iter().cloned());
+            }
+        }
+        let mut root = Mapping::new();
+        root.insert("version".into(), 2.into());
+        root.insert("models".into(), Value::Sequence(models));
+        yaml(&Value::Mapping(root))
+    }
+
+    #[test]
+    fn one_yaml_per_model_beside_its_sql() {
+        let (f, _) = files(&the_plan(), &settings());
+        assert!(f.keys().all(|k| !k.ends_with("__models.yml")));
+        for sql in f
+            .keys()
+            .filter(|k| k.starts_with("dbt/models/silver/") && k.ends_with(".sql"))
+        {
+            let yml = sql.replace(".sql", ".yml");
+            let doc: Value = serde_yaml::from_str(&f[&yml]).unwrap();
+            assert_eq!(doc["models"].as_sequence().unwrap().len(), 1, "{yml}");
+        }
+    }
     use ekos_lakehouse_bronze::plan::{PlanSettings, plan};
     use ekos_lakehouse_bronze::{ForeignKey, SourceColumn, SourceTable, TypeKind, UpdateTrigger};
 
@@ -1030,7 +1059,7 @@ mod tests {
     #[test]
     fn tests_come_from_facts_and_duplicate_keys_test_once() {
         let (f, r) = files(&the_plan(), &settings());
-        let y = &f["dbt/models/silver/public/_public__models.yml"];
+        let y = &schema_yml(&f, "public");
         let doc: Value = serde_yaml::from_str(y).unwrap();
         let models = doc["models"].as_sequence().unwrap();
         let film = models.iter().find(|m| m["name"] == "public__film").unwrap();
@@ -1090,7 +1119,7 @@ mod tests {
         );
         let sources = &f["dbt/models/bronze_sources.yml"];
         assert!(sources.contains("- bronze\n") && sources.contains("- public__film"));
-        assert!(f["dbt/models/silver/public/_public__models.yml"].contains("group: silver"));
+        assert!(schema_yml(&f, "public").contains("group: silver"));
     }
 
     #[test]
@@ -1229,7 +1258,7 @@ mod tests {
             r.computed
                 .contains(&"ADEMPIERE.C_ORDER.ISSOTRX: Y/N flag as boolean (code)".to_string())
         );
-        let yml = &f["dbt/models/silver/ADEMPIERE/_ADEMPIERE__models.yml"];
+        let yml = &schema_yml(&f, "ADEMPIERE");
         assert!(
             yml.contains("name: ISACTIVE\n    quote: true\n    data_type: boolean"),
             "{yml}"
@@ -1254,8 +1283,7 @@ mod tests {
     #[test]
     fn declared_lists_fail_the_build_and_code_claims_warn() {
         let (f, _) = files(&idempiere(), &masked_secret());
-        let yml: Value =
-            serde_yaml::from_str(&f["dbt/models/silver/ADEMPIERE/_ADEMPIERE__models.yml"]).unwrap();
+        let yml: Value = serde_yaml::from_str(&schema_yml(&f, "ADEMPIERE")).unwrap();
         let model = &yml["models"]
             .as_sequence()
             .unwrap()
@@ -1292,7 +1320,7 @@ mod tests {
             ref_columns: vec!["C_BPARTNER_ID".into()],
         });
         let (g, _) = files(&declared, &masked_secret());
-        let text = &g["dbt/models/silver/ADEMPIERE/_ADEMPIERE__models.yml"];
+        let text = &schema_yml(&g, "ADEMPIERE");
         assert!(
             !text.contains("code-reference") && text.contains("foreign-key"),
             "{text}"

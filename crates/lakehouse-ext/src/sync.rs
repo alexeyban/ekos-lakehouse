@@ -129,6 +129,10 @@ pub struct Proposal {
 #[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
     pub applied: Vec<Change>,
+    /// New tables held back for the plan approval (`require-plan-approval`): `lakehouse plan`
+    /// lists them, an approval and `generate` add them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<String>,
     pub committed: bool,
     pub proposals: Vec<Proposal>,
     pub status: BTreeMap<String, (TableState, Option<String>)>,
@@ -217,6 +221,140 @@ pub fn impact(store: &dyn KnowledgeStore, c: &Change) -> anyhow::Result<Vec<Stri
     Ok(out)
 }
 
+/// The silver models that read the changed bronze column, from the model YAML the pipeline
+/// repository holds (`dbt/models/silver/<schema>/*.yml`, one per model): the model whose
+/// `meta.ekos.source` is the table, the column with its dbt tests, and every relationships test
+/// elsewhere that points at it. The generated files are the silver that runs, so this needs no
+/// ledger compiled from the repository (EKOS RFC 0260 demo, gap 6: that ledger did not exist,
+/// and every proposal said no silver column read the change).
+pub fn silver_impact(repo: &Path, c: &Change) -> Vec<String> {
+    let dir = repo.join("dbt/models/silver");
+    let mut docs = vec![];
+    for schema in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        for f in std::fs::read_dir(schema.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let p = f.path();
+            if p.extension().is_some_and(|e| e == "yml")
+                && let Ok(text) = std::fs::read_to_string(&p)
+                && let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text)
+            {
+                docs.push(doc);
+            }
+        }
+    }
+    silver_lines(&docs, &c.table, c.column.as_deref())
+}
+
+fn test_names(col: &serde_yaml::Value) -> Vec<String> {
+    col.get("data_tests")
+        .and_then(serde_yaml::Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(|t| match t {
+            serde_yaml::Value::String(s) => Some(s.clone()),
+            serde_yaml::Value::Mapping(m) => m.keys().next()?.as_str().map(str::to_string),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Pure: [`silver_impact`] over parsed model YAML documents.
+pub fn silver_lines(docs: &[serde_yaml::Value], table: &str, column: Option<&str>) -> Vec<String> {
+    use serde_yaml::Value;
+    let models = || {
+        docs.iter()
+            .filter_map(|d| d.get("models").and_then(Value::as_sequence))
+            .flatten()
+    };
+    let columns = |m: &Value| -> Vec<Value> {
+        m.get("columns")
+            .and_then(Value::as_sequence)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let name_of = |v: &Value| {
+        v.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let reading: Vec<&Value> = models()
+        .filter(|m| {
+            m.get("config")
+                .and_then(|c| c.get("meta"))
+                .and_then(|m| m.get("ekos"))
+                .and_then(|e| e.get("source"))
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.eq_ignore_ascii_case(table))
+        })
+        .collect();
+    let mut out = vec![];
+    let with_tests = |tests: &[String]| {
+        if tests.is_empty() {
+            String::new()
+        } else {
+            format!(" — tests: {}", tests.join(", "))
+        }
+    };
+    for m in &reading {
+        let model = name_of(m);
+        match column {
+            Some(col) => {
+                if let Some(c) = columns(m)
+                    .iter()
+                    .find(|c| name_of(c).eq_ignore_ascii_case(col))
+                {
+                    out.push(format!(
+                        "silver `{model}.{}` reads it{}",
+                        name_of(c),
+                        with_tests(&test_names(c))
+                    ));
+                }
+            }
+            None => {
+                let cols = columns(m);
+                let tests: usize = cols.iter().map(|c| test_names(c).len()).sum();
+                out.push(format!(
+                    "silver `{model}` reads the table ({} columns, {tests} tests)",
+                    cols.len()
+                ));
+            }
+        }
+        // Relationships tests in other models that point at this model's column.
+        let target = format!("ref('{model}')");
+        for other in models() {
+            for c in columns(other) {
+                for t in c
+                    .get("data_tests")
+                    .and_then(Value::as_sequence)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(rel) = t.get("relationships") else {
+                        continue;
+                    };
+                    let args = rel.get("arguments").unwrap_or(rel);
+                    let to = args.get("to").and_then(Value::as_str).unwrap_or("");
+                    let field = args.get("field").and_then(Value::as_str).unwrap_or("");
+                    if to == target && column.is_none_or(|col| field.eq_ignore_ascii_case(col)) {
+                        out.push(format!(
+                            "silver `{}.{}`: relationships test to `{model}.{field}`",
+                            name_of(other),
+                            name_of(&c)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// EKOS RFC 0260 §2.1: the gold marts whose committed requirement names the changed column (or,
 /// for a whole-table change, any column of the table), and the recorded dashboards whose charts read
 /// one of those marts. A change no mart reads says so.
@@ -300,6 +438,28 @@ pub struct SyncInputs<'a> {
     pub store: &'a dyn KnowledgeStore,
     /// Push proposal branches here and open pull requests with `gh` (RFC 0194 §4).
     pub git_remote: Option<&'a str>,
+    /// `require-plan-approval`: a new table is not built before the plan that has it is approved,
+    /// so sync leaves it to `plan` → approve → `generate` (EKOS RFC 0260 demo, gap 4).
+    pub hold_new_tables: bool,
+}
+
+/// `live` without the tables `deployed` does not have, and their names, when new tables wait for
+/// the plan approval.
+pub fn hold_new(deployed: &Plan, live: &Plan, hold: bool) -> (Plan, Vec<String>) {
+    if !hold {
+        return (live.clone(), vec![]);
+    }
+    let mut kept = live.clone();
+    let mut waiting = vec![];
+    kept.tables.retain(|t| {
+        let known = deployed.tables.iter().any(|d| d.oid == t.oid)
+            || deployed.refused.iter().any(|d| d.oid == t.oid);
+        if !known {
+            waiting.push(format!("{}.{}", t.schema, t.table));
+        }
+        known
+    });
+    (kept, waiting)
 }
 
 pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
@@ -320,10 +480,12 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
         })?;
     }
     let deployed = plan_cmd::read_lock(repo)?;
-    let changes = diff(&deployed, i.live, i.policy);
+    let (held, waiting) = hold_new(&deployed, i.live, i.hold_new_tables);
+    let live = &held;
+    let changes = diff(&deployed, live, i.policy);
 
     // Safe changes: regenerate and commit on the checked-out branch.
-    let next = apply_auto(&deployed, i.live, &changes);
+    let next = apply_auto(&deployed, live, &changes);
     let mut committed = false;
     if next != deployed {
         plan_cmd::write(&next, i.silver, i.gold, repo)?;
@@ -419,10 +581,17 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
         }
         let mut impact_lines = vec![];
         for c in cs {
-            for line in impact(i.store, c)?
-                .into_iter()
-                .chain(downstream(repo, i.store, c)?)
-            {
+            let mut silver = silver_impact(repo, c);
+            // The ledger's view, when the repository was compiled into it, adds computed columns.
+            silver.extend(
+                impact(i.store, c)?
+                    .into_iter()
+                    .filter(|l| !l.starts_with("no compiled silver column")),
+            );
+            if silver.is_empty() {
+                silver.push("no silver model reads it".into());
+            }
+            for line in silver.into_iter().chain(downstream(repo, i.store, c)?) {
                 if !impact_lines.contains(&line) {
                     impact_lines.push(line);
                 }
@@ -446,7 +615,7 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
             )?;
             let body = proposal_markdown(&id, table, cs, &impact_lines);
             let built = (|| -> anyhow::Result<()> {
-                let proposed = with_table(&next, i.live, table);
+                let proposed = with_table(&next, live, table);
                 plan_cmd::write(&proposed, i.silver, i.gold, &wt)?;
                 std::fs::create_dir_all(wt.join("proposals"))?;
                 std::fs::write(wt.join(format!("proposals/{id}.md")), &body)?;
@@ -551,6 +720,7 @@ pub fn sync(i: SyncInputs<'_>) -> anyhow::Result<Outcome> {
 
     Ok(Outcome {
         applied,
+        waiting,
         committed,
         proposals,
         status,
