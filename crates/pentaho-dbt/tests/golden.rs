@@ -4,7 +4,8 @@
 //! The manifest holds one line per written file (path and SHA-256), one for the report, and one
 //! per transformation's IR (its JSON). Hashes only: the corpora are third-party and never vendored.
 //!
-//! - The in-repo corpus (`crates/lakehouse-ext/examples/bench-gold`) is always checked.
+//! - The in-repo corpus (`crates/lakehouse-ext/examples/bench-gold`) is always checked, by every
+//!   `cargo test --workspace`.
 //! - `EKOS_PENTAHO_GOLDEN_CORPORA=<name>=<dir>[:<name>=<dir>…]` adds local corpora (Pentaho's
 //!   samples, AdventureWorks).
 //! - `EKOS_PENTAHO_GOLDEN=capture` writes the manifests instead of comparing them.

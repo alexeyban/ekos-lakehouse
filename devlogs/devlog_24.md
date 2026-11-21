@@ -52,7 +52,7 @@ It holds hashes only. The corpora, with the number of lines in each manifest:
 
 | Corpus | Where | Lines | Checked |
 |---|---|---|---|
-| `bench-gold` | in the repo | 5 | in CI |
+| `bench-gold` | in the repo | 5 | every `cargo test --workspace` (the repo has no CI workflow) |
 | Pentaho's samples | `pentaho-kettle` @ `67c23984`, `assemblies/samples` (127 `.ktr`, 17 `.kjb`), sparse-fetched | 286 | locally |
 | AdventureWorks | 8 transformations, 2 jobs | 48 | locally |
 
