@@ -14,6 +14,7 @@ members = [
     "crates/kettle-expr",
     "crates/kettle-rel",
     "crates/pentaho-dbt",
+    "crates/talend-rel",
     "crates/silver",
     "crates/trino",
     "crates/lakehouse-ext",
@@ -41,6 +42,9 @@ ekos-recovery         = { git = "https://github.com/alexeyban/EKOS", branch = "m
 ekos-pg-live          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-ora-live         = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-migrate          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
+# The Talend project model (EKOS RFC 0262–0265). Pinned by revision: it depends on no other EKOS
+# crate, so it can move ahead of the rest without a workspace-wide EKOS update.
+ekos-talend = { git = "https://github.com/alexeyban/EKOS", rev = "89cedb25ed621095ca29314d5aae178fcd7e4f3b" }
 # The statement classifier (RFC 0160), used with Trino's grammar through `classify_with`.
 ekos-migrate-target-clickhouse = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 
@@ -58,6 +62,7 @@ ekos-lakehouse-kettle  = { path = "crates/kettle" }
 ekos-lakehouse-kettle-expr = { path = "crates/kettle-expr" }
 ekos-lakehouse-kettle-rel  = { path = "crates/kettle-rel" }
 ekos-lakehouse-pentaho-dbt = { path = "crates/pentaho-dbt" }
+ekos-lakehouse-talend-rel  = { path = "crates/talend-rel" }
 
 # ── Third party (versions match the EKOS workspace) ──
 anyhow      = "1"

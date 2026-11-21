@@ -1,0 +1,16 @@
+[package]
+name = "ekos-lakehouse-talend-rel"
+description = "Talend jobs as the engine-neutral relational IR: Java expressions with Talend's rules, components as nodes (EKOS RFC 0267). Pure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ekos-talend.workspace = true
+ekos-lakehouse-etl-expr.workspace = true
+ekos-lakehouse-etl-rel.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

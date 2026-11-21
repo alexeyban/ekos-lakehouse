@@ -1691,6 +1691,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekos-lakehouse-talend-rel"
+version = "0.1.1"
+dependencies = [
+ "ekos-lakehouse-etl-expr",
+ "ekos-lakehouse-etl-rel",
+ "ekos-talend",
+ "serde_json",
+]
+
+[[package]]
 name = "ekos-lakehouse-trino"
 version = "0.1.1"
 dependencies = [
@@ -2553,6 +2563,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlparser",
+]
+
+[[package]]
+name = "ekos-talend"
+version = "1.6.1"
+source = "git+https://github.com/alexeyban/EKOS?rev=89cedb25ed621095ca29314d5aae178fcd7e4f3b#89cedb25ed621095ca29314d5aae178fcd7e4f3b"
+dependencies = [
+ "roxmltree",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
