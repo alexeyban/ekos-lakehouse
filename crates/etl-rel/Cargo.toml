@@ -1,0 +1,13 @@
+[package]
+name = "ekos-lakehouse-etl-rel"
+description = "Engine-neutral relational IR of an ETL job and its Trino SQL printer (RFC 0266). Pure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ekos-lakehouse-etl-expr.workspace = true
+serde.workspace = true
+serde_json.workspace = true

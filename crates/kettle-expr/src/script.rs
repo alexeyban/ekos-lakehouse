@@ -535,21 +535,21 @@ impl<'a> Executor<'a> {
             }
             JExpr::Call(None, f, args) if LOGGING.contains(&f.as_str()) => {
                 let _ = args;
-                self.out.note_only_logging();
+                note_only_logging(&mut self.out);
                 Ok(())
             }
             JExpr::Call(Some(t), f, _)
                 if LOGGING.contains(&f.as_str())
                     && matches!(t.as_ref(), JExpr::Name(n) if n == "System" || n == "Alert") =>
             {
-                self.out.note_only_logging();
+                note_only_logging(&mut self.out);
                 Ok(())
             }
             JExpr::Call(Some(t), f, _)
                 if matches!(t.as_ref(), JExpr::Field(o, n) if n == "out" && matches!(o.as_ref(), JExpr::Name(s) if s == "System"))
                     && LOGGING.contains(&f.as_str()) =>
             {
-                self.out.note_only_logging();
+                note_only_logging(&mut self.out);
                 Ok(())
             }
             JExpr::Call(None, f, args) if self.lang == Lang::Java && f == "putRow" => {
@@ -649,12 +649,10 @@ fn short(e: &JExpr) -> String {
     s.chars().take(80).collect()
 }
 
-impl Lowered {
-    fn note_only_logging(&mut self) {
-        let n = "logging calls are dropped".to_string();
-        if !self.notes.contains(&n) {
-            self.notes.push(n);
-        }
+fn note_only_logging(out: &mut Lowered) {
+    let n = "logging calls are dropped".to_string();
+    if !out.notes.contains(&n) {
+        out.notes.push(n);
     }
 }
 

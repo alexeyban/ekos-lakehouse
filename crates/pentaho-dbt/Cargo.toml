@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ekos-lakehouse-etl-rel.workspace = true
 ekos-lakehouse-bronze.workspace = true
 ekos-lakehouse-silver.workspace = true
 ekos-lakehouse-kettle.workspace = true

@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ekos-lakehouse-etl-expr.workspace = true
 ekos-lakehouse-kettle.workspace = true
 serde.workspace = true
 serde_json.workspace = true

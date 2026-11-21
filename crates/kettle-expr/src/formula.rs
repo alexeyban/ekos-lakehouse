@@ -472,8 +472,8 @@ impl Parser<'_> {
                 };
                 match kind {
                     1 => call(Func::DayOfWeekSunday1, vec![a(0)]),
-                    2 => Expr::iso_dow(a(0)),
-                    3 => Expr::bin(BinOp::Sub, Expr::iso_dow(a(0)), Expr::int(1)),
+                    2 => iso_dow(a(0)),
+                    3 => Expr::bin(BinOp::Sub, iso_dow(a(0)), Expr::int(1)),
                     k => return Err(Gap::new(format!("WEEKDAY type {k}"))),
                 }
             }
@@ -505,24 +505,22 @@ impl Parser<'_> {
     }
 }
 
-impl Expr {
-    /// ISO day of week (Monday = 1).
-    fn iso_dow(d: Expr) -> Expr {
-        // ((sunday1 + 5) % 7) + 1
+/// ISO day of week (Monday = 1).
+fn iso_dow(d: Expr) -> Expr {
+    // ((sunday1 + 5) % 7) + 1
+    Expr::bin(
+        BinOp::Add,
         Expr::bin(
-            BinOp::Add,
+            BinOp::Mod,
             Expr::bin(
-                BinOp::Mod,
-                Expr::bin(
-                    BinOp::Add,
-                    Expr::call(Func::DayOfWeekSunday1, vec![d]),
-                    Expr::int(5),
-                ),
-                Expr::int(7),
+                BinOp::Add,
+                Expr::call(Func::DayOfWeekSunday1, vec![d]),
+                Expr::int(5),
             ),
-            Expr::int(1),
-        )
-    }
+            Expr::int(7),
+        ),
+        Expr::int(1),
+    )
 }
 
 #[cfg(test)]

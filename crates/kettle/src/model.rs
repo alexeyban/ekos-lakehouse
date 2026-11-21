@@ -5,22 +5,8 @@ use crate::xml::Node;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// A database connection as a file or `shared.xml` defines it. Never holds a password: the XML
-/// tree it is read from has none (see [`crate::xml::is_secret_element`]).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct Connection {
-    pub name: String,
-    /// Kettle's database type, e.g. `POSTGRESQL`, `MSSQLNATIVE`, `MYSQL`.
-    pub db_type: String,
-    /// `Native`, `JNDI`, `ODBC` …
-    pub access: String,
-    pub host: Option<String>,
-    pub database: Option<String>,
-    pub port: Option<String>,
-    pub username: Option<String>,
-    /// The `PREFERRED_SCHEMA_NAME` attribute, when set.
-    pub schema: Option<String>,
-}
+/// A database connection (moved to `ekos-lakehouse-etl-rel`, RFC 0266).
+pub use ekos_lakehouse_etl_rel::Connection;
 
 /// A named parameter with its default value.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

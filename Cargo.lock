@@ -1542,6 +1542,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekos-lakehouse-etl-expr"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ekos-lakehouse-etl-rel"
+version = "0.1.1"
+dependencies = [
+ "ekos-lakehouse-etl-expr",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ekos-lakehouse-ext"
 version = "0.1.1"
 dependencies = [
@@ -1615,6 +1632,7 @@ dependencies = [
 name = "ekos-lakehouse-kettle"
 version = "0.1.1"
 dependencies = [
+ "ekos-lakehouse-etl-rel",
  "roxmltree",
  "serde",
  "serde_json",
@@ -1625,6 +1643,7 @@ dependencies = [
 name = "ekos-lakehouse-kettle-expr"
 version = "0.1.1"
 dependencies = [
+ "ekos-lakehouse-etl-expr",
  "ekos-lakehouse-kettle",
  "roxmltree",
  "serde",
@@ -1635,6 +1654,7 @@ dependencies = [
 name = "ekos-lakehouse-kettle-rel"
 version = "0.1.1"
 dependencies = [
+ "ekos-lakehouse-etl-rel",
  "ekos-lakehouse-kettle",
  "ekos-lakehouse-kettle-expr",
  "serde",
@@ -1647,6 +1667,7 @@ name = "ekos-lakehouse-pentaho-dbt"
 version = "0.1.1"
 dependencies = [
  "ekos-lakehouse-bronze",
+ "ekos-lakehouse-etl-rel",
  "ekos-lakehouse-kettle",
  "ekos-lakehouse-kettle-expr",
  "ekos-lakehouse-kettle-rel",

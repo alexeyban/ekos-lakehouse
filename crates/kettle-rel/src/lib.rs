@@ -9,21 +9,7 @@ pub mod source;
 mod steps;
 
 pub use build::{build, build_with};
-pub use model::*;
+pub use ekos_lakehouse_etl_rel::model::*;
 pub use steps::{convert, declared_outputs};
 
-/// Column types of the tables a transformation reads and writes. The translator's catalog is
-/// the lakehouse lock file (silver models); tests use a fixed one.
-pub trait Catalog {
-    /// The columns of `table`, or `None` when it is not known.
-    fn columns(&self, table: &TableRef) -> Option<Vec<Field>>;
-}
-
-/// A catalog that knows no table.
-pub struct NoCatalog;
-
-impl Catalog for NoCatalog {
-    fn columns(&self, _table: &TableRef) -> Option<Vec<Field>> {
-        None
-    }
-}
+pub use ekos_lakehouse_etl_rel::{Catalog, NoCatalog};

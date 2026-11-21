@@ -1,0 +1,12 @@
+[package]
+name = "ekos-lakehouse-etl-expr"
+description = "Engine-neutral typed ETL expressions, fidelity and gaps, and a Java expression parser (RFC 0266). Pure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
