@@ -763,6 +763,28 @@ impl Builder<'_> {
         self.set(c, "", id);
     }
 
+    /// The folded masks of the `tFileList` whose current file `filename` reads, joined by `|`;
+    /// `None` when it reads none, or a mask does not fold.
+    fn list_masks(&self, filename: &str) -> Option<String> {
+        let start = filename.find("globalMap.get(\"")? + "globalMap.get(\"".len();
+        let key = &filename[start..];
+        let key = &key[..key.find('"')?];
+        let list = key
+            .strip_suffix("_CURRENT_FILEPATH")
+            .or_else(|| key.strip_suffix("_CURRENT_FILE"))?;
+        let c = self
+            .job
+            .component(list)
+            .filter(|c| c.component_type == "tFileList")?;
+        let masks: Vec<String> = rows(c, "FILES")
+            .iter()
+            .filter_map(|r| r.get("FILEMASK"))
+            .map(|m| self.job.fold(m))
+            .map(|f| f.complete().then_some(f.text))
+            .collect::<Option<Vec<_>>>()?;
+        (!masks.is_empty()).then(|| masks.join("|"))
+    }
+
     fn file_input(&mut self, c: &Component) {
         let mut fields = schema(c, "");
         // A file a `tFileList` names (`globalMap.get("…_CURRENT_FILEPATH")`): the landed table's
@@ -775,7 +797,12 @@ impl Builder<'_> {
         let file = param(c, "FILENAME")
             .map(|f| self.job.fold(f).text)
             .unwrap_or_default();
-        let base = file.rsplit(['/', '\\']).next().unwrap_or(&file).to_string();
+        // The current file of a `tFileList`: every file its masks match, so the landed table is
+        // named by those masks (`ICOM_*_TYPE_CLIENT.csv`), not by the expression, which is the same
+        // text in every job that iterates a list (EKOS RFC 0268 phase 3).
+        let base = self
+            .list_masks(param(c, "FILENAME").unwrap_or_default())
+            .unwrap_or_else(|| file.rsplit(['/', '\\']).next().unwrap_or(&file).to_string());
         let t = TableRef {
             connection: None,
             schema: Some("files".into()),
@@ -3412,9 +3439,11 @@ fn global_of(job: &Job) -> impl Fn(&str) -> Option<(Expr, KType, String)> + '_ {
             (path, KType::String, note)
         } else {
             (
+                // Java's `File.getName()`: after the last separator of either kind. A job run on
+                // Windows stores `C:\dir\file.csv` (found by the differential run, RFC 0268 phase 3).
                 Expr::call(
                     ekos_lakehouse_etl_expr::Func::RegexpReplace,
-                    vec![path, Expr::str("^.*/"), Expr::str("")],
+                    vec![path, Expr::str("^.*[/\\\\]"), Expr::str("")],
                 ),
                 KType::String,
                 note,

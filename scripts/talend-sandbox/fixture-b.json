@@ -1,0 +1,40 @@
+{
+  "about": "EKOS RFC 0268 phase 3: fixture B (ALIMENTATION_DATA_WAREHOUSE) in the sandbox. Every value here that the project does not state is a sandbox setting, recorded in the run's manifest.",
+  "project": "ALIMENTATION_DATA_WAREHOUSE",
+  "package": "alimentation_data_warehouse",
+  "database": "vente_db",
+  "jvm_locale": "fr_FR",
+  "jvm_locale_why": "the project does not state its JVM's locale; its day names, holidays and context are French, and the translation is checked with --locale fr_FR. The VM's own Java would run en_US",
+  "sql": [
+    "scriptSQL_partie_1/1-script_create_schema.sql",
+    "scriptSQL_partie_1/2-script_create_table_ods.sql",
+    "scriptSQL_partie_1/3-script_create_table_params_log.sql",
+    "scriptSQL_partie_1/4-script_insert_context_variable.sql",
+    "scriptSQL_partie_2/1-script_create_schema_dwh.sql",
+    "scriptSQL_partie_2/2-script_create_table_dwh.sql",
+    "scriptSQL_partie_2/3-script_create_table_ods.sql",
+    "scriptSQL_partie_2/4-script_insert_context_variable.sql"
+  ],
+  "context_rows": {
+    "table": "\"PARAMS_LOG\".\"CONTEXTE\"",
+    "set": { "database": "vente_db", "serverName": "localhost", "port": "5432" },
+    "why": "the table names database Vente_DB, the jobs' defaults vente_db; the runner keeps the defaults"
+  },
+  "inputs": [
+    { "from": "csvFiles", "to": "C:/PROJET_TALEND/ICOMMERCE/{run_day}", "why": "tFileList reads context.projectFolder + TalendDate.getDate(\"YYYYMMDD\")" },
+    { "from": "joursFeries.xlsx", "to": "C:/Users/pc/Downloads", "why": "jGenerateCalendar's tFileInputExcel names this path" }
+  ],
+  "jobs": [
+    "jOdsCategorie", "jOdsSousCategorie", "jOdsProduit", "jOdsTypeClient", "jOdsClient", "jOdsVente",
+    "jGenerateCalendar",
+    "jDwhProduit", "jDwhClient", "jDwhVente"
+  ],
+  "order_from": "jChargeODS then jChargeDWH (their tRunJob order); jGenerateCalendar is not orchestrated and runs before the DWH jobs",
+  "studio_libs": [
+    "poi-4.1.2-*.jar", "poi-ooxml-4.1.2-*.jar", "poi-ooxml-schemas-4.1.2-*.jar", "poi-scratchpad-4.1.2-*.jar",
+    "xmlbeans-3.1.0.jar", "commons-compress-1.21.jar", "commons-collections4-4.1.jar", "commons-math3-3.3.jar",
+    "commons-codec-1.15.jar"
+  ],
+  "studio_libs_why": "jGenerateCalendar reads Excel (tFileInputExcel); its pom names POI and its dependencies, which temp/lib does not hold. curvesapi 1.06 and SparseBitSet 1.2 are also named and are not in the Studio install: added only if a class is missing",
+  "schemas": ["VENTE_ODS", "VENTE_DWH", "PARAMS_LOG"]
+}

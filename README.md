@@ -114,7 +114,14 @@ ekos-lakehouse lakehouse talend scan     # Talend projects under the sources (EK
 ekos-lakehouse lakehouse talend translate <project>   # silver + gold dbt models (and snapshots) on a proposal branch
 ekos-lakehouse lakehouse talend translate <project> --locale fr_FR   # the JVM locale: week numbers, month names
 ekos-lakehouse lakehouse talend translate <project> --faithful jLoad   # no pattern recognition for this job
+ekos-lakehouse lakehouse talend report --talend-project <project>   # the latest translation, for the console
+ekos-lakehouse lakehouse talend verify <project> --run <dir> --trino-url http://127.0.0.1:58110 --locale fr_FR
+                                         # compare the models with what the project's own jobs wrote
 ```
+
+`verify` reads a run of `scripts/talend-sandbox/run.sh`, which executes the project's built jobs only in an
+isolated virtual machine (no route out, reverted to a clean snapshot before and after). The jobs are third-party
+code, never run on a developer machine. See EKOS RFC 0268 phase 3 and `scripts/talend-sandbox/fixture-b.json`.
 
 A gold mart starts as a committed description:
 

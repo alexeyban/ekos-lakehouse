@@ -9,6 +9,7 @@
 
 pub mod gates;
 pub mod patterns;
+pub mod verify;
 
 pub use ekos_lakehouse_talend_rel::Locale;
 pub mod proposal;
@@ -121,6 +122,13 @@ pub struct ModelReport {
     pub components: Vec<String>,
     /// Why the model is disabled.
     pub gaps: Vec<String>,
+    /// Target columns set from the clock (`Now`, `Today`; a snapshot's version bounds): a run's
+    /// time, which a differential run leaves out of the comparison (RFC 0268 phase 3).
+    #[serde(default)]
+    pub clock: Vec<String>,
+    /// A key the database assigns (a `SERIAL`), given as dbt's own version id instead.
+    #[serde(default)]
+    pub surrogate: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +235,7 @@ struct Lowered {
 struct Part {
     job: String,
     component: String,
+    clock: Vec<String>,
     body: Result<String, Vec<String>>,
     fidelity: Fidelity,
     components: Vec<String>,
@@ -929,6 +938,13 @@ fn write_union(
         target: Some(u.table.table.clone()),
         components,
         gaps,
+        clock: {
+            let mut c: Vec<String> = u.parts.iter().flat_map(|p| p.clock.clone()).collect();
+            c.sort();
+            c.dedup();
+            c
+        },
+        surrogate: None,
     });
 }
 
@@ -1340,6 +1356,8 @@ fn translate_job(
             target: None,
             components: chain.iter().map(|i| ir.node(*i).step.clone()).collect(),
             gaps,
+            clock: Vec::new(),
+            surrogate: None,
         });
     }
 
@@ -1610,6 +1628,7 @@ fn translate_job(
             shared.unions[ui].parts.push(Part {
                 job: job.clone(),
                 component: n.step.clone(),
+                clock: clock_of(ir, &ids, &columns),
                 body: checked,
                 fidelity,
                 components,
@@ -1670,6 +1689,8 @@ fn translate_job(
             target: (!file).then(|| sink.target.table.clone()),
             components,
             gaps,
+            clock: clock_of(ir, &ids, &columns),
+            surrogate: None,
         });
     }
     // Statements: no model.
@@ -1798,6 +1819,36 @@ fn scoped(ir: &Ir, ids: &[NodeId]) -> Result<(), Gap> {
     Ok(())
 }
 
+/// The target columns of `columns` (`(stream, target)`) whose value is the clock: the stream traced
+/// back through the model's projections (a plain rename followed) to `Now` or `Today`.
+fn clock_of(ir: &Ir, ids: &[NodeId], columns: &[(String, String)]) -> Vec<String> {
+    use ekos_lakehouse_etl_expr::{Expr, Func};
+    let mut out = Vec::new();
+    for (stream, col) in columns {
+        let mut name = stream.clone();
+        for id in ids.iter().rev() {
+            let Op::Project { items } = &ir.node(*id).op else {
+                continue;
+            };
+            let Some((_, e)) = items.iter().find(|(n, _)| *n == name) else {
+                continue;
+            };
+            match e {
+                Expr::Call {
+                    func: Func::Now | Func::Today,
+                    args,
+                } if args.is_empty() => {
+                    out.push(col.clone());
+                    break;
+                }
+                Expr::Col { name: from } => name = from.clone(),
+                _ => break,
+            }
+        }
+    }
+    out
+}
+
 /// The model a self-reading source names until it is `{{ this }}`.
 const SELF_MARK: &str = "__ekos_self__";
 
@@ -1904,6 +1955,8 @@ fn write_snapshot(
         target: Some(m.table.to_string()),
         components: m.components.clone(),
         gaps: gaps.clone(),
+        clock: Vec::new(),
+        surrogate: None,
     });
     report.models.push(ModelReport {
         name: m.name.to_string(),
@@ -1917,6 +1970,8 @@ fn write_snapshot(
         target: Some(m.table.to_string()),
         components: m.components,
         gaps,
+        clock: sn.valid_from.iter().chain(&sn.valid_to).cloned().collect(),
+        surrogate: sn.surrogate.clone(),
     });
 }
 

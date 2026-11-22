@@ -14,6 +14,8 @@ ekos-lakehouse-etl-dbt.workspace = true
 ekos-lakehouse-etl-expr.workspace = true
 ekos-lakehouse-etl-rel.workspace = true
 ekos-lakehouse-talend-rel.workspace = true
+roxmltree.workspace = true
+zip.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlparser = { workspace = true, features = ["visitor"] }

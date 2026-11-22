@@ -1588,6 +1588,7 @@ dependencies = [
  "ekos-lakehouse-bronze",
  "ekos-lakehouse-changes",
  "ekos-lakehouse-etl-dbt",
+ "ekos-lakehouse-etl-expr",
  "ekos-lakehouse-gold",
  "ekos-lakehouse-health",
  "ekos-lakehouse-kettle",
@@ -1596,6 +1597,7 @@ dependencies = [
  "ekos-lakehouse-pentaho-dbt",
  "ekos-lakehouse-silver",
  "ekos-lakehouse-talend-dbt",
+ "ekos-lakehouse-talend-rel",
  "ekos-lakehouse-trino",
  "ekos-ledger",
  "ekos-migrate",
@@ -1719,9 +1721,11 @@ dependencies = [
  "ekos-lakehouse-etl-rel",
  "ekos-lakehouse-talend-rel",
  "ekos-talend 1.6.1 (git+https://github.com/alexeyban/EKOS?rev=859708c427cff150495084de8fdf7cbb43a53af5)",
+ "roxmltree",
  "serde",
  "serde_json",
  "sqlparser",
+ "zip",
 ]
 
 [[package]]

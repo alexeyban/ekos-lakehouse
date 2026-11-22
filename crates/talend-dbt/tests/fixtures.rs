@@ -432,6 +432,15 @@ fn fixture_b_patterns_are_recognised_refused_by_name_or_turned_off() {
             .any(|m| m.name == "talend__dwh__jdwhvente__tdboutput_2")
     );
     assert!(by("talend__dwh__jgeneratecalendar__tdboutput_1").enabled);
+    // Each listed input is its own source, named by its tFileList's mask (RFC 0268 phase 3).
+    let masks: Vec<&str> = r.files.iter().map(|(_, f)| f.as_str()).collect();
+    for m in [
+        "ICOM_*_TYPE_CLIENT.csv",
+        "ICOM_*_CUSTOMER.csv",
+        "ICOM_*_VENTE.csv",
+    ] {
+        assert!(masks.contains(&m), "{masks:?}");
+    }
     // --faithful: phase 1's shape, one model per output.
     let f = run(true);
     assert!(

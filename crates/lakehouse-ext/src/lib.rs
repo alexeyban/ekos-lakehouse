@@ -543,6 +543,16 @@ impl EkosExtension for LakehouseExtension {
                                 .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
                         )
                         .subcommand(
+                            clap::Command::new("verify")
+                                .about("Compare the models' first build with what the project's own jobs wrote in the sandbox (EKOS RFC 0268 phase 3)")
+                                .arg(clap::Arg::new("talend-project").value_name("PROJECT").required(true).help("The Talend project's name"))
+                                .arg(clap::Arg::new("run").long("run").value_name("DIR").required(true).value_parser(clap::value_parser!(std::path::PathBuf)).help("The sandbox runner's output directory (scripts/talend-sandbox/run.sh)"))
+                                .arg(clap::Arg::new("trino-url").long("trino-url").value_name("URL").required(true).help("A Trino used only for this: the files and models go into its memory catalog, and are dropped after"))
+                                .arg(clap::Arg::new("faithful").long("faithful").value_name("JOB").action(clap::ArgAction::Append).help("As for translate"))
+                                .arg(clap::Arg::new("locale").long("locale").value_name("TAG").help("As for translate"))
+                                .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
+                        )
+                        .subcommand(
                             clap::Command::new("report")
                                 .about("The latest translation of each Talend project: models, patterns, questions, components (EKOS RFC 0268)")
                                 .arg(clap::Arg::new("talend-project").long("talend-project").value_name("PROJECT").help("One project"))
@@ -1352,6 +1362,8 @@ impl EkosExtension for LakehouseExtension {
             // EKOS RFC 0268: reads the project's own source files (redacted), nothing else.
             ("lakehouse talend scan", Class::Read, false),
             ("lakehouse talend report", Class::Read, false),
+            // Reaches a Trino and reads a sandbox run's output.
+            ("lakehouse talend verify", Class::External, false),
             // Reads the source files and the deployed plan, plans on Trino, branches the
             // repository. No model call.
             ("lakehouse talend translate", Class::External, false),
@@ -1739,6 +1751,34 @@ impl EkosExtension for LakehouseExtension {
                 let settings = settings::load_with(ctx.config, engines)?;
                 match p.subcommand() {
                     Some(("scan", m)) => talend_cmd::scan(ctx, m.get_flag("json")),
+                    Some(("verify", m)) => {
+                        let o = talend_cmd::VerifyOptions {
+                            project: m
+                                .get_one::<String>("talend-project")
+                                .expect("required")
+                                .clone(),
+                            run: ctx
+                                .invoked_from
+                                .join(m.get_one::<std::path::PathBuf>("run").expect("required")),
+                            trino_url: m.get_one::<String>("trino-url").expect("required").clone(),
+                            faithful: m
+                                .get_many::<String>("faithful")
+                                .map(|v| {
+                                    v.map(|j| {
+                                        if j == "all" {
+                                            "*".to_string()
+                                        } else {
+                                            j.clone()
+                                        }
+                                    })
+                                    .collect()
+                                })
+                                .unwrap_or_default(),
+                            locale: m.get_one::<String>("locale").cloned(),
+                            json: m.get_flag("json"),
+                        };
+                        tokio::task::block_in_place(|| talend_cmd::verify(&settings, ctx, &o))
+                    }
                     Some(("report", m)) => {
                         let v = talend_cmd::report_json(
                             &talend_cmd::state_dir(ctx),

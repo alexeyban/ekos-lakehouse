@@ -352,6 +352,540 @@ pub fn report_json(
     Ok(out)
 }
 
+/// Options of `lakehouse talend verify`.
+pub struct VerifyOptions {
+    pub project: String,
+    /// The runner's output directory (`scripts/talend-sandbox/run.sh`).
+    pub run: PathBuf,
+    /// A Trino used only for this: its `memory` catalog holds the landed files and the models.
+    pub trino_url: String,
+    pub faithful: std::collections::BTreeSet<String>,
+    pub locale: Option<String>,
+    pub json: bool,
+}
+
+/// A value from Trino as text (`None` for null).
+fn trino_text(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn sql_str(v: &str) -> String {
+    format!("'{}'", v.replace('\'', "''"))
+}
+
+/// `name='value'` in a model's config line.
+fn config_value(sql: &str, name: &str) -> Option<String> {
+    let at = sql.find(&format!("{name}="))? + name.len() + 1;
+    let rest = &sql[at..];
+    if let Some(r) = rest.strip_prefix('\'') {
+        return Some(r[..r.find('\'')?].to_string());
+    }
+    let r = rest.strip_prefix('[')?;
+    Some(r[..r.find(']')?].to_string())
+}
+
+/// `lakehouse talend verify <project> --run <dir>`: EKOS RFC 0268 phase 3's comparison. The models'
+/// first build, on the same input as the sandbox run, against the tables the jobs wrote.
+pub fn verify(
+    settings: &Settings,
+    ctx: &CommandContext<'_>,
+    o: &VerifyOptions,
+) -> anyhow::Result<()> {
+    use ekos_lakehouse_talend_dbt::verify as v;
+    let all = projects(ctx);
+    let Some(dir) = all.iter().find(|p| p.name == o.project) else {
+        anyhow::bail!("no Talend project `{}`", o.project);
+    };
+    let out_dir = o.run.join("out");
+    let manifest: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(out_dir.join("manifest.json"))?.trim_start_matches('\u{feff}'),
+    )?;
+    let plan_doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(o.run.join("plan.json"))?)?;
+    let locale = match o.locale.as_deref() {
+        None => None,
+        Some(tag) => Some(
+            ekos_lakehouse_talend_dbt::Locale::parse(tag)
+                .ok_or_else(|| anyhow::anyhow!("unknown locale `{tag}`"))?,
+        ),
+    };
+    let project = read_dir(&dir.path, &ctx.config.redaction_config());
+    let s = ekos_lakehouse_talend_dbt::Settings {
+        project: o.project.clone(),
+        source_database: settings.source_database.clone(),
+        faithful: o.faithful.clone(),
+        locale,
+    };
+    // An empty plan: a model reading a lakehouse table is not verified, by name.
+    let plan = ekos_lakehouse_bronze::plan::plan(&[], &Default::default());
+    let options = ekos_lakehouse_talend_rel::Options { locale };
+    let (t, specs) = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn_scoped(scope, || {
+                (
+                    ekos_lakehouse_talend_dbt::translate(&project, &plan, &s),
+                    v::file_specs(&project, &options),
+                )
+            })
+            .map(|h| h.join())
+    })
+    .map_err(|e| anyhow::anyhow!("cannot start the translation: {e}"))?
+    .map_err(|_| anyhow::anyhow!("the translation failed"))?;
+
+    let client = ekos_lakehouse_trino::Client::new(ekos_lakehouse_trino::Connection {
+        base_url: o.trino_url.clone(),
+        user: "ekos".into(),
+        catalog: None,
+        schema: None,
+    })?;
+    let id = &sha256(&format!("{}{:?}", o.project, std::time::SystemTime::now()))[..8];
+    let schema = |s: &str| format!("\"memory\".\"v{id}_{s}\"");
+    let exec = |sql: &str| client.execute(sql).map_err(|e| e.to_string());
+    let mut created: Vec<String> = Vec::new();
+    for sc in [
+        "talend_files",
+        "silver_talend",
+        "gold_talend",
+        "snapshots_talend",
+    ] {
+        exec(&format!("CREATE SCHEMA {}", schema(sc)))
+            .map_err(|e| anyhow::anyhow!("Trino: {e}"))?;
+        created.push(schema(sc));
+    }
+    let prefix = format!("v{id}_");
+    let result = verify_in(
+        &t, &specs, &manifest, &plan_doc, &o.run, &out_dir, &plan, &exec, &schema, &prefix,
+    );
+    // Everything this verification made goes, whatever happened.
+    for sc in &created {
+        if let Ok(r) = client.execute(&format!("SHOW TABLES FROM {sc}")) {
+            for row in r.rows {
+                if let Some(tname) = row.first().and_then(|x| x.as_str()) {
+                    let _ = client.execute(&format!("DROP TABLE {sc}.\"{tname}\""));
+                }
+            }
+        }
+        let _ = client.execute(&format!("DROP SCHEMA {sc}"));
+    }
+    let report = result?;
+    let pkg = ekos_lakehouse_etl_dbt::slug(&o.project);
+    let dir_state = state_dir(ctx);
+    std::fs::create_dir_all(&dir_state)?;
+    std::fs::write(
+        dir_state.join(format!("{pkg}.verification.json")),
+        serde_json::to_string_pretty(&report)? + "\n",
+    )?;
+    if o.json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        for c in report["models"].as_array().into_iter().flatten() {
+            println!(
+                "{:<12} {} → {}{}",
+                c["result"].as_str().unwrap_or_default(),
+                c["model"].as_str().unwrap_or_default(),
+                c["table"].as_str().unwrap_or_default(),
+                c["reason"]
+                    .as_str()
+                    .map(|r| format!(": {r}"))
+                    .unwrap_or_default()
+            );
+        }
+        println!("{}", report["summary"]);
+    }
+    Ok(())
+}
+
+/// A table as read: its header and rows.
+type Table = (Vec<String>, Vec<Vec<Option<String>>>);
+
+/// Lands, builds and compares; returns the report.
+#[allow(clippy::too_many_arguments)]
+fn verify_in(
+    t: &ekos_lakehouse_talend_dbt::Translation,
+    specs: &[ekos_lakehouse_talend_dbt::verify::FileSpec],
+    manifest: &serde_json::Value,
+    plan_doc: &serde_json::Value,
+    run: &Path,
+    out_dir: &Path,
+    plan: &ekos_lakehouse_bronze::plan::Plan,
+    exec: &dyn Fn(&str) -> Result<ekos_lakehouse_trino::QueryResult, String>,
+    schema: &dyn Fn(&str) -> String,
+    prefix: &str,
+) -> anyhow::Result<serde_json::Value> {
+    use ekos_lakehouse_talend_dbt::Layer;
+    use ekos_lakehouse_talend_dbt::verify as v;
+    let mut landed: Vec<serde_json::Value> = Vec::new();
+    // 1. Land each file source from the run's inputs, as its component reads them.
+    let inputs: Vec<(PathBuf, String)> = plan_doc["inputs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .zip(
+            manifest["sandbox_settings"]["inputs"]
+                .as_array()
+                .into_iter()
+                .flatten(),
+        )
+        .map(|(p, m)| {
+            (
+                run.join("inputs")
+                    .join(p["from"].as_str().unwrap_or_default()),
+                m["to"].as_str().unwrap_or_default().replace('/', "\\"),
+            )
+        })
+        .collect();
+    for (name, file) in &t.report.files {
+        let Some(spec) = specs.iter().find(|s| &s.file == file) else {
+            landed.push(
+                json!({"source": name, "landed": false, "reason": "no file component reads it"}),
+            );
+            continue;
+        };
+        let mut rows = Vec::new();
+        let mut matched = Vec::new();
+        for (from, to) in &inputs {
+            let candidates: Vec<PathBuf> = if from.is_dir() {
+                std::fs::read_dir(from)?
+                    .flatten()
+                    .map(|e| e.path())
+                    .collect()
+            } else {
+                vec![from.clone()]
+            };
+            for f in candidates {
+                let fname = f
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let hit = if file.contains('*') || file.contains('?') {
+                    v::mask_matches(file, &fname)
+                } else {
+                    file.rsplit(['/', '\\']).next() == Some(fname.as_str())
+                };
+                if !hit {
+                    continue;
+                }
+                // `$path` as the job saw it: the VM's absolute path (Java's `getAbsolutePath`).
+                let vm_path = format!("{to}\\{fname}");
+                rows.extend(
+                    v::parse_file(&std::fs::read(&f)?, spec, &vm_path)
+                        .map_err(|e| anyhow::anyhow!(e))?,
+                );
+                matched.push(fname);
+            }
+        }
+        let cols: Vec<String> = spec
+            .columns
+            .iter()
+            .map(|(c, ty)| format!("{} {}", q(c), trino_type_name(*ty)))
+            .collect();
+        let target = format!("{}.{}", schema("talend_files"), q(name));
+        exec(&format!("CREATE TABLE {target} ({})", cols.join(", ")))
+            .map_err(|e| anyhow::anyhow!("Trino: {e}"))?;
+        for chunk in rows.chunks(200) {
+            let values: Vec<String> = chunk
+                .iter()
+                .map(|r| {
+                    let vals: Vec<String> = r
+                        .iter()
+                        .zip(&spec.columns)
+                        .map(|(x, (_, ty))| match x {
+                            None => format!("CAST(NULL AS {})", trino_type_name(*ty)),
+                            Some(s) => format!(
+                                "CAST({} AS {})",
+                                sql_str(s.trim_end()),
+                                trino_type_name(*ty)
+                            ),
+                        })
+                        .collect();
+                    format!("({})", vals.join(", "))
+                })
+                .collect();
+            exec(&format!(
+                "INSERT INTO {target} VALUES {}",
+                values.join(", ")
+            ))
+            .map_err(|e| anyhow::anyhow!("Trino, landing {name}: {e}"))?;
+        }
+        landed.push(json!({"source": name, "file": file, "component": format!("{}:{}", spec.job, spec.component), "files": matched, "rows": rows.len(), "landed": true}));
+    }
+
+    // 2. Build every enabled model's first version, in ref order.
+    let alias_of = |m: &ekos_lakehouse_talend_dbt::ModelReport| -> (String, String) {
+        let sql = t.files.get(&m.path).map(String::as_str).unwrap_or_default();
+        match m.layer {
+            Layer::Silver => (
+                "silver_talend".into(),
+                config_value(sql, "alias").unwrap_or(m.name.clone()),
+            ),
+            Layer::Gold => (
+                "gold_talend".into(),
+                config_value(sql, "alias").unwrap_or(m.name.clone()),
+            ),
+            Layer::Snapshot => ("snapshots_talend".into(), m.name.clone()),
+        }
+    };
+    let locations: std::collections::BTreeMap<String, (String, String)> = t
+        .report
+        .models
+        .iter()
+        .map(|m| (m.name.clone(), alias_of(m)))
+        .collect();
+    let refs = |sql: &str| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = sql;
+        while let Some(i) = rest.find("{{ ref('") {
+            let after = &rest[i + 8..];
+            let Some(j) = after.find("') }}") else { break };
+            out.push(after[..j].to_string());
+            rest = &after[j..];
+        }
+        out
+    };
+    let mut built: std::collections::BTreeSet<String> = Default::default();
+    let mut failed: std::collections::BTreeMap<String, String> = Default::default();
+    let pending: Vec<&ekos_lakehouse_talend_dbt::ModelReport> =
+        t.report.models.iter().filter(|m| m.enabled).collect();
+    loop {
+        let mut progress = false;
+        for m in &pending {
+            if built.contains(&m.name) || failed.contains_key(&m.name) {
+                continue;
+            }
+            let sql = t.files.get(&m.path).cloned().unwrap_or_default();
+            let deps = refs(&sql);
+            if let Some(d) = deps.iter().find(|d| failed.contains_key(*d)) {
+                failed.insert(m.name.clone(), format!("reads `{d}`, which did not build"));
+                progress = true;
+                continue;
+            }
+            if !deps.iter().all(|d| built.contains(d)) {
+                continue;
+            }
+            let body = ekos_lakehouse_etl_dbt::engine_sql(
+                &ekos_lakehouse_talend_dbt::gates::sources_as_tables(&sql),
+                &locations,
+                plan,
+            )
+            .replace(
+                "\"talend_files\".\"",
+                &format!("{}.\"", schema("talend_files")),
+            )
+            .replace("\"iceberg\".\"", &format!("\"memory\".\"{prefix}"));
+            let body = if m.layer == Layer::Snapshot {
+                // dbt's first version: from now, open, with a version id over the key and its start.
+                let key: Vec<String> = config_value(&sql, "unique_key")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|k| format!("CAST(b.{} AS varchar)", q(k.trim().trim_matches('\''))))
+                    .collect();
+                format!(
+                    "SELECT b.*, CAST(current_timestamp AS timestamp(6)) AS dbt_valid_from, CAST(NULL AS timestamp(6)) AS dbt_valid_to, to_hex(md5(to_utf8(concat_ws('|', {}, CAST(current_timestamp AS varchar))))) AS dbt_scd_id FROM (\n{body}\n) AS b",
+                    key.join(", ")
+                )
+            } else {
+                body
+            };
+            let (sc, alias) = &locations[&m.name];
+            match exec(&format!(
+                "CREATE TABLE {}.{} AS {body}",
+                schema(sc),
+                q(alias)
+            )) {
+                Ok(_) => {
+                    built.insert(m.name.clone());
+                }
+                Err(e) => {
+                    failed.insert(m.name.clone(), format!("Trino: {e}"));
+                }
+            }
+            progress = true;
+        }
+        if !progress {
+            break;
+        }
+    }
+
+    // 3. Compare each gold model that writes a table with the table the jobs left.
+    let last = std::fs::read_dir(out_dir.join("dumps"))?
+        .flatten()
+        .map(|e| e.path())
+        .max()
+        .ok_or_else(|| anyhow::anyhow!("the run has no dumps"))?;
+    let dumps: Vec<PathBuf> = std::fs::read_dir(&last)?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    let surrogates: std::collections::BTreeSet<String> = t
+        .report
+        .models
+        .iter()
+        .filter_map(|m| m.surrogate.as_ref().map(|s| s.to_lowercase()))
+        .collect();
+    let jobs_ran: std::collections::BTreeMap<String, bool> = manifest["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|j| {
+            (
+                j["job"].as_str().unwrap_or_default().to_string(),
+                j["exit"] == json!(0),
+            )
+        })
+        .collect();
+    let mut checks: Vec<v::ModelCheck> = Vec::new();
+    // The first model compared equal: its columns, and each side's header and rows.
+    let mut control_rows: Option<(Vec<String>, Table, Table)> = None;
+    for m in t
+        .report
+        .models
+        .iter()
+        .filter(|m| m.layer == Layer::Gold && m.target.is_some())
+    {
+        let table = m.target.clone().unwrap_or_default();
+        let not = |reason: String| v::ModelCheck {
+            model: m.name.clone(),
+            table: table.clone(),
+            columns: vec![],
+            excluded: vec![],
+            outcome: v::Outcome::NotVerified { reason },
+        };
+        if !m.enabled {
+            checks.push(not(format!(
+                "disabled: {}",
+                m.gaps.first().cloned().unwrap_or_default()
+            )));
+            continue;
+        }
+        if let Some(why) = failed.get(&m.name) {
+            checks.push(not(why.clone()));
+            continue;
+        }
+        let jobs: Vec<&str> = m.job.split(", ").collect();
+        if let Some(j) = jobs
+            .iter()
+            .find(|j| !jobs_ran.get(**j).copied().unwrap_or(false))
+        {
+            checks.push(not(format!(
+                "the job {j} did not run to its end in the sandbox"
+            )));
+            continue;
+        }
+        let Some(dump) = dumps.iter().find(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.to_lowercase()
+                    .ends_with(&format!(".{}.csv", table.to_lowercase()))
+            })
+        }) else {
+            checks.push(not(format!("the run dumped no table `{table}`")));
+            continue;
+        };
+        let (th, trows) = v::parse_pg_csv(&std::fs::read_to_string(dump)?);
+        let (sc, alias) = &locations[&m.name];
+        let r = exec(&format!("SELECT * FROM {}.{}", schema(sc), q(alias)))
+            .map_err(|e| anyhow::anyhow!("Trino: {e}"))?;
+        let dh: Vec<String> = r.columns.iter().map(|c| c.name.clone()).collect();
+        let drows: Vec<Vec<Option<String>>> = r
+            .rows
+            .iter()
+            .map(|row| row.iter().map(trino_text).collect())
+            .collect();
+        let (cols, excluded) = v::columns_to_compare(&th, &dh, &m.clock, &surrogates);
+        let outcome = v::compare(&cols, (&th, &trows), (&dh, &drows))
+            .unwrap_or_else(|e| v::Outcome::NotVerified { reason: e });
+        if control_rows.is_none() && matches!(outcome, v::Outcome::Equal { rows } if rows > 0) {
+            control_rows = Some((
+                cols.clone(),
+                (th.clone(), trows.clone()),
+                (dh.clone(), drows.clone()),
+            ));
+        }
+        checks.push(v::ModelCheck {
+            model: m.name.clone(),
+            table,
+            columns: cols,
+            excluded,
+            outcome,
+        });
+    }
+    // 4. The comparer's control: one dbt row removed must be found.
+    let control = match &control_rows {
+        Some((cols, (th, trows), (dh, drows))) => {
+            let found = matches!(
+                v::compare(cols, (th, trows), (dh, &drows[1..])),
+                Ok(v::Outcome::Differs {
+                    only_talend_count: 1,
+                    ..
+                })
+            );
+            json!({"ran": true, "found_the_planted_difference": found})
+        }
+        None => {
+            json!({"ran": false, "why": "no model compared equal with rows to plant a difference in"})
+        }
+    };
+    let count = |r: &str| {
+        checks
+            .iter()
+            .filter(|c| {
+                serde_json::to_value(&c.outcome)
+                    .ok()
+                    .and_then(|v| v["result"].as_str().map(|s| s == r))
+                    .unwrap_or(false)
+            })
+            .count()
+    };
+    let summary = format!(
+        "{} equal, {} differ, {} not verified; {} models built, {} failed to build; comparer control: {}",
+        count("equal"),
+        count("differs"),
+        count("not_verified"),
+        built.len(),
+        failed.len(),
+        if control["found_the_planted_difference"] == json!(true) {
+            "passed"
+        } else if control["ran"] == json!(true) {
+            "FAILED: the result is not trusted"
+        } else {
+            "not run"
+        }
+    );
+    Ok(json!({
+        "project": t.report.project,
+        "run": run.display().to_string(),
+        "run_day": manifest["run_day"],
+        "scope": "one Talend run from empty tables against each model's first build; incremental runs are not compared",
+        "landed": landed,
+        "build_failures": failed,
+        "models": checks,
+        "control": control,
+        "summary": summary,
+    }))
+}
+
+fn q(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+fn trino_type_name(t: ekos_lakehouse_etl_expr::KType) -> &'static str {
+    use ekos_lakehouse_etl_expr::KType;
+    match t {
+        KType::Integer => "bigint",
+        KType::Number => "double",
+        KType::BigNumber => "decimal(38,10)",
+        KType::Timestamp => "timestamp(6)",
+        KType::Date => "date",
+        KType::Boolean => "boolean",
+        _ => "varchar",
+    }
+}
+
 /// `lakehouse talend translate <project>`.
 pub async fn translate(
     settings: &Settings,
