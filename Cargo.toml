@@ -10,11 +10,13 @@ members = [
     "crates/health",
     "crates/etl-expr",
     "crates/etl-rel",
+    "crates/etl-dbt",
     "crates/kettle",
     "crates/kettle-expr",
     "crates/kettle-rel",
     "crates/pentaho-dbt",
     "crates/talend-rel",
+    "crates/talend-dbt",
     "crates/silver",
     "crates/trino",
     "crates/lakehouse-ext",
@@ -58,11 +60,13 @@ ekos-lakehouse-gold    = { path = "crates/gold" }
 ekos-lakehouse-health  = { path = "crates/health" }
 ekos-lakehouse-etl-expr = { path = "crates/etl-expr" }
 ekos-lakehouse-etl-rel  = { path = "crates/etl-rel" }
+ekos-lakehouse-etl-dbt  = { path = "crates/etl-dbt" }
 ekos-lakehouse-kettle  = { path = "crates/kettle" }
 ekos-lakehouse-kettle-expr = { path = "crates/kettle-expr" }
 ekos-lakehouse-kettle-rel  = { path = "crates/kettle-rel" }
 ekos-lakehouse-pentaho-dbt = { path = "crates/pentaho-dbt" }
 ekos-lakehouse-talend-rel  = { path = "crates/talend-rel" }
+ekos-lakehouse-talend-dbt  = { path = "crates/talend-dbt" }
 
 # ── Third party (versions match the EKOS workspace) ──
 anyhow      = "1"

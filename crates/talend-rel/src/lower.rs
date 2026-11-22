@@ -188,6 +188,9 @@ fn schema(c: &Component, name: &str) -> Vec<Field> {
     .unwrap_or_default()
 }
 
+/// The landed table's column naming the file each row came from.
+const PATH: &str = "$path";
+
 /// The row number a tUniqRow's duplicates output is computed from.
 const DUP_ROW: &str = "__talend_row_in_key";
 
@@ -410,6 +413,34 @@ impl Builder<'_> {
         }
     }
 
+    /// The database connection a component reads or writes through: its engine, and the folded
+    /// `DBNAME` and `SCHEMA_DB`, from the component or the `tDBConnection` its `CONNECTION` names
+    /// (EKOS RFC 0268). No host, user or password is ever read.
+    fn connection(&self, c: &Component) -> Option<ekos_lakehouse_etl_rel::Connection> {
+        let shared = param(c, "CONNECTION").and_then(|n| self.job.component(n));
+        let engine = c
+            .engine
+            .clone()
+            .or_else(|| shared.and_then(|s| s.engine.clone()))?;
+        let folded = |name: &str| {
+            param(c, name)
+                .or_else(|| shared.and_then(|s| param(s, name)))
+                .map(|v| self.job.fold(v))
+                .filter(|f| f.complete() && !f.text.is_empty())
+                .map(|f| f.text)
+        };
+        Some(ekos_lakehouse_etl_rel::Connection {
+            name: shared.map_or_else(|| c.unique_name.clone(), |s| s.unique_name.clone()),
+            db_type: engine.to_ascii_uppercase(),
+            access: String::new(),
+            host: None,
+            database: folded("DBNAME"),
+            port: None,
+            username: None,
+            schema: folded("SCHEMA_DB"),
+        })
+    }
+
     fn table_ref(&self, c: &Component, table_param: &str, schema_param: &str) -> Option<TableRef> {
         let table = self.job.fold(param(c, table_param)?).text;
         let schema = param(c, schema_param)
@@ -422,7 +453,7 @@ impl Builder<'_> {
             .filter(|f| f.complete() && !f.text.is_empty())
             .map(|f| f.text);
         (!table.is_empty()).then_some(TableRef {
-            connection: None,
+            connection: self.connection(c),
             schema,
             table,
         })
@@ -531,7 +562,14 @@ impl Builder<'_> {
     }
 
     fn file_input(&mut self, c: &Component) {
-        let fields = schema(c, "");
+        let mut fields = schema(c, "");
+        // A file a `tFileList` names (`globalMap.get("…_CURRENT_FILEPATH")`): the landed table's
+        // `$path` says which file each row came from (RFC 0267 §globalMap keys).
+        if param(c, "FILENAME").is_some_and(|f| f.contains("globalMap"))
+            && !fields.iter().any(|f| f.name == PATH)
+        {
+            fields.push(Field::new(PATH, KType::String));
+        }
         let file = param(c, "FILENAME")
             .map(|f| self.job.fold(f).text)
             .unwrap_or_default();
@@ -1641,7 +1679,24 @@ impl Builder<'_> {
         };
         let var = |v: &str| vars.iter().find(|(n, _)| n == v).map(|(_, e)| e.clone());
         let context = context_of(self.job);
-        let global = global_of(self.job);
+        let plain_global = global_of(self.job);
+        // In the combined row, `$path` is the main input's: `<input>__$path`.
+        let path_field = fields
+            .iter()
+            .find(|f| f.name == qualified(&names[0], PATH))
+            .map(|f| f.name.clone());
+        let global = |key: &str| {
+            plain_global(key).map(|(e, t, note)| {
+                let e = e.map_columns(&|c| {
+                    if c == PATH {
+                        Expr::col(path_field.as_deref().unwrap_or(PATH))
+                    } else {
+                        Expr::col(c)
+                    }
+                });
+                (e, t, note)
+            })
+        };
         let known: Vec<String> = early.iter().chain(&late).map(|(n, _)| n.clone()).collect();
         let sequence = |name: &str| {
             known

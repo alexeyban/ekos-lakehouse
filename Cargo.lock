@@ -1542,6 +1542,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekos-lakehouse-etl-dbt"
+version = "0.1.1"
+dependencies = [
+ "ekos-lakehouse-bronze",
+ "ekos-lakehouse-etl-expr",
+ "ekos-lakehouse-etl-rel",
+ "ekos-lakehouse-silver",
+ "ekos-plugin-sql-dialect-trino",
+ "ekos-sql-dialect-sdk",
+ "sqlparser",
+]
+
+[[package]]
 name = "ekos-lakehouse-etl-expr"
 version = "0.1.1"
 dependencies = [
@@ -1572,6 +1585,7 @@ dependencies = [
  "ekos-kir",
  "ekos-lakehouse-bronze",
  "ekos-lakehouse-changes",
+ "ekos-lakehouse-etl-dbt",
  "ekos-lakehouse-gold",
  "ekos-lakehouse-health",
  "ekos-lakehouse-kettle",
@@ -1579,6 +1593,7 @@ dependencies = [
  "ekos-lakehouse-kettle-rel",
  "ekos-lakehouse-pentaho-dbt",
  "ekos-lakehouse-silver",
+ "ekos-lakehouse-talend-dbt",
  "ekos-lakehouse-trino",
  "ekos-ledger",
  "ekos-migrate",
@@ -1589,6 +1604,7 @@ dependencies = [
  "ekos-recovery",
  "ekos-semantic",
  "ekos-sql-dialect-sdk",
+ "ekos-talend",
  "postgres",
  "reqwest",
  "serde",
@@ -1667,6 +1683,7 @@ name = "ekos-lakehouse-pentaho-dbt"
 version = "0.1.1"
 dependencies = [
  "ekos-lakehouse-bronze",
+ "ekos-lakehouse-etl-dbt",
  "ekos-lakehouse-etl-rel",
  "ekos-lakehouse-kettle",
  "ekos-lakehouse-kettle-expr",
@@ -1688,6 +1705,21 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+]
+
+[[package]]
+name = "ekos-lakehouse-talend-dbt"
+version = "0.1.1"
+dependencies = [
+ "ekos-lakehouse-bronze",
+ "ekos-lakehouse-etl-dbt",
+ "ekos-lakehouse-etl-expr",
+ "ekos-lakehouse-etl-rel",
+ "ekos-lakehouse-talend-rel",
+ "ekos-talend",
+ "serde",
+ "serde_json",
+ "sqlparser",
 ]
 
 [[package]]

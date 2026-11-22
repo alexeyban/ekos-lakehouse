@@ -228,10 +228,11 @@ pub fn is_pentaho_path(path: &str) -> bool {
         || path.contains("/pentaho/")
 }
 
-fn owned_by(path: &str, pkg: &str) -> bool {
-    path.starts_with(&format!("pentaho/{pkg}/"))
-        || path == format!("proposals/pentaho-{pkg}.md")
-        || path.contains(&format!("/pentaho/{pkg}/"))
+/// Whether `path` belongs to `tool`'s translation of `pkg` (`pentaho`, `talend`).
+fn owned_by(path: &str, tool: &str, pkg: &str) -> bool {
+    path.starts_with(&format!("{tool}/{pkg}/"))
+        || path == format!("proposals/{tool}-{pkg}.md")
+        || path.contains(&format!("/{tool}/{pkg}/"))
 }
 
 /// What writing a translation did.
@@ -247,6 +248,16 @@ pub struct WriteOutcome {
 /// edited is kept, a file this package no longer produces is removed when unedited.
 pub fn write_translation(
     out: &Path,
+    pkg: &str,
+    files: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<WriteOutcome> {
+    write_translation_of(out, "pentaho", pkg, files)
+}
+
+/// [`write_translation`] for `tool`'s files (EKOS RFC 0268: `talend`).
+pub fn write_translation_of(
+    out: &Path,
+    tool: &str,
     pkg: &str,
     files: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<WriteOutcome> {
@@ -270,7 +281,7 @@ pub fn write_translation(
     }
     let stale: Vec<String> = manifest
         .keys()
-        .filter(|p| owned_by(p, pkg) && !files.contains_key(*p))
+        .filter(|p| owned_by(p, tool, pkg) && !files.contains_key(*p))
         .cloned()
         .collect();
     for path in stale {

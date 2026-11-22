@@ -110,6 +110,8 @@ ekos-lakehouse lakehouse gold draft marts/revenue.md   # a mart from a descripti
 ekos-lakehouse lakehouse pentaho scan    # Kettle packages: transformations, jobs, steps, links
 ekos-lakehouse lakehouse pentaho translate etl   # silver + gold dbt models on a proposal branch
 ekos-lakehouse lakehouse pentaho report --package etl   # per model and step: fidelity, gaps, SQL
+ekos-lakehouse lakehouse talend scan     # Talend projects under the sources (EKOS RFC 0268)
+ekos-lakehouse lakehouse talend translate <project>   # silver + gold dbt models on a proposal branch
 ```
 
 A gold mart starts as a committed description:

@@ -1,4 +1,4 @@
-//! RFC 0266: the engine-neutral crates depend on no tool's crate — Kettle's, Pentaho's or, later,
+//! RFC 0266 (and 0268, for `etl-dbt`): the engine-neutral crates depend on no tool's crate — Kettle's, Pentaho's or, later,
 //! Talend's — so a fix made there serves every translator.
 
 fn dependencies(manifest: &str) -> Vec<String> {
@@ -24,6 +24,7 @@ fn the_neutral_crates_depend_on_no_tool() {
     for manifest in [
         format!("{root}/Cargo.toml"),
         format!("{root}/../etl-expr/Cargo.toml"),
+        format!("{root}/../etl-dbt/Cargo.toml"),
     ] {
         for dep in dependencies(&manifest) {
             assert!(

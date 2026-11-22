@@ -1,0 +1,21 @@
+[package]
+name = "ekos-lakehouse-talend-dbt"
+description = "Talend jobs to a dbt project for the lakehouse: layout, idioms by data action, gates, report (EKOS RFC 0268). Pure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ekos-talend.workspace = true
+ekos-lakehouse-bronze.workspace = true
+ekos-lakehouse-etl-dbt.workspace = true
+ekos-lakehouse-etl-expr.workspace = true
+ekos-lakehouse-etl-rel.workspace = true
+ekos-lakehouse-talend-rel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlparser = { workspace = true, features = ["visitor"] }
+
+[dev-dependencies]

@@ -38,6 +38,7 @@ pub mod source;
 pub mod source_oracle;
 pub mod spec;
 pub mod sync;
+pub mod talend_cmd;
 pub mod workflow;
 pub mod writer_warnings;
 
@@ -495,6 +496,37 @@ impl EkosExtension for LakehouseExtension {
                                         .value_parser(clap::value_parser!(std::path::PathBuf))
                                         .help("A JSON request: measures, dimensions, filters (terms, never SQL)"),
                                 )
+                                .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("talend")
+                        .about("Talend projects into silver and gold dbt models (EKOS RFC 0268)")
+                        .subcommand_required(true)
+                        .subcommand(
+                            clap::Command::new("translate")
+                                .about(
+                                    "Translate a Talend project into silver and gold dbt models and \
+                                     propose them on a branch (EKOS RFC 0268); Trino plans every model first",
+                                )
+                                .arg(clap::Arg::new("talend-project").value_name("PROJECT").required(true).help("The Talend project's name (see `talend scan`)"))
+                                .arg(
+                                    clap::Arg::new("out")
+                                        .long("out")
+                                        .value_parser(clap::value_parser!(std::path::PathBuf))
+                                        .help("Write into this directory instead of proposing a branch"),
+                                )
+                                .arg(
+                                    clap::Arg::new("no-explain")
+                                        .long("no-explain")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Do not plan the models on Trino"),
+                                )
+                                .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
+                        )
+                        .subcommand(
+                            clap::Command::new("scan")
+                                .about("The Talend projects under the workspace's sources, with their jobs")
                                 .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
                         ),
                 )
@@ -1297,6 +1329,11 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse pentaho translate", Class::External, true),
             // Reads translation reports from the pipeline repository (files and branches).
             ("lakehouse pentaho report", Class::Read, false),
+            // EKOS RFC 0268: reads the project's own source files (redacted), nothing else.
+            ("lakehouse talend scan", Class::Read, false),
+            // Reads the source files and the deployed plan, plans on Trino, branches the
+            // repository. No model call.
+            ("lakehouse talend translate", Class::External, false),
         ]
     }
 
@@ -1676,6 +1713,28 @@ impl EkosExtension for LakehouseExtension {
                         .expect("required"),
                 );
                 gold_draft(ctx, &settings, &description).await
+            }
+            Some(("talend", p)) => {
+                let settings = settings::load_with(ctx.config, engines)?;
+                match p.subcommand() {
+                    Some(("scan", m)) => talend_cmd::scan(ctx, m.get_flag("json")),
+                    Some(("translate", m)) => {
+                        let o = talend_cmd::TranslateOptions {
+                            project: m
+                                .get_one::<String>("talend-project")
+                                .expect("required")
+                                .clone(),
+                            out: m
+                                .get_one::<std::path::PathBuf>("out")
+                                .map(|o| ctx.invoked_from.join(o)),
+                            explain: !m.get_flag("no-explain"),
+                            json: m.get_flag("json"),
+                        };
+                        let repo = pipeline_dir(&settings, ctx);
+                        talend_cmd::translate(&settings, ctx, &o, &repo).await
+                    }
+                    other => anyhow::bail!("unknown talend command {other:?}"),
+                }
             }
             Some(("pentaho", p)) => {
                 let settings = settings::load_with(ctx.config, engines)?;
