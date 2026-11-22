@@ -21,6 +21,8 @@ pub const NOTE_RUN_START: &str =
     "`TalendDate.getCurrentDate()` is the clock at each row; lowered to the run's start time";
 pub const NOTE_NPE: &str = "a method called on a null value stops the Talend job \
      (NullPointerException); the SQL yields null";
+pub const NOTE_PLATFORM_CHARSET: &str = "the routine reads the text's bytes in the platform's \
+     default charset; the translation hashes UTF-8 (the same for ASCII text)";
 pub const NOTE_MONTH_ZERO: &str =
     "`getPartOfDate(\"MONTH\", …)` is zero-based (January = 0), as Java's Calendar";
 
@@ -28,6 +30,8 @@ pub const NOTE_MONTH_ZERO: &str =
 pub type ColumnLookup<'a> = dyn Fn(&str, &str) -> Option<(Expr, KType)> + 'a;
 /// `context.<name>` → its default value (`None` when unset) and type.
 pub type ContextLookup<'a> = dyn Fn(&str) -> Option<(Option<String>, KType)> + 'a;
+/// `Numeric.sequence("<name>", …)` → the column that numbers the rows for it.
+pub type SequenceLookup<'a> = dyn Fn(&str) -> Option<Expr> + 'a;
 /// `globalMap.get("<key>")` → what it stands for, its type and the note that says how.
 pub type GlobalLookup<'a> = dyn Fn(&str) -> Option<(Expr, KType, String)> + 'a;
 
@@ -46,6 +50,12 @@ pub struct Scope<'a> {
     /// `globalMap.get("<key>")`: what the key stands for, and the note that says how, when the
     /// lowering knows (a `tSetGlobalVar` constant, a `tFileList`'s current file).
     pub global: &'a GlobalLookup<'a>,
+    /// The project's routines: a custom one whose body is a digest is lowered
+    /// ([`crate::routine::digest`]).
+    pub routines: &'a [ekos_talend::Routine],
+    /// `Numeric.sequence("<name>", …)`: the column numbering the rows, when the component
+    /// computed one (RFC 0267 phase 2 §Row order).
+    pub sequence: &'a SequenceLookup<'a>,
 }
 
 /// Talend's type id to a type (`id_String` → string, …); unknown ids are [`KType::Unknown`].
@@ -70,6 +80,19 @@ pub fn lower(src: &str, scope: &Scope<'_>) -> Result<(Lowered, KType), Gap> {
         depth: 0,
     };
     let (expr, ty) = l.lower(&e)?;
+    let mut out = l.out;
+    out.expr = expr;
+    Ok((out, ty))
+}
+
+/// Lowers one already parsed Java expression (a statement's right-hand side).
+pub fn lower_parsed(e: &JExpr, scope: &Scope<'_>) -> Result<(Lowered, KType), Gap> {
+    let mut l = Lowerer {
+        scope,
+        out: Lowered::exact(Expr::null()),
+        depth: 0,
+    };
+    let (expr, ty) = l.lower(e)?;
     let mut out = l.out;
     out.expr = expr;
     Ok((out, ty))
@@ -480,7 +503,40 @@ impl Lowerer<'_, '_> {
                 (Expr::cast(arg(0), KType::BigNumber), KType::BigNumber)
             }
             ("Numeric", "sequence", _) => {
+                if let Some(name) = literal(0)
+                    && let Some(col) = (self.scope.sequence)(&name)
+                {
+                    return Ok((col, KType::Integer));
+                }
                 return gap("Numeric.sequence depends on the order rows arrive in");
+            }
+            _ if n == 1
+                && let Some(d) = crate::routine::digest(self.scope.routines, class, name) =>
+            {
+                self.out.note(format!(
+                    "routine `{class}.{name}` is a digest in {} hex: lowered to the same digest; read the original",
+                    if d.upper { "upper-case" } else { "lower-case" }
+                ));
+                if !d.null_safe {
+                    self.out.note(NOTE_NPE);
+                }
+                if !d.utf8 {
+                    self.out.note(NOTE_PLATFORM_CHARSET);
+                }
+                let text = if a[0].1 == KType::String {
+                    arg(0)
+                } else {
+                    Expr::cast(arg(0), KType::String)
+                };
+                let hex = Expr::call(d.func, vec![text]);
+                (
+                    if d.upper {
+                        Expr::call(Func::Upper, vec![hex])
+                    } else {
+                        hex
+                    },
+                    KType::String,
+                )
             }
             _ => {
                 return gap(format!(
@@ -601,6 +657,53 @@ fn context_literal(v: &str, ty: KType) -> Expr {
     }
 }
 
+/// Every `Numeric.sequence(<name>, <start>, <step>)` call in a Java expression, once per call (each
+/// call takes the next number): the name, and the start and step when both are integer literals.
+pub fn sequences(src: &str) -> Vec<(String, Option<(i64, i64)>)> {
+    fn walk(e: &JExpr, out: &mut Vec<(String, Option<(i64, i64)>)>) {
+        match e {
+            JExpr::Call(Some(recv), name, args) => {
+                if name == "sequence"
+                    && matches!(recv.as_ref(), JExpr::Name(n) if n == "Numeric")
+                    && let Some(JExpr::Str(seq)) = args.first()
+                {
+                    let lit = |a: Option<&JExpr>| match a {
+                        Some(JExpr::Int(i)) => Some(*i),
+                        _ => None,
+                    };
+                    let nums = lit(args.get(1)).zip(lit(args.get(2)));
+                    out.push((seq.clone(), nums));
+                }
+                walk(recv, out);
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            JExpr::Call(None, _, args) | JExpr::New(_, args) => {
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            JExpr::Field(t, _) | JExpr::Unary(_, t) | JExpr::Cast(_, t) => walk(t, out),
+            JExpr::Binary(_, l, r) | JExpr::Index(l, r) | JExpr::Assign(_, l, r) => {
+                walk(l, out);
+                walk(r, out);
+            }
+            JExpr::Ternary(c, a, b) => {
+                walk(c, out);
+                walk(a, out);
+                walk(b, out);
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(e) = parse_expr(src) {
+        walk(&e, &mut out);
+    }
+    out
+}
+
 /// Whether a lowering result is fully faithful.
 pub fn is_exact(l: &Lowered) -> bool {
     l.fidelity == Fidelity::Exact
@@ -628,6 +731,8 @@ mod tests {
                 context: &context,
                 job: "jLoad",
                 global: &|_| None,
+                routines: &[],
+                sequence: &|_| None,
             },
         )
     }

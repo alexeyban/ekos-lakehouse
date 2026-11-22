@@ -224,6 +224,18 @@ pub enum Op {
     Sink {
         sink: Sink,
     },
+    /// A SQL statement run from a trigger rather than on rows (Talend `tDBRow`, EKOS RFC 0267
+    /// phase 2): its verb (`UPDATE`, `DELETE`, `INSERT`, `MERGE`, `TRUNCATE`), the table it
+    /// changes, the tables it reads, and for `UPDATE` / `DELETE` its lowered `SET` and `WHERE`.
+    /// `sql` is the folded text in the source engine's dialect. No inputs.
+    Statement {
+        verb: String,
+        target: Option<TableRef>,
+        reads: Vec<TableRef>,
+        set: Vec<(String, Expr)>,
+        predicate: Option<Expr>,
+        sql: String,
+    },
     Gap {
         reason: String,
     },

@@ -78,13 +78,16 @@ fn cover(p: &Project, cov: &mut Coverage) -> Vec<(String, ekos_lakehouse_etl_rel
     let mut irs = Vec::new();
     for job in p.jobs.iter().filter(|j| j.latest) {
         let expanded = p.expand(job).job;
-        let l = lower_job(&expanded, &NoCatalog);
+        let l = lower_job(&expanded, &p.routines, &NoCatalog);
         let mut per: BTreeMap<&str, (String, bool)> = BTreeMap::new();
         for n in &l.ir.nodes {
             let e = per
                 .entry(n.step.as_str())
                 .or_insert((n.step_type.clone(), false));
             if n.is_gap() {
+                if std::env::var_os("EKOS_TALEND_SHOW_GAPS").is_some() {
+                    eprintln!("GAP {} {} {} {:?}", job.name, n.step, n.step_type, n.op);
+                }
                 e.1 = true;
                 let key: String = match &n.op {
                     Op::Gap { reason } => reason.chars().take(70).collect(),
@@ -101,6 +104,44 @@ fn cover(p: &Project, cov: &mut Coverage) -> Vec<(String, ekos_lakehouse_etl_rel
                 cov.lowered += 1;
                 t.1 += 1;
             }
+        }
+        for n in &l.ir.nodes {
+            let exprs: Vec<&ekos_lakehouse_etl_expr::Expr> = match &n.op {
+                Op::Project { items } => items.iter().map(|(_, e)| e).collect(),
+                Op::Filter { predicate } => vec![predicate],
+                Op::Join {
+                    condition: Some(c), ..
+                } => vec![c],
+                Op::Statement { set, predicate, .. } => {
+                    set.iter().map(|(_, e)| e).chain(predicate).collect()
+                }
+                _ => Vec::new(),
+            };
+            let printed: Vec<String> = exprs
+                .iter()
+                .map(|e| format!("SELECT {}", e.sql()))
+                .collect();
+            // Long concatenation chains recurse deeply in sqlparser: parse on a big stack.
+            let bad = std::thread::Builder::new()
+                .stack_size(256 << 20)
+                .spawn(move || {
+                    printed.into_iter().find(|sql| {
+                        sqlparser::parser::Parser::parse_sql(
+                            &sqlparser::dialect::GenericDialect {},
+                            sql,
+                        )
+                        .is_err()
+                    })
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            assert!(
+                bad.is_none(),
+                "{}.{}: the printed SQL does not parse: {bad:?}",
+                job.name,
+                n.step
+            );
         }
         cov.expressions += l.expressions;
         for (k, v) in l.expression_gaps {
@@ -125,7 +166,7 @@ fn report(name: &str, cov: &Coverage) {
     }
     let mut gaps: Vec<_> = cov.gaps.iter().collect();
     gaps.sort_by(|a, b| b.1.cmp(a.1));
-    for (g, n) in gaps.iter().take(12) {
+    for (g, n) in gaps.iter().take(40) {
         eprintln!("  gap {n} × {g}");
     }
     let mut eg: Vec<_> = cov.expression_gaps.iter().collect();
@@ -213,11 +254,98 @@ fn fixtures_c_d_e_coverage() {
             continue;
         };
         let mut cov = Coverage::default();
+        let mut irs = Vec::new();
         for p in projects(&root) {
-            cover(&p, &mut cov);
+            irs.extend(cover(&p, &mut cov));
         }
         report(name, &cov);
         assert!(cov.data > 0);
+        if name == "E" {
+            fixture_e_phase_2_exit(&irs);
+        }
+    }
+}
+
+/// RFC 0267 phase 2's exit on fixture E: every ELT map and every Row statement lowers, and every
+/// query that reads a context variable a `tJavaRow` sets from a row is `rewritten`, naming it.
+fn fixture_e_phase_2_exit(irs: &[(String, ekos_lakehouse_etl_rel::Ir)]) {
+    let mut maps = 0;
+    let mut statements = 0;
+    let mut watermarked = 0;
+    for (job, ir) in irs {
+        for n in &ir.nodes {
+            match n.step_type.as_str() {
+                "tELTMap" => {
+                    assert!(!n.is_gap(), "{job}.{}: {:?}", n.step, n.op);
+                    maps += 1;
+                }
+                "tSnowflakeRow" => {
+                    assert!(
+                        matches!(n.op, Op::Statement { .. }),
+                        "{job}.{}: {:?}",
+                        n.step,
+                        n.op
+                    );
+                    statements += 1;
+                }
+                _ => {}
+            }
+            if matches!(n.op, Op::Source { .. })
+                && n.notes.iter().any(|x| x.contains("(a watermark)"))
+            {
+                assert_eq!(n.fidelity, ekos_lakehouse_etl_expr::Fidelity::Rewritten);
+                assert!(n.notes.iter().any(|x| x.contains("tJavaRow_")));
+                watermarked += 1;
+            }
+        }
+    }
+    eprintln!(
+        "E: ELT map nodes {maps}, statements {statements}, watermarked queries {watermarked}"
+    );
+    assert_eq!(statements, 42);
+    assert_eq!(watermarked, 12);
+}
+
+/// RFC 0267 phase 2 §UNIQUE_MATCH: what fixture B's generated code shows. The tMap lookup hands
+/// `UNIQUE_MATCH` to `AdvancedMemoryLookup` (a library class the fixture lacks); the one lookup
+/// source the fixture has, tXMLMap's `DocumentLookupCache`, keeps the last row put for
+/// `UNIQUE_MATCH` (a `HashMap.put`). If either changes, the lowering's note must be re-read.
+#[test]
+fn fixture_b_generated_code_shows_how_unique_match_is_kept() {
+    let Some(root) = fixture("EKOS_TALEND_FIXTURE_B") else {
+        return;
+    };
+    let poms = root.join("ALIMENTATION_DATA_WAREHOUSE/poms");
+    let cache = std::fs::read_to_string(
+        poms.join("code/routines/src/main/java/routines/system/DocumentLookupCache.java"),
+    )
+    .unwrap();
+    let unique = &cache[cache.find("class UniqueLookupCache").unwrap()..];
+    let unique = &unique[..unique.find("class FirstLookupCache").unwrap()];
+    assert!(unique.contains("uniqueMap.put(key,value);"), "{unique}");
+    assert!(unique.contains("currentValue = uniqueMap.get(key);"));
+    let mut files = Vec::new();
+    walk_all(&poms.join("jobs"), &mut files);
+    let passes = files
+        .iter()
+        .filter(|f| f.extension().is_some_and(|e| e == "java"))
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .filter(|t| t.contains("MATCHING_MODE.UNIQUE_MATCH") && t.contains("AdvancedMemoryLookup"))
+        .count();
+    assert!(passes > 0);
+}
+
+fn walk_all(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            walk_all(&p, out);
+        } else {
+            out.push(p);
+        }
     }
 }
 
@@ -231,7 +359,7 @@ fn list_jdwhvente() {
         .find(|p| p.root.ends_with("ALIMENTATION_DATA_WAREHOUSE"))
         .unwrap();
     let job = p.jobs.iter().find(|j| j.name == "jDwhVente").unwrap();
-    let l = lower_job(&p.expand(job).job, &NoCatalog);
+    let l = lower_job(&p.expand(job).job, &p.routines, &NoCatalog);
     for n in &l.ir.nodes {
         let what = match &n.op {
             Op::Gap { reason } => format!("GAP {reason}"),

@@ -44,7 +44,7 @@ ekos-ora-live         = { git = "https://github.com/alexeyban/EKOS", branch = "m
 ekos-migrate          = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 # The Talend project model (EKOS RFC 0262–0265). Pinned by revision: it depends on no other EKOS
 # crate, so it can move ahead of the rest without a workspace-wide EKOS update.
-ekos-talend = { git = "https://github.com/alexeyban/EKOS", rev = "89cedb25ed621095ca29314d5aae178fcd7e4f3b" }
+ekos-talend = { git = "https://github.com/alexeyban/EKOS", rev = "859708c427cff150495084de8fdf7cbb43a53af5" }
 # The statement classifier (RFC 0160), used with Trino's grammar through `classify_with`.
 ekos-migrate-target-clickhouse = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 

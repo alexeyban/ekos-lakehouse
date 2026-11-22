@@ -7,5 +7,7 @@
 
 pub mod expr;
 pub mod lower;
+pub mod routine;
+pub mod sql;
 
-pub use lower::{Lowering, lower_job};
+pub use lower::{ContextFromData, Lowering, lower_job};

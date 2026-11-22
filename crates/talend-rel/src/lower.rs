@@ -4,12 +4,15 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use ekos_lakehouse_etl_expr::{Expr, Fidelity, Gap, KType, Lowered};
+use ekos_lakehouse_etl_expr::{BinOp, Expr, Fidelity, Gap, KType, Lowered};
 use ekos_lakehouse_etl_rel::{
     Agg, Catalog, Field, Ir, JoinKind, LookupValue, NodeId, Op, RelNode, Sink, SinkMode, SortKey,
     SourceQuery, TableRef,
 };
-use ekos_talend::{Category, Component, Job, Link, LinkKind, Mapper, MapperOutput, Param};
+use ekos_talend::{
+    Category, Component, EltInput, EltMap, EltOutput, Job, Link, LinkKind, Mapper, MapperOutput,
+    Param, Routine,
+};
 
 use crate::expr::{ColumnLookup, Scope, lower, talend_type};
 
@@ -23,6 +26,7 @@ const PASS_THROUGH: &[&str] = &[
     "tHashOutput",
     "tBufferOutput",
     "tConvertType",
+    "tSleep",
     "joblet_input",
     "joblet_output",
 ];
@@ -36,12 +40,26 @@ pub struct Lowering {
     /// Expressions lowered and expressions that stopped at a gap, by the gap's reason.
     pub expressions: usize,
     pub expression_gaps: BTreeMap<String, usize>,
+    /// Context variables a `tJavaRow` sets from a row (`context.v = input_row.c;`): known only at
+    /// run time, the watermark pattern (RFC 0267 phase 2 §tJavaRow and run-time context).
+    pub context_from_data: Vec<ContextFromData>,
 }
 
-/// Lowers one job (expand joblets first: `Project::expand`).
-pub fn lower_job(job: &Job, catalog: &dyn Catalog) -> Lowering {
+/// `context.<var> = input_row.<column>;` in `component`, whose rows come from node `from`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFromData {
+    pub var: String,
+    pub component: String,
+    pub column: String,
+    pub from: Option<NodeId>,
+}
+
+/// Lowers one job (expand joblets first: `Project::expand`). `routines` are the project's
+/// (`Project::routines`): a custom routine whose body is a digest is lowered.
+pub fn lower_job(job: &Job, routines: &[Routine], catalog: &dyn Catalog) -> Lowering {
     let mut b = Builder {
         job,
+        routines,
         catalog,
         out: Lowering {
             ir: Ir {
@@ -51,11 +69,33 @@ pub fn lower_job(job: &Job, catalog: &dyn Catalog) -> Lowering {
             ..Lowering::default()
         },
         ports: HashMap::new(),
+        writers: context_writers(job),
+        runtime: ekos_talend::RuntimeContext::of(job),
+    };
+    // Data components, and any other component a row link reaches or leaves (a `tJavaRow`, a
+    // `tJavaFlex`): it is part of the flow, lowered or a gap.
+    let on_a_row_link = |c: &Component| {
+        job.links.iter().any(|l| {
+            (l.to == c.unique_name || l.from == c.unique_name)
+                && matches!(
+                    l.kind,
+                    LinkKind::Main
+                        | LinkKind::Lookup
+                        | LinkKind::Filter
+                        | LinkKind::Reject
+                        | LinkKind::Duplicate
+                )
+        })
     };
     let data: Vec<&Component> = job
         .components
         .iter()
-        .filter(|c| c.category.is_data() || PASS_THROUGH.contains(&c.component_type.as_str()))
+        .filter(|c| {
+            c.category.is_data()
+                || PASS_THROUGH.contains(&c.component_type.as_str())
+                || c.component_type == "tJavaRow"
+                || on_a_row_link(c)
+        })
         .collect();
     for c in &job.components {
         if !data.iter().any(|d| d.unique_name == c.unique_name) {
@@ -166,11 +206,15 @@ fn qualified(q: &str, col: &str) -> String {
 
 struct Builder<'a> {
     job: &'a Job,
+    routines: &'a [Routine],
     catalog: &'a dyn Catalog,
     out: Lowering,
     /// `(component, port)` → the node rows leave from. Port `""` is the main output; a tMap's
     /// outputs are their names; `REJECT` / `DUPLICATE` the second outputs.
     ports: HashMap<(String, String), NodeId>,
+    /// `context.<var>` → the `tJavaRow` and input column that set it from a row.
+    writers: BTreeMap<String, (String, String)>,
+    runtime: ekos_talend::RuntimeContext,
 }
 
 impl Builder<'_> {
@@ -225,7 +269,7 @@ impl Builder<'_> {
     /// The node a link brings rows from.
     fn upstream(&self, l: &Link) -> Option<NodeId> {
         let from = self.job.component(&l.from)?;
-        let port = if from.mapper.is_some() {
+        let port = if from.mapper.is_some() || from.elt.is_some() {
             l.metaname.clone().unwrap_or_default()
         } else {
             match l.kind {
@@ -274,8 +318,8 @@ impl Builder<'_> {
     }
 
     fn component(&mut self, c: &Component) {
-        // A component nothing feeds that does not produce rows itself is disconnected: not part
-        // of any flow, so not a translation gap.
+        // A component no row link reaches or leaves is disconnected: not part of any flow, so not
+        // a translation gap.
         let source = c.category == Category::Input
             || matches!(c.logical.as_str(), "db_input" | "elt_input")
             || matches!(
@@ -286,12 +330,20 @@ impl Builder<'_> {
         // A SQL statement component (`tDBRow`, `tSnowflakeRow`, ELT) runs from a trigger and changes
         // data without a row link: never skipped.
         let statement = c.category == Category::Elt;
-        if !source
-            && !statement
-            && c.mapper.is_none()
-            && c.elt.is_none()
-            && inbound(self.job, c).is_empty()
-        {
+        // A component that sends rows on (a `tJavaFlex` under a `tLoop`, a `tIterateToFlow`, a CDC
+        // reader) produces them: part of the flow, lowered or a gap.
+        let sends_rows = self.job.links.iter().any(|l| {
+            l.from == c.unique_name
+                && matches!(
+                    l.kind,
+                    LinkKind::Main
+                        | LinkKind::Lookup
+                        | LinkKind::Filter
+                        | LinkKind::Reject
+                        | LinkKind::Duplicate
+                )
+        });
+        if !source && !statement && !sends_rows && inbound(self.job, c).is_empty() {
             self.out.skipped.push((
                 c.unique_name.clone(),
                 format!("{}: no row link in, not part of any flow", c.component_type),
@@ -300,6 +352,9 @@ impl Builder<'_> {
         }
         if let Some(m) = &c.mapper {
             return self.tmap(c, m);
+        }
+        if let Some(e) = &c.elt {
+            return self.elt_map(c, e);
         }
         let t = c.component_type.as_str();
         if PASS_THROUGH.contains(&t) {
@@ -315,10 +370,13 @@ impl Builder<'_> {
         }
         match c.logical.as_str() {
             "db_input" => self.db_input(c),
+            "db_row" => self.statement(c),
             "elt_input" => self.elt_input(c),
             l if l.starts_with("db_output") || l == "elt_output" => self.sink(c),
             _ => match t {
                 "tFilterRow" => self.filter_row(c),
+                "tJavaRow" => self.java_row(c),
+                "tSampleRow" => self.sample_row(c),
                 "tRowGenerator" => self.row_generator(c, "VALUES", "ARRAY"),
                 "tFixedFlowInput" => self.row_generator(c, "VALUES", "VALUE"),
                 "tJoin" => self.join(c),
@@ -414,6 +472,13 @@ impl Builder<'_> {
                 }
             },
         };
+        if let Some(q) = param(c, "QUERY") {
+            let run_time = self.run_time_notes(q);
+            if !run_time.is_empty() {
+                fidelity = fidelity.max(Fidelity::Rewritten);
+                notes.extend(run_time);
+            }
+        }
         if let Some(t) = &table
             && let Some(known) = self.catalog.columns(t)
             && known.len() != fields.len()
@@ -613,6 +678,8 @@ impl Builder<'_> {
                         context: &context,
                         job: &self.job.name,
                         global: &global,
+                        routines: self.routines,
+                        sequence: &no_sequence,
                     },
                 )
             }
@@ -753,12 +820,49 @@ impl Builder<'_> {
         let global = global_of(self.job);
         let column = |_: &str, _: &str| None;
         let none = |_: &str| None;
+        // Numeric.sequence: the generated rows are all alike before they are numbered, so
+        // numbering them in any order gives the same rows.
+        let mut seqs: Vec<(String, Option<(i64, i64)>)> = Vec::new();
+        for r in rows(c, table) {
+            if let Some(t) = r.get(value) {
+                for q in crate::expr::sequences(t) {
+                    if !seqs.iter().any(|(n, _)| *n == q.0) {
+                        seqs.push(q);
+                    }
+                }
+            }
+        }
+        let users = sequence_users(self.job);
+        for (name, nums) in &seqs {
+            let n = users.get(name).map_or(0, Vec::len);
+            if n > 1 || nums.is_none() {
+                let reason = if n > 1 {
+                    format!(
+                        "Numeric.sequence(\"{name}\") is called {n} times in the job: each call takes the next number of one counter"
+                    )
+                } else {
+                    format!("Numeric.sequence(\"{name}\") with a computed start or step")
+                };
+                self.count_unit(Err(Gap::new(reason.clone())));
+                self.gap(c, "", Vec::new(), reason);
+                return;
+            }
+        }
+        let known: Vec<String> = seqs.iter().map(|(n, _)| n.clone()).collect();
+        let sequence = |name: &str| {
+            known
+                .iter()
+                .any(|n| n == name)
+                .then(|| Expr::col(&format!("__seq_{name}")))
+        };
         let scope = Scope {
             column: &column,
             var: &none,
             context: &context,
             job: &self.job.name,
             global: &global,
+            routines: self.routines,
+            sequence: &sequence,
         };
         let mut row = Vec::new();
         let mut failure = None;
@@ -792,10 +896,66 @@ impl Builder<'_> {
             self.gap(c, "", Vec::new(), reason);
             return;
         }
+        if seqs.is_empty() {
+            let id = self.push(
+                c,
+                Op::Generate { row, count },
+                Vec::new(),
+                fields,
+                fidelity,
+                notes,
+                None,
+            );
+            self.set(c, "", id);
+            return;
+        }
+        // Rows first, numbered, then the columns over the numbers.
+        let gen_field = Field::new("__generated", KType::Integer);
+        let g = self.push(
+            c,
+            Op::Generate {
+                row: vec![Expr::int(1)],
+                count,
+            },
+            Vec::new(),
+            vec![gen_field.clone()],
+            Fidelity::Exact,
+            Vec::new(),
+            None,
+        );
+        let mut numbered = vec![gen_field];
+        let mut items = Vec::new();
+        for (name, nums) in &seqs {
+            let (start, increment) = nums.unwrap_or((1, 1));
+            let col = format!("__seq_{name}");
+            numbered.push(Field::new(&col, KType::Integer));
+            items.push((
+                col,
+                ekos_lakehouse_etl_rel::WindowFn::Sequence { start, increment },
+            ));
+        }
+        let w = self.push(
+            c,
+            Op::Window {
+                partition: Vec::new(),
+                order: Vec::new(),
+                items,
+            },
+            vec![g],
+            numbered,
+            Fidelity::Exact,
+            vec!["the generated rows are alike before they are numbered: any order gives the same rows".into()],
+            None,
+        );
+        let items = fields
+            .iter()
+            .zip(row)
+            .map(|(f, e)| (f.name.clone(), e))
+            .collect();
         let id = self.push(
             c,
-            Op::Generate { row, count },
-            Vec::new(),
+            Op::Project { items },
+            vec![w],
             fields,
             fidelity,
             notes,
@@ -1337,6 +1497,26 @@ impl Builder<'_> {
             .iter()
             .map(|o| (o.name.clone(), o.filter.clone()))
             .collect();
+        // The order rows arrive in, when the main input comes straight from a tSortRow.
+        let main_order: Option<(String, Vec<SortKey>)> = self
+            .out
+            .ir
+            .nodes
+            .get(prefixed[0].1)
+            .and_then(|p| p.inputs.first())
+            .map(|&up| &self.out.ir.nodes[up])
+            .and_then(|n| match &n.op {
+                Op::Sort { keys } => Some((
+                    n.step.clone(),
+                    keys.iter()
+                        .map(|k| SortKey {
+                            field: qualified(&names[0], &k.field),
+                            ..k.clone()
+                        })
+                        .collect(),
+                )),
+                _ => None,
+            });
         for o in &m.outputs {
             self.tmap_output(
                 c,
@@ -1348,6 +1528,7 @@ impl Builder<'_> {
                 core_left,
                 &inner_keys,
                 &notes,
+                main_order.as_ref(),
             );
         }
     }
@@ -1364,8 +1545,91 @@ impl Builder<'_> {
         core_left: NodeId,
         inner_keys: &[String],
         notes: &[String],
+        main_order: Option<&(String, Vec<SortKey>)>,
     ) {
         let base = if o.reject_inner_join { core_left } else { core };
+        // Numeric.sequence: a numbered column per sequence; over every row when a variable or the
+        // filter reads it, over the output's rows when only its columns do.
+        let mut early: Vec<(String, Option<(i64, i64)>)> = Vec::new();
+        for (_, text) in vars {
+            for q in crate::expr::sequences(text) {
+                if !early.iter().any(|(n, _)| *n == q.0) {
+                    early.push(q);
+                }
+            }
+        }
+        if let Some(f) = &o.filter {
+            for q in crate::expr::sequences(f) {
+                if !early.iter().any(|(n, _)| *n == q.0) {
+                    early.push(q);
+                }
+            }
+        }
+        let mut late: Vec<(String, Option<(i64, i64)>)> = Vec::new();
+        for e in &o.entries {
+            for q in crate::expr::sequences(e.expression.as_deref().unwrap_or_default()) {
+                if !early.iter().chain(&late).any(|(n, _)| *n == q.0) {
+                    late.push(q);
+                }
+            }
+        }
+        let users = sequence_users(self.job);
+        for (name, nums) in early.iter().chain(&late) {
+            let n = users.get(name).map_or(0, Vec::len);
+            let reason = if n > 1 {
+                Some(format!(
+                    "Numeric.sequence(\"{name}\") is called {n} times in the job: each call takes the next number of one counter"
+                ))
+            } else if nums.is_none() {
+                Some(format!(
+                    "Numeric.sequence(\"{name}\") with a computed start or step"
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                self.count_unit(Err(Gap::new(reason.clone())));
+                self.gap(c, &o.name, vec![base], reason);
+                return;
+            }
+        }
+        let seq_note = match main_order {
+            Some((step, _)) => format!(
+                "Numeric.sequence numbers rows in {step}'s order; rows equal on its keys may be numbered either way"
+            ),
+            None => "Numeric.sequence numbers rows in arrival order, which SQL does not keep: the order must be stated".into(),
+        };
+        let order: Vec<SortKey> = main_order.map(|(_, k)| k.clone()).unwrap_or_default();
+        let window = |b: &mut Self, over: NodeId, seqs: &[(String, Option<(i64, i64)>)]| {
+            if seqs.is_empty() {
+                return over;
+            }
+            let mut schema = b.input_schema(over);
+            let mut items = Vec::new();
+            for (name, nums) in seqs {
+                let (start, increment) = nums.unwrap_or((1, 1));
+                let col = format!("__seq_{name}");
+                schema.push(Field::new(&col, KType::Integer));
+                items.push((
+                    col,
+                    ekos_lakehouse_etl_rel::WindowFn::Sequence { start, increment },
+                ));
+            }
+            b.push(
+                c,
+                Op::Window {
+                    partition: Vec::new(),
+                    order: order.clone(),
+                    items,
+                },
+                vec![over],
+                schema,
+                Fidelity::Rewritten,
+                vec![seq_note.clone()],
+                Some(format!("output {}", o.name)),
+            )
+        };
+        let base = window(self, base, &early);
         let fields = self.input_schema(base);
         let column = |q: &str, col: &str| {
             names
@@ -1378,12 +1642,21 @@ impl Builder<'_> {
         let var = |v: &str| vars.iter().find(|(n, _)| n == v).map(|(_, e)| e.clone());
         let context = context_of(self.job);
         let global = global_of(self.job);
+        let known: Vec<String> = early.iter().chain(&late).map(|(n, _)| n.clone()).collect();
+        let sequence = |name: &str| {
+            known
+                .iter()
+                .any(|n| n == name)
+                .then(|| Expr::col(&format!("__seq_{name}")))
+        };
         let scope = Scope {
             column: &column,
             var: &var,
             context: &context,
             job: &self.job.name,
             global: &global,
+            routines: self.routines,
+            sequence: &sequence,
         };
         let mut fidelity = Fidelity::Exact;
         let mut out_notes: Vec<String> = notes.to_vec();
@@ -1503,6 +1776,11 @@ impl Builder<'_> {
                 Some(format!("output {}", o.name)),
             );
         }
+        if !early.is_empty() || !late.is_empty() {
+            fidelity = fidelity.max(Fidelity::Rewritten);
+            out_notes.push(seq_note.clone());
+        }
+        let head = window(self, head, &late);
         let id = self.push(
             c,
             Op::Project { items },
@@ -1514,6 +1792,1185 @@ impl Builder<'_> {
         );
         self.set(c, &o.name, id);
     }
+}
+
+/// The columns of a combined ELT / tMap row: `<input>.<column>` is the field
+/// `<input>__<column>`; an unqualified name is the one field of that column, when only one has it.
+fn combined_lookup(fields: Vec<Field>) -> impl Fn(&str, &str) -> Option<(Expr, KType)> {
+    move |q: &str, col: &str| {
+        let hit = |f: &&Field| {
+            if q.is_empty() {
+                f.name.ends_with(&format!("__{col}"))
+            } else {
+                f.name == qualified(q, col)
+            }
+        };
+        let exact: Vec<&Field> = fields.iter().filter(hit).collect();
+        // Unquoted names are case-insensitive in SQL: a different case is the same column, when
+        // only one column matches that way.
+        let found = if exact.is_empty() {
+            let want = if q.is_empty() {
+                format!("__{col}").to_ascii_lowercase()
+            } else {
+                qualified(q, col).to_ascii_lowercase()
+            };
+            fields
+                .iter()
+                .filter(|f| {
+                    let n = f.name.to_ascii_lowercase();
+                    if q.is_empty() {
+                        n.ends_with(&want)
+                    } else {
+                        n == want
+                    }
+                })
+                .collect()
+        } else {
+            exact
+        };
+        match found.as_slice() {
+            [f] => Some((Expr::col(&f.name), f.ty)),
+            _ => None,
+        }
+    }
+}
+
+/// The input of a lowered SQL expression that names one column only, and that column.
+fn plain_column(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Col { name } => Some(name),
+        _ => None,
+    }
+}
+
+impl Builder<'_> {
+    fn count_sql(&mut self, r: &Result<(Lowered, KType), Gap>) {
+        self.count(r);
+    }
+
+    /// A tELTMap (EKOS RFC 0267 phase 2 §ELT maps): its inputs renamed `<alias>__<column>`,
+    /// joined in order, then per output a filter, an optional GROUP BY and a projection.
+    fn elt_map(&mut self, c: &Component, e: &EltMap) {
+        let engine = c.engine.clone();
+        let fail = |b: &mut Self, inputs: Vec<NodeId>, reason: String| {
+            for o in &e.outputs {
+                b.gap(c, &o.name, inputs.clone(), reason.clone());
+            }
+            if e.outputs.is_empty() {
+                b.gap(c, "", inputs, reason);
+            }
+        };
+        if e.inputs.is_empty() {
+            return fail(self, Vec::new(), "ELT map without inputs".into());
+        }
+        let mut prefixed: Vec<NodeId> = Vec::new();
+        for input in &e.inputs {
+            let link = inbound(self.job, c)
+                .into_iter()
+                .find(|l| l.label.as_deref() == Some(input.table.as_str()));
+            let Some(up) = link.and_then(|l| self.upstream(l)) else {
+                return fail(
+                    self,
+                    Vec::new(),
+                    format!("no link brings ELT input `{}`", input.table),
+                );
+            };
+            let alias = elt_alias(input);
+            let fields = self.input_schema(up);
+            let items = fields
+                .iter()
+                .map(|f| (qualified(alias, &f.name), Expr::col(&f.name)))
+                .collect();
+            let schema = fields
+                .iter()
+                .map(|f| Field {
+                    name: qualified(alias, &f.name),
+                    ..f.clone()
+                })
+                .collect();
+            let id = self.push(
+                c,
+                Op::Project { items },
+                vec![up],
+                schema,
+                Fidelity::Exact,
+                Vec::new(),
+                Some(format!("input {alias}")),
+            );
+            prefixed.push(id);
+        }
+        let mut core = prefixed[0];
+        let mut fidelity = Fidelity::Exact;
+        let mut notes: Vec<String> = Vec::new();
+        for (i, input) in e.inputs.iter().enumerate().skip(1) {
+            match self.elt_join(c, input, core, prefixed[i], engine.as_deref()) {
+                Ok((id, f, n)) => {
+                    core = id;
+                    fidelity = fidelity.max(f);
+                    for x in n {
+                        if !notes.contains(&x) {
+                            notes.push(x);
+                        }
+                    }
+                }
+                Err(g) => return fail(self, vec![core, prefixed[i]], g.reason),
+            }
+        }
+        for o in &e.outputs {
+            if let Err(g) = self.elt_output(c, o, core, fidelity, &notes, engine.as_deref()) {
+                self.gap(c, &o.name, vec![core], g.reason);
+            }
+        }
+    }
+
+    /// One joined ELT input: plain-column equalities are join keys; a key against a literal (or
+    /// an expression of the joined input alone) filters that input first; a key against an
+    /// expression of the inputs before it is computed on the left first; any other comparison is
+    /// a condition, which only an inner join can take.
+    fn elt_join(
+        &mut self,
+        c: &Component,
+        input: &EltInput,
+        left: NodeId,
+        right: NodeId,
+        engine: Option<&str>,
+    ) -> Result<(NodeId, Fidelity, Vec<String>), Gap> {
+        let alias = elt_alias(input);
+        let kind = match input.join_type.as_str() {
+            "INNER_JOIN" => JoinKind::Inner,
+            "LEFT_OUTER_JOIN" => JoinKind::Left,
+            "RIGHT_OUTER_JOIN" => JoinKind::Right,
+            "FULL_OUTER_JOIN" => JoinKind::Full,
+            "CROSS_JOIN" => JoinKind::Cross,
+            other => return Err(Gap::new(format!("ELT join type `{other}`"))),
+        };
+        let left_fields = self.input_schema(left);
+        let right_fields = self.input_schema(right);
+        let left_cols = combined_lookup(left_fields.clone());
+        let right_cols = combined_lookup(right_fields.clone());
+        let mut keys: Vec<(String, String)> = Vec::new();
+        let mut right_filter: Vec<Expr> = Vec::new();
+        let mut left_extra: Vec<(String, Expr, KType)> = Vec::new();
+        let mut condition: Vec<Expr> = Vec::new();
+        let mut fidelity = Fidelity::Exact;
+        let mut notes = Vec::new();
+        for (col, op, text) in &input.join_keys {
+            let Some((rcol, rty)) = right_cols(alias, col) else {
+                return Err(Gap::new(format!(
+                    "`{alias}.{col}` is not a column of the ELT input"
+                )));
+            };
+            let parsed = crate::sql::parse(text, engine)?;
+            // Which side the expression reads.
+            let on_left = crate::sql::lower_ast(&parsed, engine, &left_cols);
+            let on_right = crate::sql::lower_ast(&parsed, engine, &right_cols);
+            let (lowered, side_left) = match (on_left, on_right) {
+                (Ok(l), _) => (l, true),
+                (Err(_), Ok(r)) => (r, false),
+                (Err(g), Err(_)) => {
+                    self.count_sql(&Err(g.clone()));
+                    return Err(g);
+                }
+            };
+            self.count_sql(&Ok(lowered.clone()));
+            let (l, _) = lowered;
+            fidelity = fidelity.max(l.fidelity);
+            notes.extend(l.notes.iter().cloned());
+            let bin = match op.trim() {
+                "=" => BinOp::Eq,
+                "<>" | "!=" => BinOp::NotEq,
+                "<" => BinOp::Lt,
+                "<=" => BinOp::LtEq,
+                ">" => BinOp::Gt,
+                ">=" => BinOp::GtEq,
+                other => return Err(Gap::new(format!("ELT join operator `{other}`"))),
+            };
+            let constant = l.expr.columns().is_empty();
+            if constant || !side_left {
+                // A test on the joined input alone: filter it before joining.
+                right_filter.push(Expr::bin(bin, rcol, l.expr));
+                continue;
+            }
+            if bin == BinOp::Eq {
+                if let Some(name) = plain_column(&l.expr) {
+                    keys.push((
+                        name.to_string(),
+                        plain_column(&rcol).unwrap_or_default().into(),
+                    ));
+                } else {
+                    let name = format!("__join_{alias}_{col}");
+                    left_extra.push((name.clone(), l.expr, rty));
+                    keys.push((name, plain_column(&rcol).unwrap_or_default().into()));
+                }
+                continue;
+            }
+            if kind != JoinKind::Inner {
+                return Err(Gap::new(format!(
+                    "a `{op}` comparison in an outer join on `{alias}`: only equality keys and tests on the joined input are lowered"
+                )));
+            }
+            condition.push(Expr::bin(bin, l.expr, rcol));
+        }
+        let mut right = right;
+        if !right_filter.is_empty() {
+            let first = right_filter.remove(0);
+            let p = right_filter.into_iter().fold(first, Expr::and);
+            right = self.push(
+                c,
+                Op::Filter {
+                    predicate: Expr::two_valued(p),
+                },
+                vec![right],
+                right_fields.clone(),
+                Fidelity::Exact,
+                Vec::new(),
+                Some(format!("join {alias} (tests on the joined input)")),
+            );
+        }
+        let mut left = left;
+        if !left_extra.is_empty() {
+            let mut items: Vec<(String, Expr)> = left_fields
+                .iter()
+                .map(|f| (f.name.clone(), Expr::col(&f.name)))
+                .collect();
+            let mut schema = left_fields.clone();
+            for (n, e, t) in left_extra {
+                items.push((n.clone(), e));
+                schema.push(Field::new(&n, t));
+            }
+            left = self.push(
+                c,
+                Op::Project { items },
+                vec![left],
+                schema,
+                fidelity,
+                Vec::new(),
+                Some(format!("join {alias} (computed keys)")),
+            );
+        }
+        let mut schema = self.input_schema(left);
+        schema.extend(right_fields);
+        let cond = (!condition.is_empty()).then(|| {
+            let first = condition.remove(0);
+            condition.into_iter().fold(first, Expr::and)
+        });
+        if keys.is_empty() && kind != JoinKind::Cross && cond.is_none() {
+            notes.push(format!(
+                "ELT input `{alias}` is joined without a key: every row meets every row"
+            ));
+        }
+        let id = self.push(
+            c,
+            Op::Join {
+                kind,
+                keys,
+                condition: cond,
+            },
+            vec![left, right],
+            schema,
+            fidelity,
+            notes.clone(),
+            Some(format!("join {alias}")),
+        );
+        Ok((id, fidelity, notes))
+    }
+
+    /// One ELT output: filter, GROUP BY (keys and aggregate arguments computed first), ORDER BY,
+    /// projection.
+    fn elt_output(
+        &mut self,
+        c: &Component,
+        o: &EltOutput,
+        core: NodeId,
+        fidelity: Fidelity,
+        notes: &[String],
+        engine: Option<&str>,
+    ) -> Result<(), Gap> {
+        let mut fidelity = fidelity;
+        let mut notes: Vec<String> = notes.to_vec();
+        let add = |n: &[String], notes: &mut Vec<String>| {
+            for x in n {
+                if !notes.contains(x) {
+                    notes.push(x.clone());
+                }
+            }
+        };
+        let branch = Some(o.name.clone());
+        let lookup = combined_lookup(self.input_schema(core));
+        let mut head = core;
+        // WHERE.
+        let mut preds = Vec::new();
+        for f in &o.filters {
+            let r = crate::sql::lower(f, engine, &lookup);
+            self.count_sql(&r);
+            let (l, _) = r?;
+            fidelity = fidelity.max(l.fidelity);
+            add(&l.notes, &mut notes);
+            preds.push(Expr::two_valued(l.expr));
+        }
+        if let Some(first) = preds.first().cloned() {
+            let p = preds.into_iter().skip(1).fold(first, Expr::and);
+            let s = self.input_schema(core);
+            head = self.push(
+                c,
+                Op::Filter { predicate: p },
+                vec![core],
+                s,
+                fidelity,
+                Vec::new(),
+                branch.clone(),
+            );
+        }
+        let clauses = crate::sql::parse_clauses(&o.clauses, engine)?;
+        let parsed: Vec<(String, sqlparser::ast::Expr, Option<String>)> = o
+            .entries
+            .iter()
+            .map(|en| {
+                let text = en.expression.clone().unwrap_or_else(|| "NULL".into());
+                crate::sql::parse(&text, engine)
+                    .map(|p| (en.name.clone(), p, en.talend_type.clone()))
+            })
+            .collect::<Result<_, _>>()?;
+        let grouped = !clauses.group_by.is_empty()
+            || parsed
+                .iter()
+                .any(|(_, p, _)| crate::sql::aggregate_of(p).is_some());
+        let mut items: Vec<(String, Expr)> = Vec::new();
+        let mut schema: Vec<Field> = Vec::new();
+        if grouped {
+            let mut keys: Vec<(Expr, KType)> = Vec::new();
+            for g in &clauses.group_by {
+                let r = crate::sql::lower_ast(g, engine, &lookup);
+                self.count_sql(&r);
+                let (l, t) = r?;
+                fidelity = fidelity.max(l.fidelity);
+                add(&l.notes, &mut notes);
+                keys.push((l.expr, t));
+            }
+            let mut pre: Vec<(String, Expr)> = Vec::new();
+            let mut pre_schema: Vec<Field> = Vec::new();
+            for (i, (k, t)) in keys.iter().enumerate() {
+                pre.push((format!("__g{i}"), k.clone()));
+                pre_schema.push(Field::new(&format!("__g{i}"), *t));
+            }
+            let mut aggs = Vec::new();
+            let mut post: Vec<(String, Expr, KType)> = Vec::new();
+            for (name, p, ty) in &parsed {
+                let declared = talend_type(ty.as_deref());
+                // Every aggregate in the expression becomes a column `__agg_<n>` of the
+                // Aggregate; what is around it is computed after, over the keys.
+                let mut p = p.clone();
+                let mut found: Vec<(String, Option<sqlparser::ast::Expr>, bool)> = Vec::new();
+                let _ = sqlparser::ast::visit_expressions_mut(&mut p, |e| {
+                    if let Some((f, a, d)) = crate::sql::aggregate_of(e) {
+                        let a = a.cloned();
+                        *e = sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new(format!(
+                            "__agg_{}",
+                            aggs.len() + found.len()
+                        )));
+                        found.push((f, a, d));
+                    }
+                    std::ops::ControlFlow::<()>::Continue(())
+                });
+                for (func, arg, distinct) in found {
+                    let n = format!("__agg_{}", aggs.len());
+                    let subject = match arg {
+                        Some(a) => {
+                            let r = crate::sql::lower_ast(&a, engine, &lookup);
+                            self.count_sql(&r);
+                            let (l, t) = r?;
+                            fidelity = fidelity.max(l.fidelity);
+                            add(&l.notes, &mut notes);
+                            let an = format!("__a{}", aggs.len());
+                            pre.push((an.clone(), l.expr));
+                            pre_schema.push(Field::new(&an, t));
+                            Some((an, t))
+                        }
+                        None => None,
+                    };
+                    let func = match (distinct, func.as_str()) {
+                        (true, "count") => "count_distinct".to_string(),
+                        (true, f) => {
+                            return Err(Gap::new(format!("`{f}(DISTINCT …)` in output `{name}`")));
+                        }
+                        (false, _) => func,
+                    };
+                    let t = match func.as_str() {
+                        "count" | "count_distinct" => KType::Integer,
+                        "avg" => KType::Number,
+                        _ => subject.as_ref().map_or(KType::Unknown, |(_, t)| *t),
+                    };
+                    aggs.push(Agg {
+                        name: n,
+                        func,
+                        subject: subject.map(|(n, _)| n),
+                        arg: None,
+                        ty: t,
+                    });
+                }
+                let agg_types: Vec<(String, KType)> =
+                    aggs.iter().map(|a| (a.name.clone(), a.ty)).collect();
+                let with_aggs = |q: &str, col: &str| {
+                    if q.is_empty()
+                        && let Some((n, t)) = agg_types.iter().find(|(n, _)| n == col)
+                    {
+                        return Some((Expr::col(n), *t));
+                    }
+                    lookup(q, col)
+                };
+                let r = crate::sql::lower_ast(&p, engine, &with_aggs);
+                self.count_sql(&r);
+                let (l, t) = r?;
+                fidelity = fidelity.max(l.fidelity);
+                add(&l.notes, &mut notes);
+                let over_keys = match keys.iter().position(|(k, _)| *k == l.expr) {
+                    Some(i) => Expr::col(&format!("__g{i}")),
+                    None => {
+                        let e = replace_keys(&l.expr, &keys).map_columns(&|col| {
+                            if col
+                                .strip_prefix("__g")
+                                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+                            {
+                                return Expr::col(col);
+                            }
+                            if col.starts_with("__agg_") {
+                                return Expr::col(col);
+                            }
+                            keys.iter()
+                                .position(|(k, _)| plain_column(k) == Some(col))
+                                .map_or_else(
+                                    || Expr::col(&format!("__missing__{col}")),
+                                    |i| Expr::col(&format!("__g{i}")),
+                                )
+                        });
+                        if let Some(m) = e
+                            .columns()
+                            .iter()
+                            .find_map(|c| c.strip_prefix("__missing__").map(str::to_string))
+                        {
+                            return Err(Gap::new(format!(
+                                "output column `{name}` reads `{m}`, which is neither grouped nor aggregated"
+                            )));
+                        }
+                        e
+                    }
+                };
+                post.push((
+                    name.clone(),
+                    over_keys,
+                    if declared == KType::Unknown {
+                        t
+                    } else {
+                        declared
+                    },
+                ));
+            }
+            let pre_id = self.push(
+                c,
+                Op::Project { items: pre },
+                vec![head],
+                pre_schema,
+                fidelity,
+                Vec::new(),
+                branch.clone(),
+            );
+            let mut agg_schema: Vec<Field> = (0..keys.len())
+                .map(|i| Field::new(&format!("__g{i}"), keys[i].1))
+                .collect();
+            agg_schema.extend(aggs.iter().map(|a| Field::new(&a.name, a.ty)));
+            head = self.push(
+                c,
+                Op::Aggregate {
+                    group_by: (0..keys.len()).map(|i| format!("__g{i}")).collect(),
+                    aggs,
+                },
+                vec![pre_id],
+                agg_schema,
+                fidelity,
+                Vec::new(),
+                branch.clone(),
+            );
+            for (n, e, t) in post {
+                items.push((n.clone(), e));
+                schema.push(Field::new(&n, t));
+            }
+        } else {
+            for (name, p, ty) in &parsed {
+                let r = crate::sql::lower_ast(p, engine, &lookup);
+                self.count_sql(&r);
+                let (l, t) = r?;
+                fidelity = fidelity.max(l.fidelity);
+                add(&l.notes, &mut notes);
+                let declared = talend_type(ty.as_deref());
+                items.push((name.clone(), l.expr));
+                schema.push(Field::new(
+                    name,
+                    if declared == KType::Unknown {
+                        t
+                    } else {
+                        declared
+                    },
+                ));
+            }
+        }
+        if !clauses.order_by.is_empty() {
+            let mut keys = Vec::new();
+            for ob in &clauses.order_by {
+                let (l, _) = crate::sql::lower_ast(&ob.expr, engine, &lookup)?;
+                let Some(field) = plain_column(&l.expr) else {
+                    return Err(Gap::new(format!("ORDER BY `{}` is not a column", ob.expr)));
+                };
+                keys.push(SortKey {
+                    field: field.to_string(),
+                    ascending: ob.asc != Some(false),
+                    case_sensitive: true,
+                });
+            }
+            let s = self.input_schema(head);
+            head = self.push(
+                c,
+                Op::Sort { keys },
+                vec![head],
+                s,
+                fidelity,
+                Vec::new(),
+                branch.clone(),
+            );
+        }
+        let id = self.push(
+            c,
+            Op::Project { items },
+            vec![head],
+            schema,
+            fidelity,
+            notes,
+            branch,
+        );
+        self.set(c, &o.name, id);
+        Ok(())
+    }
+}
+
+/// `e` with every subexpression equal to a GROUP BY key replaced by that key's column
+/// (`__g<i>`).
+fn replace_keys(e: &Expr, keys: &[(Expr, KType)]) -> Expr {
+    if let Some(i) = keys.iter().position(|(k, _)| k == e) {
+        return Expr::col(&format!("__g{i}"));
+    }
+    let r = |x: &Expr| Box::new(replace_keys(x, keys));
+    match e {
+        Expr::Col { .. } | Expr::Lit { .. } | Expr::Sql { .. } => e.clone(),
+        Expr::Unary { op, arg } => Expr::Unary {
+            op: *op,
+            arg: r(arg),
+        },
+        Expr::Binary { op, left, right } => Expr::Binary {
+            op: *op,
+            left: r(left),
+            right: r(right),
+        },
+        Expr::Call { func, args } => Expr::Call {
+            func: *func,
+            args: args.iter().map(|a| replace_keys(a, keys)).collect(),
+        },
+        Expr::Case { when, otherwise } => Expr::Case {
+            when: when
+                .iter()
+                .map(|(c, v)| (replace_keys(c, keys), replace_keys(v, keys)))
+                .collect(),
+            otherwise: otherwise.as_ref().map(|o| r(o)),
+        },
+        Expr::Cast {
+            arg,
+            to,
+            length,
+            precision,
+        } => Expr::Cast {
+            arg: r(arg),
+            to: *to,
+            length: *length,
+            precision: *precision,
+        },
+        Expr::IsNull { arg, negated } => Expr::IsNull {
+            arg: r(arg),
+            negated: *negated,
+        },
+        Expr::InList { arg, list, negated } => Expr::InList {
+            arg: r(arg),
+            list: list.iter().map(|a| replace_keys(a, keys)).collect(),
+            negated: *negated,
+        },
+        Expr::Like { arg, pattern } => Expr::Like {
+            arg: r(arg),
+            pattern: r(pattern),
+        },
+    }
+}
+
+/// A table name as written (`db.schema.table`, `schema.table`, `table`).
+fn object_table(name: &sqlparser::ast::ObjectName) -> TableRef {
+    let parts: Vec<String> = name.0.iter().map(|i| i.value.clone()).collect();
+    let (schema, table) = match parts.as_slice() {
+        [t] => (None, t.clone()),
+        [.., s, t] => (Some(s.clone()), t.clone()),
+        [] => (None, String::new()),
+    };
+    TableRef {
+        connection: None,
+        schema,
+        table,
+    }
+}
+
+impl Builder<'_> {
+    /// A `tDBRow` / `tXRow` (EKOS RFC 0267 phase 2 §Statements): one SQL statement run from a
+    /// trigger.
+    fn statement(&mut self, c: &Component) {
+        use sqlparser::ast::{AssignmentTarget, Statement};
+        let Some(q) = param(c, "QUERY") else {
+            self.gap(
+                c,
+                "",
+                Vec::new(),
+                "statement component without a query".into(),
+            );
+            return;
+        };
+        let folded = self.job.fold(q);
+        if !folded.complete() {
+            self.gap(
+                c,
+                "",
+                Vec::new(),
+                format!(
+                    "the statement depends on values known only at run time: {}",
+                    folded.holes.join(", ")
+                ),
+            );
+            return;
+        }
+        let text = folded.text.trim().trim_end_matches(';').trim().to_string();
+        let engine = c.engine.clone().or_else(|| {
+            c.component_type
+                .contains("Snowflake")
+                .then(|| "snowflake".to_string())
+        });
+        let d = crate::sql::dialect(engine.as_deref());
+        let stmts = match sqlparser::parser::Parser::parse_sql(d.as_ref(), &text) {
+            Ok(s) => s,
+            Err(e) => {
+                self.gap(
+                    c,
+                    "",
+                    Vec::new(),
+                    format!("the statement does not parse: {e}"),
+                );
+                return;
+            }
+        };
+        let [stmt] = stmts.as_slice() else {
+            self.gap(
+                c,
+                "",
+                Vec::new(),
+                format!("{} statements in one component", stmts.len()),
+            );
+            return;
+        };
+        let mut tables: Vec<TableRef> = Vec::new();
+        let _ = sqlparser::ast::visit_relations(stmt, |r| {
+            let t = object_table(r);
+            if !tables.contains(&t) {
+                tables.push(t);
+            }
+            std::ops::ControlFlow::<()>::Continue(())
+        });
+        let verb = match stmt {
+            Statement::Update { .. } => "UPDATE",
+            Statement::Delete(_) => "DELETE",
+            Statement::Insert(_) => "INSERT",
+            Statement::Merge { .. } => "MERGE",
+            Statement::Truncate { .. } => "TRUNCATE",
+            other => {
+                let first = other.to_string();
+                let word = first
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                self.gap(
+                    c,
+                    "",
+                    Vec::new(),
+                    format!("a `{word}` statement (only UPDATE, DELETE, INSERT, MERGE and TRUNCATE are lowered)"),
+                );
+                return;
+            }
+        };
+        let target = tables.first().cloned();
+        let reads: Vec<TableRef> = tables.iter().skip(1).cloned().collect();
+        // A statement's columns are the changed table's, unqualified or qualified by its name.
+        let target_name = target.as_ref().map(|t| t.table.clone()).unwrap_or_default();
+        let column = move |q: &str, col: &str| {
+            (q.is_empty() || q.eq_ignore_ascii_case(&target_name))
+                .then(|| (Expr::col(col), KType::Unknown))
+        };
+        let mut set = Vec::new();
+        let mut predicate = None;
+        let mut fidelity = Fidelity::Rewritten;
+        let mut notes = vec![format!(
+            "a {verb} statement run from a trigger, not on rows: RFC 0268 places it (a hook)"
+        )];
+        notes.extend(self.run_time_notes(q));
+        let mut lower = |b: &mut Self, e: &sqlparser::ast::Expr| -> Result<Expr, Gap> {
+            let r = crate::sql::lower_ast(e, engine.as_deref(), &column);
+            b.count_sql(&r);
+            let (l, _) = r?;
+            fidelity = fidelity.max(l.fidelity);
+            for n in l.notes {
+                if !notes.contains(&n) {
+                    notes.push(n);
+                }
+            }
+            Ok(l.expr)
+        };
+        let lowered: Result<(), Gap> = (|| {
+            match stmt {
+                Statement::Update {
+                    assignments,
+                    selection,
+                    from: None,
+                    ..
+                } => {
+                    for a in assignments {
+                        let AssignmentTarget::ColumnName(n) = &a.target else {
+                            return Err(Gap::new("UPDATE of a tuple of columns"));
+                        };
+                        let col = n.0.last().map(|i| i.value.clone()).unwrap_or_default();
+                        set.push((col, lower(self, &a.value)?));
+                    }
+                    if let Some(w) = selection {
+                        predicate = Some(lower(self, w)?);
+                    }
+                }
+                Statement::Update { .. } => {
+                    return Err(Gap::new("UPDATE … FROM (a join in an update)"));
+                }
+                Statement::Delete(d) => {
+                    if let Some(w) = &d.selection {
+                        predicate = Some(lower(self, w)?);
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })();
+        if let Err(g) = lowered {
+            self.gap(c, "", Vec::new(), g.reason);
+            return;
+        }
+        let id = self.push(
+            c,
+            Op::Statement {
+                verb: verb.into(),
+                target,
+                reads,
+                set,
+                predicate,
+                sql: text,
+            },
+            Vec::new(),
+            Vec::new(),
+            fidelity,
+            notes,
+            None,
+        );
+        self.set(c, "", id);
+    }
+}
+
+/// `context.<var> = input_row.<column>;` in every `tJavaRow` of the job.
+fn context_writers(job: &Job) -> BTreeMap<String, (String, String)> {
+    use ekos_lakehouse_etl_expr::java::JExpr;
+    use ekos_lakehouse_etl_expr::stmt::{Stmt, parse_script};
+    let mut out = BTreeMap::new();
+    for c in job
+        .components
+        .iter()
+        .filter(|c| c.component_type == "tJavaRow")
+    {
+        let Some(code) = param(c, "CODE") else {
+            continue;
+        };
+        let Ok(stmts) = parse_script(code, false) else {
+            continue;
+        };
+        for st in stmts {
+            if let Stmt::Expr(JExpr::Assign("=", target, value)) = st
+                && let JExpr::Field(q, var) = target.as_ref()
+                && matches!(q.as_ref(), JExpr::Name(n) if n == "context")
+                && let JExpr::Field(r, col) = value.as_ref()
+                && matches!(r.as_ref(), JExpr::Name(n) if n == "input_row")
+            {
+                out.insert(var.clone(), (c.unique_name.clone(), col.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// `System.out.println(…)` / `print`, and an `if` holding nothing else: logging, not data.
+fn is_logging(st: &ekos_lakehouse_etl_expr::stmt::Stmt) -> bool {
+    use ekos_lakehouse_etl_expr::java::JExpr;
+    use ekos_lakehouse_etl_expr::stmt::Stmt;
+    match st {
+        Stmt::Expr(JExpr::Call(Some(recv), name, _)) => {
+            matches!(name.as_str(), "println" | "print")
+                && matches!(recv.as_ref(), JExpr::Field(s, out)
+                    if (out == "out" || out == "err") && matches!(s.as_ref(), JExpr::Name(n) if n == "System"))
+        }
+        Stmt::If(_, then, other) => then.iter().chain(other).all(is_logging),
+        Stmt::Block(b) => b.iter().all(is_logging),
+        _ => false,
+    }
+}
+
+impl Builder<'_> {
+    /// Notes for the context variables `text` reads that are known only at run time: set from a
+    /// row by a `tJavaRow` (a watermark), or replaceable by an implicit context load or a
+    /// `tContextLoad` (RFC 0264).
+    fn run_time_notes(&self, text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for (_, var) in ekos_talend::qualified_refs(text, &["context"]) {
+            if let Some((component, column)) = self.writers.get(&var) {
+                out.push(format!(
+                    "`context.{var}` is set at run time by {component} from column `{column}` (a watermark): the default value is not what a run reads"
+                ));
+            } else if self.runtime.overridable(&var) {
+                out.push(format!(
+                    "`context.{var}` can be replaced at run time (implicit context load or tContextLoad): lowered to its default value"
+                ));
+            }
+        }
+        out
+    }
+
+    /// A `tJavaRow` (EKOS RFC 0267 phase 2): `output_row.<c> = <expr>;` is a projection,
+    /// `context.<v> = input_row.<c>;` a run-time context value, logging is dropped; anything
+    /// else is a gap.
+    fn java_row(&mut self, c: &Component) {
+        use ekos_lakehouse_etl_expr::java::JExpr;
+        use ekos_lakehouse_etl_expr::stmt::{Stmt, parse_script};
+        let input = self.main_input(c);
+        let inputs: Vec<NodeId> = input.into_iter().collect();
+        let Some(code) = param(c, "CODE") else {
+            self.gap(c, "", inputs, "tJavaRow without code".into());
+            return;
+        };
+        let stmts = match parse_script(code, false) {
+            Ok(s) => s,
+            Err(g) => {
+                self.gap(c, "", inputs, format!("tJavaRow code: {}", g.reason));
+                return;
+            }
+        };
+        let in_fields = input.map(|i| self.input_schema(i)).unwrap_or_default();
+        let column = {
+            let f = in_fields.clone();
+            move |q: &str, col: &str| {
+                (q == "input_row")
+                    .then(|| f.iter().find(|x| x.name == col))
+                    .flatten()
+                    .map(|x| (Expr::col(&x.name), x.ty))
+            }
+        };
+        let context = context_of(self.job);
+        let global = global_of(self.job);
+        let none = |_: &str| None;
+        let scope = Scope {
+            column: &column,
+            var: &none,
+            context: &context,
+            job: &self.job.name,
+            global: &global,
+            routines: self.routines,
+            sequence: &no_sequence,
+        };
+        let mut assigned: Vec<(String, Expr, KType)> = Vec::new();
+        let mut fidelity = Fidelity::Exact;
+        let mut notes: Vec<String> = Vec::new();
+        let mut failure: Option<String> = None;
+        let mut results = Vec::new();
+        for st in &stmts {
+            if is_logging(st) {
+                let n = "the code's printing (System.out) is dropped: it is logging, not data"
+                    .to_string();
+                if !notes.contains(&n) {
+                    notes.push(n);
+                }
+                continue;
+            }
+            let Stmt::Expr(JExpr::Assign("=", target, value)) = st else {
+                failure.get_or_insert(format!("tJavaRow statement not translated: {st:?}"));
+                continue;
+            };
+            let JExpr::Field(q, name) = target.as_ref() else {
+                failure.get_or_insert(format!("tJavaRow assignment to {target:?}"));
+                continue;
+            };
+            match q.as_ref() {
+                JExpr::Name(n) if n == "output_row" => {
+                    let r = crate::expr::lower_parsed(value, &scope);
+                    results.push(r.as_ref().map(|_| ()).map_err(Clone::clone));
+                    match r {
+                        Ok((l, t)) => {
+                            fidelity = fidelity.max(l.fidelity);
+                            for x in l.notes {
+                                if !notes.contains(&x) {
+                                    notes.push(x);
+                                }
+                            }
+                            assigned.retain(|(n, _, _)| n != name);
+                            assigned.push((name.clone(), l.expr, t));
+                        }
+                        Err(g) => {
+                            failure.get_or_insert(format!("`{name}`: {}", g.reason));
+                        }
+                    }
+                }
+                JExpr::Name(n) if n == "context" => {
+                    let JExpr::Field(r, col) = value.as_ref() else {
+                        failure.get_or_insert(format!(
+                            "`context.{name}` is set from a computed value"
+                        ));
+                        continue;
+                    };
+                    if !matches!(r.as_ref(), JExpr::Name(n) if n == "input_row") {
+                        failure.get_or_insert(format!("`context.{name}` is set from {r:?}"));
+                        continue;
+                    }
+                    self.out.context_from_data.push(ContextFromData {
+                        var: name.clone(),
+                        component: c.unique_name.clone(),
+                        column: col.clone(),
+                        from: input,
+                    });
+                }
+                other => {
+                    failure.get_or_insert(format!("tJavaRow assignment to {other:?}.{name}"));
+                }
+            }
+        }
+        for r in results {
+            self.count_unit(r);
+        }
+        if let Some(reason) = failure {
+            self.gap(c, "", inputs, reason);
+            return;
+        }
+        let Some(input) = input else {
+            self.gap(c, "", Vec::new(), "tJavaRow with no row link in".into());
+            return;
+        };
+        let out_fields = schema(c, "");
+        let mut items = Vec::new();
+        let mut fields = Vec::new();
+        let mut unassigned = Vec::new();
+        for f in &out_fields {
+            match assigned.iter().find(|(n, _, _)| *n == f.name) {
+                Some((_, e, t)) => {
+                    items.push((f.name.clone(), e.clone()));
+                    fields.push(Field {
+                        ty: if f.ty == KType::Unknown { *t } else { f.ty },
+                        ..f.clone()
+                    });
+                }
+                None => {
+                    unassigned.push(f.name.clone());
+                    items.push((f.name.clone(), Expr::null()));
+                    fields.push(f.clone());
+                }
+            }
+        }
+        if !unassigned.is_empty() && !assigned.is_empty() {
+            notes.push(format!(
+                "the code does not assign {}: null, as in Talend",
+                unassigned.join(", ")
+            ));
+        }
+        if assigned.is_empty()
+            && !self
+                .out
+                .context_from_data
+                .iter()
+                .any(|x| x.component == c.unique_name)
+        {
+            notes.push("the code assigns no output column".into());
+        }
+        let id = self.push(
+            c,
+            Op::Project { items },
+            vec![input],
+            fields,
+            fidelity,
+            notes,
+            None,
+        );
+        self.set(c, "", id);
+    }
+
+    /// A `tSampleRow`: the rows at the listed line numbers (`1,5`, `10..20`), by arrival order.
+    fn sample_row(&mut self, c: &Component) {
+        let Some(input) = self.main_input(c) else {
+            self.gap(c, "", Vec::new(), "tSampleRow with no row link in".into());
+            return;
+        };
+        let range = param(c, "RANGE").map(|r| self.job.fold(r));
+        let Some(range) = range.filter(|f| f.complete()).map(|f| f.text) else {
+            self.gap(
+                c,
+                "",
+                vec![input],
+                "tSampleRow range known only at run time".into(),
+            );
+            return;
+        };
+        let line = Expr::col(DUP_ROW);
+        let mut parts = Vec::new();
+        for item in range.split(',').map(str::trim).filter(|x| !x.is_empty()) {
+            let num = |t: &str| t.trim().parse::<i64>().ok();
+            let p = match item.split_once("..") {
+                Some((a, b)) => match (num(a), num(b)) {
+                    (Some(a), Some(b)) => Expr::and(
+                        Expr::bin(BinOp::GtEq, line.clone(), Expr::int(a)),
+                        Expr::bin(BinOp::LtEq, line.clone(), Expr::int(b)),
+                    ),
+                    _ => {
+                        self.gap(c, "", vec![input], format!("tSampleRow range `{range}`"));
+                        return;
+                    }
+                },
+                None => match num(item) {
+                    Some(n) => Expr::bin(BinOp::Eq, line.clone(), Expr::int(n)),
+                    None => {
+                        self.gap(c, "", vec![input], format!("tSampleRow range `{range}`"));
+                        return;
+                    }
+                },
+            };
+            parts.push(p);
+        }
+        let Some(first) = parts.first().cloned() else {
+            self.gap(c, "", vec![input], "tSampleRow with an empty range".into());
+            return;
+        };
+        let predicate = parts.into_iter().skip(1).fold(first, Expr::or);
+        let schema = self.input_schema(input);
+        let mut numbered = schema.clone();
+        numbered.push(Field::new(DUP_ROW, KType::Integer));
+        let note = "line numbers count rows in arrival order, which SQL does not keep: the order must be stated".to_string();
+        let w = self.push(
+            c,
+            Op::Window {
+                partition: Vec::new(),
+                order: Vec::new(),
+                items: vec![(
+                    DUP_ROW.to_string(),
+                    ekos_lakehouse_etl_rel::WindowFn::Sequence {
+                        start: 1,
+                        increment: 1,
+                    },
+                )],
+            },
+            vec![input],
+            numbered.clone(),
+            Fidelity::Rewritten,
+            vec![note.clone()],
+            None,
+        );
+        let f = self.push(
+            c,
+            Op::Filter { predicate },
+            vec![w],
+            numbered,
+            Fidelity::Rewritten,
+            Vec::new(),
+            None,
+        );
+        let items = schema
+            .iter()
+            .map(|x| (x.name.clone(), Expr::col(&x.name)))
+            .collect();
+        let id = self.push(
+            c,
+            Op::Project { items },
+            vec![f],
+            schema,
+            Fidelity::Rewritten,
+            vec![note],
+            None,
+        );
+        self.set(c, "", id);
+    }
+}
+
+/// The name an ELT map's expressions use for an input.
+fn elt_alias(i: &EltInput) -> &str {
+    if i.alias.is_empty() {
+        &i.name
+    } else {
+        &i.alias
+    }
+}
+
+/// No `Numeric.sequence` column where a component computes none.
+fn no_sequence(_: &str) -> Option<Expr> {
+    None
+}
+
+/// Every `Numeric.sequence` name in the job's tMaps, with where it is read: `(component, output)`,
+/// or `(component, "")` for a variable.
+fn sequence_users(job: &Job) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut out: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for c in &job.components {
+        let mut add = |text: &str, port: &str| {
+            for (name, _) in crate::expr::sequences(text) {
+                out.entry(name)
+                    .or_default()
+                    .push((c.unique_name.clone(), port.to_string()));
+            }
+        };
+        if matches!(
+            c.component_type.as_str(),
+            "tRowGenerator" | "tFixedFlowInput"
+        ) {
+            for table in ["VALUES"] {
+                for r in rows(c, table) {
+                    for key in ["ARRAY", "VALUE"] {
+                        if let Some(t) = r.get(key) {
+                            add(t, "");
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(m) = &c.mapper else {
+            continue;
+        };
+        for v in &m.vars {
+            add(v.expression.as_deref().unwrap_or_default(), "");
+        }
+        for o in &m.outputs {
+            if let Some(f) = &o.filter {
+                add(f, &o.name);
+            }
+            for e in &o.entries {
+                add(e.expression.as_deref().unwrap_or_default(), &o.name);
+            }
+        }
+    }
+    out
 }
 
 /// `context.<name>`: the job's default value and its type.

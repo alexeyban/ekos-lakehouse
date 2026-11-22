@@ -366,6 +366,11 @@ pub fn node_sql(
             parts.join(" UNION ALL ")
         }
         Op::Assert { .. } | Op::Sink { .. } => format!("SELECT * FROM {}", one()?),
+        Op::Statement { verb, .. } => {
+            return Err(Gap::new(format!(
+                "a {verb} statement is not a relation: it runs as a hook (RFC 0268)"
+            )));
+        }
         Op::Gap { reason } => return Err(Gap::new(reason.clone())),
     })
 }

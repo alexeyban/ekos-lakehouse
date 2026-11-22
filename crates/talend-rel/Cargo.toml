@@ -11,6 +11,8 @@ rust-version.workspace = true
 ekos-talend.workspace = true
 ekos-lakehouse-etl-expr.workspace = true
 ekos-lakehouse-etl-rel.workspace = true
+sqlparser = { workspace = true, features = ["visitor"] }
 
 [dev-dependencies]
+sqlparser.workspace = true
 serde_json.workspace = true
