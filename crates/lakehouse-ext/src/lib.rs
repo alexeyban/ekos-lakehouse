@@ -524,6 +524,12 @@ impl EkosExtension for LakehouseExtension {
                                         .help("The JVM locale the jobs ran under (fr_FR, de_DE, en_GB, en_US, …): week numbers and month and day names follow it"),
                                 )
                                 .arg(
+                                    clap::Arg::new("allow-metered")
+                                        .long("allow-metered")
+                                        .action(clap::ArgAction::SetTrue)
+                                        .help("Let a paid model draft the gaps the translator cannot follow (RFC 0205); an Ollama route needs no flag"),
+                                )
+                                .arg(
                                     clap::Arg::new("out")
                                         .long("out")
                                         .value_parser(clap::value_parser!(std::path::PathBuf))
@@ -1834,6 +1840,7 @@ impl EkosExtension for LakehouseExtension {
                                 })
                                 .unwrap_or_default(),
                             locale: m.get_one::<String>("locale").cloned(),
+                            allow_metered: m.get_flag("allow-metered"),
                         };
                         let repo = pipeline_dir(&settings, ctx);
                         talend_cmd::translate(&settings, ctx, &o, &repo).await

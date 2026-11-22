@@ -709,6 +709,45 @@ pub fn lit_text(l: &Lit) -> String {
     }
 }
 
+/// The columns a node reads; `None` for a kind this rule does not look into (it refuses then).
+fn reads_columns(n: &RelNode) -> Option<Vec<String>> {
+    Some(match &n.op {
+        Op::Project { items } => items.iter().flat_map(|(_, e)| e.columns()).collect(),
+        Op::Filter { predicate } => predicate.columns(),
+        Op::Join {
+            keys, condition, ..
+        } => keys
+            .iter()
+            .flat_map(|(a, b)| [a.clone(), b.clone()])
+            .chain(condition.iter().flat_map(Expr::columns))
+            .collect(),
+        Op::Lookup { keys, .. } => keys
+            .iter()
+            .flat_map(|(a, b)| [a.clone(), b.clone()])
+            .collect(),
+        Op::Aggregate { group_by, aggs } => group_by
+            .iter()
+            .cloned()
+            .chain(aggs.iter().filter_map(|a| a.subject.clone()))
+            .collect(),
+        Op::Window {
+            partition, order, ..
+        } => partition
+            .iter()
+            .cloned()
+            .chain(order.iter().map(|k| k.field.clone()))
+            .collect(),
+        Op::Distinct { keys, .. } => keys.clone(),
+        Op::Sort { keys } => keys.iter().map(|k| k.field.clone()).collect(),
+        Op::Union => Vec::new(),
+        _ => return None,
+    })
+}
+
+/// Delete the target rows a left join on the target matched, insert every staged row: one merge
+/// on the deleted key. The join may sit anywhere in a chain (fixture E joins dates and other
+/// tables after it): the insert's path from the join is rebuilt on the join's staged side, which
+/// holds when nothing on that path reads the target's columns.
 fn keyed_replace(ir: &mut Ir, sinks: &[NodeId], table: &TableRef) -> Result<Group, Refusal> {
     let mode = |i: NodeId| sink_of(ir.node(i)).map(|s| s.mode);
     let (d, i) = match (mode(sinks[0]), mode(sinks[1])) {
@@ -718,47 +757,79 @@ fn keyed_replace(ir: &mut Ir, sinks: &[NodeId], table: &TableRef) -> Result<Grou
             return Err((st(ir, sinks[0]), "not one delete and one insert".into()));
         }
     };
-    let (Some(db), Some(ib)) = (branch(ir, ir.node(d)), branch(ir, ir.node(i))) else {
+    let (Some(&dproj), Some(&iproj)) = (ir.node(d).inputs.first(), ir.node(i).inputs.first())
+    else {
+        return Err((st(ir, d), "an output with no input".into()));
+    };
+    let (Some(del_items), Some(_)) = (project_items(ir.node(dproj)), project_items(ir.node(iproj)))
+    else {
         return Err((
             st(ir, d),
-            "the delete and the insert do not read one join".into(),
+            "the delete or the insert is not fed by a projection".into(),
         ));
     };
-    if db.base != ib.base || !ib.filters.is_empty() {
+    let bcol = match del_items.as_slice() {
+        [(_, Expr::Col { name })] => name,
+        [_] => {
+            return Err((
+                st(ir, d),
+                format!(
+                    "{} deletes a key it computes, not one read from the target",
+                    st(ir, d)
+                ),
+            ));
+        }
+        _ => {
+            return Err((
+                st(ir, d),
+                format!("{} deletes more than one key column", st(ir, d)),
+            ));
+        }
+    };
+    let bcol = bcol.clone();
+    // The left join on the target both outputs depend on.
+    let (up_d, up_i) = (upstream(ir, dproj), upstream(ir, iproj));
+    let join = up_d.intersection(&up_i).copied().find(|j| {
+        let n = ir.node(*j);
+        matches!(
+            n.op,
+            Op::Join {
+                kind: JoinKind::Left,
+                ..
+            }
+        ) && n.inputs.len() == 2
+            && reads(ir, n.inputs[1], table)
+            && !reads(ir, n.inputs[0], table)
+            && names(ir.node(n.inputs[1])).contains(&bcol)
+    });
+    let Some(join) = join else {
         return Err((
             st(ir, d),
-            "the delete and the insert do not read one join".into(),
+            format!(
+                "no left join of the staged rows with `{}` feeds both outputs, keyed by what the delete removes",
+                table.table
+            ),
         ));
-    }
-    let Op::Join {
-        kind: JoinKind::Left,
-        keys: jkeys,
-        ..
-    } = &ir.node(db.base).op
-    else {
-        return Err((st(ir, d), "the delete does not read a left join".into()));
+    };
+    let (a, b) = (ir.node(join).inputs[0], ir.node(join).inputs[1]);
+    let Op::Join { keys: jkeys, .. } = &ir.node(join).op else {
+        unreachable!()
     };
     let jkeys = jkeys.clone();
-    let [a, b] = ir.node(db.base).inputs[..] else {
-        return Err((st(ir, d), "the join has not two inputs".into()));
-    };
-    if !reads(ir, b, table) || reads(ir, a, table) {
-        return Err((
-            st(ir, d),
-            format!("the join's right side is not `{}`", table.table),
-        ));
-    }
-    let del_items = project_items(ir.node(db.project)).expect("projection");
-    let [(_, Expr::Col { name: bcol })] = del_items.as_slice() else {
-        return Err((
-            st(ir, d),
-            format!("{} deletes more than one key column", st(ir, d)),
-        ));
-    };
-    let matched = db.filters.len() == 1
-        && predicate(ir, db.filters[0])
-            .and_then(is_null_of)
-            .is_some_and(|(c, neg)| neg && c == bcol);
+    let after = |id: NodeId| upstream(ir, id).contains(&join) && id != join;
+    // The delete removes the matched rows: `bcol IS NOT NULL` after the join, or no filter at all
+    // (an unmatched row's `bcol` is NULL, which equals no key).
+    let filters: Vec<NodeId> = up_d
+        .iter()
+        .copied()
+        .filter(|x| after(*x) && matches!(ir.node(*x).op, Op::Filter { .. }))
+        .collect();
+    let matched = filters.is_empty()
+        || filters.iter().any(|x| {
+            predicate(ir, *x)
+                .and_then(is_null_of)
+                .is_some_and(|(c, neg)| neg && c == bcol)
+        });
     if !matched {
         return Err((
             st(ir, d),
@@ -781,34 +852,80 @@ fn keyed_replace(ir: &mut Ir, sinks: &[NodeId], table: &TableRef) -> Result<Grou
     else {
         return Err((st(ir, i), format!("{} does not write `{key}`", st(ir, i))));
     };
-    let ins_items = project_items(ir.node(ib.project))
-        .expect("projection")
-        .clone();
-    let a_cols = names(ir.node(a));
-    if !ins_items
-        .iter()
-        .all(|(_, e)| e.columns().iter().all(|c| a_cols.contains(c)))
-    {
-        return Err((
-            st(ir, i),
-            format!("{} reads `{}`'s own columns", st(ir, i), table.table),
-        ));
+    let kstream = kstream.clone();
+    // The insert's path from the join reads none of the target's columns.
+    let b_cols = names(ir.node(b));
+    let mut path: Vec<NodeId> = up_i.iter().copied().filter(|x| after(*x)).collect();
+    path.sort_unstable();
+    // A projection item that only passes a target column on is not a read: it is dropped below.
+    let passes =
+        |k: &str, e: &Expr| matches!(e, Expr::Col { name } if name == k) && b_cols.contains(k);
+    let without_passes = |op: &Op| match op {
+        Op::Project { items } => Op::Project {
+            items: items
+                .iter()
+                .filter(|(k, e)| !passes(k, e))
+                .cloned()
+                .collect(),
+        },
+        other => other.clone(),
+    };
+    for x in &path {
+        let n = &RelNode {
+            op: without_passes(&ir.node(*x).op),
+            ..ir.node(*x).clone()
+        };
+        let Some(cols) = reads_columns(n) else {
+            return Err((
+                st(ir, i),
+                format!(
+                    "{}'s path holds a {} this rule does not read",
+                    st(ir, i),
+                    n.step_type
+                ),
+            ));
+        };
+        if let Some(c) = cols.iter().find(|c| b_cols.contains(*c)) {
+            return Err((
+                st(ir, i),
+                format!("{} reads `{}`'s column `{c}`", st(ir, i), table.table),
+            ));
+        }
     }
+    let ins_items = project_items(ir.node(iproj)).expect("projection").clone();
     let kexpr = ins_items
         .iter()
-        .find(|(n, _)| n == kstream)
+        .find(|(n, _)| *n == kstream)
         .map(|(_, e)| format!("`{}`", e.sql()))
         .unwrap_or_default();
-    let schema = ir.node(ib.project).schema.clone();
-    let like = ir.node(ib.project).clone();
-    let body = push(
-        ir,
-        &like,
-        Op::Project { items: ins_items },
-        vec![a],
-        schema.clone(),
-        "keyed replace",
-    );
+    // Rebuild the path on the staged side.
+    let mut map: std::collections::BTreeMap<NodeId, NodeId> = std::collections::BTreeMap::new();
+    map.insert(join, a);
+    for x in &path {
+        let like = ir.node(*x).clone();
+        let inputs = like
+            .inputs
+            .iter()
+            .map(|q| *map.get(q).unwrap_or(q))
+            .collect();
+        let schema = like
+            .schema
+            .iter()
+            .filter(|f| !b_cols.contains(&f.name))
+            .cloned()
+            .collect();
+        let id = push(
+            ir,
+            &like,
+            without_passes(&like.op),
+            inputs,
+            schema,
+            "keyed replace",
+        );
+        map.insert(*x, id);
+    }
+    let body = map[&iproj];
+    let schema = ir.node(body).schema.clone();
     let sink_like = ir.node(i).clone();
     let vsink = push(
         ir,
@@ -843,7 +960,7 @@ fn keyed_replace(ir: &mut Ir, sinks: &[NodeId], table: &TableRef) -> Result<Grou
             si.clone(),
             "keyed-replace".into(),
             format!(
-                "{sd} deletes the rows the staging rows match on {}, and {si} inserts the staging rows with `{key}` computed as {kexpr}. One merge on `{key}` gives the same table when every `{key}` in it was computed that way from its row: was it?",
+                "{sd} deletes the rows the staging rows match on {}, and {si} inserts the staging rows with `{key}` computed as {kexpr}. One merge on `{key}` gives the same table when every `{key}` in it was computed that way from its row, and when the staged rows match at most one target row each: was it?",
                 on.join(", ")
             ),
         )],
@@ -1177,6 +1294,79 @@ mod tests {
         // The join on the target is gone: the body reads the staged rows only.
         assert_eq!(ir.node(v.inputs[0]).inputs, vec![a]);
         assert!(g.questions[0].2.contains("md5"), "{:?}", g.questions);
+    }
+
+    /// Fixture E's chained form: the join on the target, then an inner join on a dates table and a
+    /// pass-through of the target's columns; the delete has no filter (a NULL key deletes nothing).
+    #[test]
+    fn a_keyed_replace_whose_join_sits_in_a_chain_is_rebuilt_on_the_staged_side() {
+        let mut b = B::new();
+        let a = b.source("tELTInput_1", "stg", &["K", "D"]);
+        let a = b.project("tELTMap_1", a, &[("A__K", c("K")), ("A__D", c("D"))]);
+        let t_ = b.source("tELTInput_2", "target", &["K", "PK"]);
+        let t_ = b.project("tELTMap_1", t_, &[("B__K", c("K")), ("B__PK", c("PK"))]);
+        let dates = b.source("tELTInput_3", "dates", &["FROM"]);
+        let dates = b.project("tELTMap_1", dates, &[("DATES__FROM", c("FROM"))]);
+        let j = b.add(
+            "tELTMap_1",
+            Op::Join {
+                kind: JoinKind::Left,
+                keys: vec![("A__K".into(), "B__K".into())],
+                condition: None,
+            },
+            vec![a, t_],
+            &["A__K", "A__D", "B__K", "B__PK"],
+        );
+        let pass = b.project(
+            "tELTMap_1",
+            j,
+            &[
+                ("A__K", c("A__K")),
+                ("A__D", c("A__D")),
+                ("B__PK", c("B__PK")),
+            ],
+        );
+        let j2 = b.add(
+            "tELTMap_1",
+            Op::Join {
+                kind: JoinKind::Inner,
+                keys: vec![],
+                condition: Some(Expr::bin(BinOp::GtEq, c("A__D"), c("DATES__FROM"))),
+            },
+            vec![pass, dates],
+            &["A__K", "A__D", "B__PK", "DATES__FROM"],
+        );
+        let d = b.project("tELTMap_1", j2, &[("PK", c("B__PK"))]);
+        b.sink("tELTOutput_2", d, "target", SinkMode::Delete, &["PK"], &[]);
+        let i = b.project(
+            "tELTMap_1",
+            j2,
+            &[
+                ("K", c("A__K")),
+                ("PK", Expr::call(Func::Md5Hex, vec![c("A__K")])),
+            ],
+        );
+        b.sink(
+            "tELTOutput_1",
+            i,
+            "target",
+            SinkMode::Insert,
+            &["K", "PK"],
+            &[],
+        );
+        let mut ir = b.0;
+        let r = recognise(&mut ir);
+        assert!(r.refused.is_empty(), "{:?}", r.refused);
+        let g = &r.groups[0];
+        assert_eq!(g.kind, Kind::KeyedReplace { key: "PK".into() });
+        // The rebuilt path reads the staged rows and the dates, never the target.
+        let v = ir.node(g.sink.unwrap());
+        let up = upstream(&ir, v.id);
+        assert!(!up.contains(&j) && up.contains(&a) && up.contains(&dates));
+        assert!(
+            up.iter()
+                .all(|x| !ir.node(*x).schema.iter().any(|f| f.name.starts_with("B__")))
+        );
     }
 
     #[test]

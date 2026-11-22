@@ -1099,6 +1099,26 @@ fn talend_page() -> ConsolePage {
                 empty: "This component is in no model.",
             },
             Panel {
+                id: "verification",
+                title: "Verified by execution (the project's own jobs in the sandbox)",
+                command: report(),
+                params: vec!["talend-project"],
+                view: View::Table {
+                    rows: "/verification/models",
+                    columns: vec![
+                        Column::new("/table", "Table"),
+                        Column::new("/model", "Model"),
+                        Column::badge("/result", "Result"),
+                        Column::new("/rows", "Rows"),
+                        Column::new("/only_talend", "Only Talend"),
+                        Column::new("/only_dbt", "Only dbt"),
+                        Column::new("/excluded", "Left out"),
+                        Column::new("/reason", "Why not verified"),
+                    ],
+                },
+                empty: "Not verified by execution: no differential run yet (scripts/talend-sandbox/run.sh, then lakehouse talend verify).",
+            },
+            Panel {
                 id: "questions",
                 title: "Questions",
                 command: report(),

@@ -1553,6 +1553,8 @@ dependencies = [
  "ekos-lakehouse-silver",
  "ekos-plugin-sql-dialect-trino",
  "ekos-sql-dialect-sdk",
+ "serde",
+ "serde_json",
  "sqlparser",
 ]
 
@@ -1589,6 +1591,7 @@ dependencies = [
  "ekos-lakehouse-changes",
  "ekos-lakehouse-etl-dbt",
  "ekos-lakehouse-etl-expr",
+ "ekos-lakehouse-etl-rel",
  "ekos-lakehouse-gold",
  "ekos-lakehouse-health",
  "ekos-lakehouse-kettle",

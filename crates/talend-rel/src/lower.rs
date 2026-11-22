@@ -43,6 +43,8 @@ pub struct Lowering {
     /// Context variables a `tJavaRow` sets from a row (`context.v = input_row.c;`): known only at
     /// run time, the watermark pattern (RFC 0267 phase 2 §tJavaRow and run-time context).
     pub context_from_data: Vec<ContextFromData>,
+    /// Gaps a model may draft (RFC 0268 phase 3).
+    pub draftable: Vec<Draftable>,
 }
 
 /// `context.<var> = input_row.<column>;` in `component`, whose rows come from node `from`.
@@ -55,11 +57,29 @@ pub struct ContextFromData {
 }
 
 /// What the operator states about the run that the project does not (EKOS RFC 0268 phase 2).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Options {
     /// The JVM's default locale ([`Locale::parse`]). Unstated, what depends on it (week numbers,
     /// month and day names) is a gap.
     pub locale: Option<Locale>,
+    /// Checked model drafts (RFC 0205 through RFC 0268 phase 3), by `(job, component, port)`: the
+    /// gap there becomes the draft, `llm-drafted`.
+    pub drafts: std::collections::BTreeMap<(String, String, String), ekos_lakehouse_etl_rel::Draft>,
+}
+
+/// A gap a model may draft: one component's output from one input whose fields are all known,
+/// with the component's own text (its code, or the tMap output's expressions).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Draftable {
+    pub job: String,
+    pub component: String,
+    /// The output port (a tMap output's name), or empty.
+    pub port: String,
+    pub component_type: String,
+    pub original: String,
+    pub inputs: Vec<Field>,
+    pub outputs: Vec<Field>,
+    pub reason: String,
 }
 
 /// A JVM locale the lowering knows: its week rule (from the country) and its month and day
@@ -254,7 +274,7 @@ pub fn lower_job_with(
         job,
         routines,
         catalog,
-        options: *options,
+        options: options.clone(),
         out: Lowering {
             ir: Ir {
                 transformation: job.path.clone(),
@@ -445,6 +465,14 @@ impl Builder<'_> {
 
     fn gap(&mut self, c: &Component, port: &str, inputs: Vec<NodeId>, reason: String) -> NodeId {
         let schema = schema(c, port);
+        if let [input] = inputs.as_slice()
+            && let Some(id) = self.drafted(c, port, *input, &schema, &reason)
+        {
+            return id;
+        }
+        if let [input] = inputs.as_slice() {
+            self.offer_draft(c, port, *input, &schema, &reason);
+        }
         let id = self.push(
             c,
             Op::Gap { reason },
@@ -457,6 +485,134 @@ impl Builder<'_> {
         self.ports
             .insert((c.unique_name.clone(), port.to_string()), id);
         id
+    }
+
+    /// The text a model drafts from: a code component's code, or a tMap output's filter and
+    /// expressions (with the map's variables). `None` for a component that is neither.
+    fn original_text(&self, c: &Component, port: &str) -> Option<String> {
+        if let Some(m) = &c.mapper {
+            let o = m.outputs.iter().find(|o| o.name == port)?;
+            let mut t = String::new();
+            for v in &m.vars {
+                t.push_str(&format!(
+                    "Var.{} = {}\n",
+                    v.name,
+                    v.expression.as_deref().unwrap_or("")
+                ));
+            }
+            if let Some(f) = &o.filter {
+                t.push_str(&format!("filter: {f}\n"));
+            }
+            for e in &o.entries {
+                t.push_str(&format!(
+                    "{} = {}\n",
+                    e.name,
+                    e.expression.as_deref().unwrap_or("")
+                ));
+            }
+            return Some(t);
+        }
+        let code: Vec<&str> = ["CODE", "CODE_START", "CODE_MAIN", "CODE_END"]
+            .iter()
+            .filter_map(|k| param(c, k))
+            .collect();
+        (!code.is_empty()).then(|| code.join("\n// ---\n"))
+    }
+
+    fn offer_draft(
+        &mut self,
+        c: &Component,
+        port: &str,
+        input: NodeId,
+        outputs: &[Field],
+        reason: &str,
+    ) {
+        let n = &self.out.ir.nodes[input];
+        if n.is_gap() || outputs.is_empty() || n.schema.iter().any(|f| f.ty == KType::Unknown) {
+            return;
+        }
+        let Some(original) = self.original_text(c, port) else {
+            return;
+        };
+        self.out.draftable.push(Draftable {
+            job: self.job.name.clone(),
+            component: c.unique_name.clone(),
+            port: port.to_string(),
+            component_type: c.component_type.clone(),
+            original,
+            inputs: n.schema.clone(),
+            outputs: outputs.to_vec(),
+            reason: reason.to_string(),
+        });
+    }
+
+    /// The draft for this gap, when the options hold one: the rows kept, then each declared output
+    /// from its drafted expression (RFC 0205's form, `llm-drafted`).
+    fn drafted(
+        &mut self,
+        c: &Component,
+        port: &str,
+        input: NodeId,
+        outputs: &[Field],
+        reason: &str,
+    ) -> Option<NodeId> {
+        let d = self
+            .options
+            .drafts
+            .get(&(
+                self.job.name.clone(),
+                c.unique_name.clone(),
+                port.to_string(),
+            ))?
+            .clone();
+        let items: Vec<(String, Expr)> = outputs
+            .iter()
+            .map(|f| {
+                let (_, sql) = d.columns.iter().find(|(n, _)| *n == f.name)?;
+                Some((
+                    f.name.clone(),
+                    Expr::Sql {
+                        text: sql.clone(),
+                        ty: f.ty,
+                    },
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let notes = vec![
+            format!("drafted by {} (the translator could not follow it: {reason})", d.model),
+            "checked: parses as Trino, reads only the component's input fields, functions on the list, literals from its text".into(),
+        ];
+        let branch = (!port.is_empty()).then(|| port.to_string());
+        let mut head = input;
+        if let Some(p) = &d.keep_when {
+            let schema = self.out.ir.nodes[input].schema.clone();
+            head = self.push(
+                c,
+                Op::Filter {
+                    predicate: Expr::Sql {
+                        text: p.clone(),
+                        ty: KType::Boolean,
+                    },
+                },
+                vec![input],
+                schema,
+                Fidelity::LlmDrafted,
+                notes.clone(),
+                branch.clone(),
+            );
+        }
+        let id = self.push(
+            c,
+            Op::Project { items },
+            vec![head],
+            outputs.to_vec(),
+            Fidelity::LlmDrafted,
+            notes,
+            branch,
+        );
+        self.ports
+            .insert((c.unique_name.clone(), port.to_string()), id);
+        Some(id)
     }
 
     fn set(&mut self, c: &Component, port: &str, id: NodeId) {

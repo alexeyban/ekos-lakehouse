@@ -17,24 +17,86 @@
   ],
   "context_rows": {
     "table": "\"PARAMS_LOG\".\"CONTEXTE\"",
-    "set": { "database": "vente_db", "serverName": "localhost", "port": "5432" },
+    "set": {
+      "database": "vente_db",
+      "serverName": "localhost",
+      "port": "5432"
+    },
     "why": "the table names database Vente_DB, the jobs' defaults vente_db; the runner keeps the defaults"
   },
   "inputs": [
-    { "from": "csvFiles", "to": "C:/PROJET_TALEND/ICOMMERCE/{run_day}", "why": "tFileList reads context.projectFolder + TalendDate.getDate(\"YYYYMMDD\")" },
-    { "from": "joursFeries.xlsx", "to": "C:/Users/pc/Downloads", "why": "jGenerateCalendar's tFileInputExcel names this path" }
+    {
+      "from": "csvFiles",
+      "to": "C:/PROJET_TALEND/ICOMMERCE/{run_day}",
+      "why": "tFileList reads context.projectFolder + TalendDate.getDate(\"YYYYMMDD\")"
+    },
+    {
+      "from": "joursFeries.xlsx",
+      "to": "C:/Users/pc/Downloads",
+      "why": "jGenerateCalendar's tFileInputExcel names this path"
+    }
   ],
   "jobs": [
-    "jOdsCategorie", "jOdsSousCategorie", "jOdsProduit", "jOdsTypeClient", "jOdsClient", "jOdsVente",
+    "jOdsCategorie",
+    "jOdsSousCategorie",
+    "jOdsProduit",
+    "jOdsTypeClient",
+    "jOdsClient",
+    "jOdsVente",
     "jGenerateCalendar",
-    "jDwhProduit", "jDwhClient", "jDwhVente"
+    "jDwhProduit",
+    "jDwhClient",
+    "jDwhVente"
   ],
   "order_from": "jChargeODS then jChargeDWH (their tRunJob order); jGenerateCalendar is not orchestrated and runs before the DWH jobs",
   "studio_libs": [
-    "poi-4.1.2-*.jar", "poi-ooxml-4.1.2-*.jar", "poi-ooxml-schemas-4.1.2-*.jar", "poi-scratchpad-4.1.2-*.jar",
-    "xmlbeans-3.1.0.jar", "commons-compress-1.21.jar", "commons-collections4-4.1.jar", "commons-math3-3.3.jar",
+    "poi-4.1.2-*.jar",
+    "poi-ooxml-4.1.2-*.jar",
+    "poi-ooxml-schemas-4.1.2-*.jar",
+    "poi-scratchpad-4.1.2-*.jar",
+    "xmlbeans-3.1.0.jar",
+    "commons-compress-1.21.jar",
+    "commons-collections4-4.1.jar",
+    "commons-math3-3.3.jar",
     "commons-codec-1.15.jar"
   ],
   "studio_libs_why": "jGenerateCalendar reads Excel (tFileInputExcel); its pom names POI and its dependencies, which temp/lib does not hold. curvesapi 1.06 and SparseBitSet 1.2 are also named and are not in the Studio install: added only if a class is missing",
-  "schemas": ["VENTE_ODS", "VENTE_DWH", "PARAMS_LOG"]
+  "schemas": [
+    "VENTE_ODS",
+    "VENTE_DWH",
+    "PARAMS_LOG"
+  ],
+  "runs": [
+    {
+      "name": "r1"
+    },
+    {
+      "name": "r2",
+      "why": "the jobs' state-keeping shows on a later run: one label changed (an SCD2 closes a version and opens one) and one key added, in two of the ODS inputs; the other files unchanged",
+      "edits": [
+        {
+          "file": "csvFiles/ICOM_20250605_CATEGORY.csv",
+          "replace": [
+            "C002|Mobilier",
+            "C002|Mobilier et agencement"
+          ]
+        },
+        {
+          "file": "csvFiles/ICOM_20250605_CATEGORY.csv",
+          "append": "C004|Services"
+        },
+        {
+          "file": "csvFiles/ICOM_20250605_TYPE_CLIENT.csv",
+          "replace": [
+            "T002|Entreprise",
+            "T002|Entreprise et grands comptes"
+          ]
+        },
+        {
+          "file": "csvFiles/ICOM_20250605_TYPE_CLIENT.csv",
+          "append": "T004|Association"
+        }
+      ]
+    }
+  ]
 }

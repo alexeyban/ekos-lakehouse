@@ -10,4 +10,4 @@ pub mod lower;
 pub mod routine;
 pub mod sql;
 
-pub use lower::{ContextFromData, Locale, Lowering, Options, lower_job, lower_job_with};
+pub use lower::{ContextFromData, Draftable, Locale, Lowering, Options, lower_job, lower_job_with};

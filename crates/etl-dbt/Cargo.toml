@@ -15,3 +15,5 @@ ekos-lakehouse-silver.workspace = true
 ekos-plugin-sql-dialect-trino = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 ekos-sql-dialect-sdk = { git = "https://github.com/alexeyban/EKOS", branch = "main" }
 sqlparser = { workspace = true, features = ["visitor"] }
+serde.workspace = true
+serde_json.workspace = true

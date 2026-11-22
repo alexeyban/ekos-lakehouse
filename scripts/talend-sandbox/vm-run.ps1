@@ -97,14 +97,35 @@ try {
     if (Test-Path $from -PathType Container) { Copy-Item "$from\*" $to -Recurse -Force } else { Copy-Item $from $to -Force }
     $manifest.sandbox_settings.inputs += [ordered]@{ from = $i.from; to = $to; why = $i.why }
   }
-  Dump-Tables '00_setup'
+  Dump-Tables 'r1_00_setup'
+  $runs = @($Plan.runs)
+  if ($runs.Count -eq 0) { $runs = @([pscustomobject]@{ name = 'r1' }) }
+  $manifest.runs = @()
+  $k = 0
+  # Not `$run`: PowerShell's names ignore case, and `$Run` is the run directory.
+  foreach ($pass in $runs) {
+  $k++
+  if ($k -gt 1) {
+    # A later run: the input files replaced by its own (run.sh made them from the plan's edits).
+    foreach ($i in $Plan.inputs) {
+      $to = $i.to -replace '\{run_day\}', $manifest.run_day
+      $from = "$Run\project-r$k\$($i.from)"
+      if (Test-Path $from -PathType Container) {
+        Get-ChildItem $to -File | Remove-Item -Force
+        Copy-Item "$from\*" $to -Recurse -Force
+      } else {
+        Copy-Item $from $to -Force
+      }
+    }
+  }
+  $manifest.runs += [ordered]@{ name = "r$k"; edits = $pass.edits }
   $n = 0
   foreach ($job in $Plan.jobs) {
     $n++
-    $step = '{0:D2}_{1}' -f $n, $job
+    $step = 'r{0}_{1:D2}_{2}' -f $k, $n, $job
     $jar = Get-ChildItem "$Run\jobs\$($job.ToLower())_*.jar" | Select-Object -First 1
     if (-not $jar) {
-      $manifest.jobs += [ordered]@{ job = $job; ran = $false; reason = 'no built jar' }
+      $manifest.jobs += [ordered]@{ run = "r$k"; job = $job; ran = $false; reason = 'no built jar' }
       continue
     }
     $class = "$($Plan.package).$($jar.BaseName).$job"
@@ -119,10 +140,11 @@ try {
     $secs = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
     $err = @(Get-Content "$Out\logs\$step.err" -ErrorAction SilentlyContinue | ForEach-Object { "$_" })
     $manifest.jobs += [ordered]@{
-      job = $job; ran = $true; class = $class; exit = $r.exit; timed_out = $r.timed_out; seconds = $secs
+      run = "r$k"; job = $job; ran = $true; class = $class; exit = $r.exit; timed_out = $r.timed_out; seconds = $secs
       exception = (@($err | Where-Object { $_ -match 'Exception|Error' }) | Select-Object -First 3)
     }
     Dump-Tables $step
+  }
   }
 }
 finally {

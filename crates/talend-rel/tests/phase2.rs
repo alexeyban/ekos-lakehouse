@@ -564,6 +564,7 @@ fn week_of_year_is_a_gap_unless_the_locale_is_stated() {
         &NoCatalog,
         &ekos_lakehouse_talend_rel::Options {
             locale: ekos_lakehouse_talend_rel::Locale::parse("fr_FR"),
+            ..Default::default()
         },
     );
     no_gaps(&l);
@@ -677,6 +678,7 @@ fn a_month_name_follows_the_locale_the_operator_states() {
         &NoCatalog,
         &ekos_lakehouse_talend_rel::Options {
             locale: ekos_lakehouse_talend_rel::Locale::parse("fr-FR"),
+            ..Default::default()
         },
     );
     no_gaps(&l);
@@ -751,4 +753,74 @@ fn an_empty_schema_on_a_component_falls_back_to_its_connections() {
         sink.target.connection.unwrap().database.as_deref(),
         Some("db")
     );
+}
+
+/// RFC 0268 phase 3: a gap with one known input is offered for a model's draft; a checked draft
+/// replaces it, labelled `llm-drafted`.
+#[test]
+fn a_gap_is_offered_for_a_draft_and_a_draft_replaces_it() {
+    let body = [
+        node(
+            "tFileInputDelimited",
+            "tFileInputDelimited_1",
+            &format!("{}{}", param("FILENAME", "\"/in/a.csv\""), strings(&["A"])),
+        ),
+        node(
+            "tJavaRow",
+            "tJavaRow_1",
+            &format!(
+                "{}{}",
+                param(
+                    "CODE",
+                    "for (int i = 0; i < 2; i++) { output_row.A = input_row.A; }"
+                ),
+                strings(&["A"])
+            ),
+        ),
+        link("row1", "tFileInputDelimited_1", "tJavaRow_1"),
+    ]
+    .concat();
+    let l = lowered(&body, "");
+    let [d] = l.draftable.as_slice() else {
+        panic!("{:?}", l.draftable)
+    };
+    assert_eq!((d.component.as_str(), d.port.as_str()), ("tJavaRow_1", ""));
+    assert!(d.original.contains("output_row.A"));
+    assert_eq!(d.outputs.len(), 1);
+
+    let xml = format!(
+        r#"<talendfile:ProcessType xmlns:talendfile="platform:/resource/org.talend.model/model/TalendFile.xsd" defaultContext="Default"><context name="Default"></context>{body}</talendfile:ProcessType>"#
+    );
+    let p = read_project(
+        "",
+        &[ProjectFile {
+            path: "process/j_0.1.item".into(),
+            text: xml,
+        }],
+    );
+    let job = p.expand(&p.jobs[0]).job;
+    let draft = ekos_lakehouse_etl_rel::Draft {
+        columns: vec![("A".into(), "\"A\"".into())],
+        keep_when: Some("\"A\" IS NOT NULL".into()),
+        model: "a local model".into(),
+    };
+    let l = ekos_lakehouse_talend_rel::lower_job_with(
+        &job,
+        &p.routines,
+        &NoCatalog,
+        &ekos_lakehouse_talend_rel::Options {
+            drafts: [(
+                (job.name.clone(), "tJavaRow_1".to_string(), String::new()),
+                draft,
+            )]
+            .into(),
+            ..Default::default()
+        },
+    );
+    no_gaps(&l);
+    let nodes = of(&l.ir, "tJavaRow_1");
+    assert!(nodes.iter().all(|n| n.fidelity == Fidelity::LlmDrafted));
+    assert!(matches!(nodes[0].op, Op::Filter { .. }));
+    assert!(matches!(nodes.last().unwrap().op, Op::Project { .. }));
+    assert!(l.draftable.is_empty());
 }

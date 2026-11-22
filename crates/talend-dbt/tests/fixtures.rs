@@ -478,5 +478,7 @@ fn fixture_e_delete_then_insert_is_a_keyed_replace() {
         .flat_map(|t| &t.report.patterns)
         .filter(|p| p.rule == Some(ekos_lakehouse_talend_dbt::Rule::KeyedReplace))
         .count();
-    assert_eq!(keyed, 10);
+    // Nine of them join the target inside a chain of joins; FACT_MOV_COST deletes a key it computes
+    // and stays refused.
+    assert_eq!(keyed, 19);
 }

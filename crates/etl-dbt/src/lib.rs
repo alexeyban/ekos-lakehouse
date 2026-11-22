@@ -3,6 +3,7 @@
 //! PostgreSQL source SQL for Trino, and the checks every generated model goes through.
 
 pub mod catalog;
+pub mod draft;
 pub mod pgsql;
 
 use ekos_lakehouse_bronze::plan::Plan;

@@ -73,6 +73,29 @@ for rel in plan["sql"] + [i["from"] for i in plan["inputs"]]:
     dst.parent.mkdir(parents=True, exist_ok=True)
     (shutil.copytree if src.is_dir() else shutil.copy2)(src, dst)
 PY
+# A later run's inputs: run 1's, with the plan's edits made here (the fixture is never changed).
+python3 - "$plan" "$stage/payload" <<'PY'
+import json, shutil, sys, pathlib
+plan, payload = json.load(open(sys.argv[1])), pathlib.Path(sys.argv[2])
+for k, run in enumerate(plan.get("runs", [])[1:], start=2):
+    dest = payload / f"project-r{k}"
+    for i in plan["inputs"]:
+        src, dst = payload / "project" / i["from"], dest / i["from"]
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        (shutil.copytree if src.is_dir() else shutil.copy2)(src, dst)
+    for e in run.get("edits", []):
+        f = dest / e["file"]
+        text = f.read_bytes().decode("utf-8")
+        if "replace" in e:
+            old, new = e["replace"]
+            if text.count(old) != 1:
+                sys.exit(f"edit {e}: `{old}` is not in {e['file']} exactly once")
+            text = text.replace(old, new)
+        if "append" in e:
+            nl = "\r\n" if "\r\n" in text else ("\r" if "\r" in text and "\n" not in text else "\n")
+            text = text + ("" if text.endswith(("\n", "\r")) else nl) + e["append"] + nl
+        f.write_bytes(text.encode("utf-8"))
+PY
 cp "$plan" "$stage/payload/plan.json"
 cp "$here/vm-run.ps1" "$here/pg.ps1" "$stage/payload/"
 tar -czf "$stage/payload.tgz" -C "$stage/payload" .
@@ -128,5 +151,10 @@ for i in plan["inputs"]:
     dst.parent.mkdir(parents=True, exist_ok=True)
     (shutil.copytree if src.is_dir() else shutil.copy2)(src, dst, **({"dirs_exist_ok": True} if src.is_dir() else {}))
 PY
+if [[ -d "$stage/payload/project-r2" ]]; then
+  for d in "$stage/payload"/project-r*; do
+    cp -r "$d" "$out/inputs-$(basename "$d" | sed 's/^project-//')"
+  done
+fi
 cp "$plan" "$out/plan.json"
 echo "results: $out/out (manifest.json, dumps/, logs/), inputs in $out/inputs"

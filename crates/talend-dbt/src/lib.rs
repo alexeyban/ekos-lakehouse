@@ -7,6 +7,7 @@
 //! `ref()` in every job that reads it. A model with a gap in its nodes, or one that fails a gate,
 //! is written disabled with its reasons.
 
+pub mod draft;
 pub mod gates;
 pub mod patterns;
 pub mod verify;
@@ -43,6 +44,8 @@ pub struct Settings {
     /// The JVM's default locale the jobs ran under (`--locale`): week numbers and month and day
     /// names follow it.
     pub locale: Option<ekos_lakehouse_talend_rel::Locale>,
+    /// Checked model drafts for gaps, by `(job, component, port)` (RFC 0205, RFC 0268 phase 3).
+    pub drafts: BTreeMap<(String, String, String), ekos_lakehouse_etl_rel::Draft>,
 }
 
 impl Settings {
@@ -294,7 +297,10 @@ pub fn translate(project: &Project, plan: &Plan, s: &Settings) -> Translation {
     let pkg = slug(&s.project);
     let mut jobs: Vec<&Job> = project.jobs.iter().filter(|j| j.latest).collect();
     jobs.sort_by(|a, b| a.name.cmp(&b.name).then(a.path.cmp(&b.path)));
-    let options = ekos_lakehouse_talend_rel::Options { locale: s.locale };
+    let options = ekos_lakehouse_talend_rel::Options {
+        locale: s.locale,
+        drafts: s.drafts.clone(),
+    };
     let lowered: Vec<Lowered> = jobs
         .iter()
         .map(|j| {

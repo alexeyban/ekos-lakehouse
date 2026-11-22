@@ -339,6 +339,32 @@ pub async fn draft_all(
     Vec<DraftOutcome>,
 ) {
     use ekos_lakehouse_pentaho_dbt::draft;
+    draft_all_with(
+        requests,
+        provider,
+        attempts,
+        &draft::prompt,
+        draft::PROMPT_VERSION,
+    )
+    .await
+}
+
+/// An engine's prompt: the system and user messages for a request and the previous findings.
+pub type PromptFn =
+    dyn Fn(&ekos_lakehouse_etl_dbt::draft::DraftRequest, &[String]) -> (String, String) + Sync;
+
+/// [`draft_all`] with an engine's own prompt (Talend's, RFC 0268 phase 3).
+pub async fn draft_all_with(
+    requests: &[ekos_lakehouse_etl_dbt::draft::DraftRequest],
+    provider: &dyn ekos_recovery::LlmProvider,
+    attempts: u32,
+    prompt: &PromptFn,
+    prompt_version: &'static str,
+) -> (
+    std::collections::BTreeMap<(String, String), ekos_lakehouse_etl_rel::Draft>,
+    Vec<DraftOutcome>,
+) {
+    use ekos_lakehouse_etl_dbt::draft;
     let mut drafts = std::collections::BTreeMap::new();
     let mut outcomes = Vec::new();
     for r in requests {
@@ -352,11 +378,11 @@ pub async fn draft_all(
         };
         for _ in 0..attempts {
             outcome.attempts += 1;
-            let (system, user) = draft::prompt(r, &feedback);
+            let (system, user) = prompt(r, &feedback);
             let req = ekos_recovery::LlmRequest {
                 system: &system,
                 user: &user,
-                prompt_version: draft::PROMPT_VERSION,
+                prompt_version,
                 max_tokens: 2048,
                 history: &[],
             };

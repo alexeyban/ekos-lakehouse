@@ -30,6 +30,7 @@ ekos-lakehouse-pentaho-dbt.workspace = true
 ekos-lakehouse-talend-dbt.workspace = true
 ekos-lakehouse-etl-dbt.workspace = true
 ekos-lakehouse-etl-expr.workspace = true
+ekos-lakehouse-etl-rel.workspace = true
 ekos-lakehouse-talend-rel.workspace = true
 ekos-talend.workspace = true
 ekos-recovery.workspace = true

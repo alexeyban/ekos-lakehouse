@@ -467,6 +467,10 @@ pub struct ModelCheck {
     pub excluded: Vec<(String, String)>,
     #[serde(flatten)]
     pub outcome: Outcome,
+    /// What the model's jobs wrote to their error output in the sandbox (a refused statement,
+    /// rolled back while the job still exited 0): the reason a table may differ.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub job_errors: Vec<String>,
 }
 
 /// Compares two tables over `columns` (names as the Talend side spells them): multisets of
