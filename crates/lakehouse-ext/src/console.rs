@@ -240,6 +240,7 @@ pub fn pages() -> Vec<ConsolePage> {
         marts_page(),
         extraction_page(),
         pentaho_page(),
+        talend_page(),
     ]
 }
 
@@ -934,6 +935,212 @@ fn extraction_page() -> ConsolePage {
 /// RFC 0207: the Pentaho tab — packages, then one translation's graph, models, steps, a step's
 /// original text next to its SQL, questions and the proposal; buttons to scan and translate.
 /// No approve or merge: merging the proposal branch is the approval (RFC 0190).
+/// EKOS RFC 0268 phase 2: Talend projects and their translation.
+fn talend_page() -> ConsolePage {
+    let report = || vec!["lakehouse", "talend", "report", "--json"];
+    ConsolePage {
+        id: "talend",
+        title: "Talend → dbt",
+        description: "Talend projects translated into silver and gold dbt models and snapshots (RFC \
+                      0268). Pick a project, then a component. Every model says how faithfully it was \
+                      carried over (exact, rewritten, gap) and which rule made it; a pattern the \
+                      translator recognised (a slowly changing dimension, a rejects table, a keyed \
+                      replace) or refused is listed with why. The original configuration comes from \
+                      the compiled knowledge, the SQL from the translation. Translating proposes a \
+                      branch; merging it is the approval.",
+        params: vec![
+            PageParam {
+                name: "talend-project",
+                label: "Project",
+                source: "projects",
+                rows: "",
+                key: "/project",
+            },
+            PageParam {
+                name: "component",
+                label: "Component",
+                source: "components",
+                rows: "/components",
+                key: "/id",
+            },
+        ],
+        panels: vec![
+            Panel {
+                id: "projects",
+                title: "Projects",
+                command: vec!["lakehouse", "talend", "scan", "--json"],
+                view: View::Table {
+                    rows: "",
+                    columns: vec![
+                        Column::new("/project", "Project"),
+                        Column::new("/jobs", "Jobs"),
+                        Column::new("/joblets", "Joblets"),
+                    ],
+                },
+                empty: "No Talend project: no observed directory holds talend.project.",
+                ..Default::default()
+            },
+            Panel {
+                id: "summary",
+                title: "Translation",
+                command: report(),
+                params: vec!["talend-project"],
+                view: View::Fields {
+                    fields: vec![
+                        Column::badge("/state", "State"),
+                        Column::new("/summary/models", "Models"),
+                        Column::new("/summary/enabled", "Enabled"),
+                        Column::new("/summary/snapshots", "Snapshots"),
+                        Column::new("/summary/rewritten", "Rewritten"),
+                        Column::new("/summary/gap", "Gap"),
+                        Column::new("/summary/patterns", "Patterns"),
+                        Column::new("/summary/questions", "Questions"),
+                        Column::new("/where", "Proposed on"),
+                    ],
+                },
+                empty: "Not translated yet: run Translate.",
+            },
+            Panel {
+                id: "graph",
+                title: "Data flow",
+                command: report(),
+                params: vec!["talend-project"],
+                view: View::Graph {
+                    nodes: "/graph/nodes",
+                    edges: "/graph/edges",
+                    id: "/id",
+                    label: "/label",
+                    group: "/group",
+                    badge: "/fidelity",
+                    from: "/from",
+                    to: "/to",
+                },
+                empty: "Not translated yet.",
+            },
+            Panel {
+                id: "models",
+                title: "Models",
+                command: report(),
+                params: vec!["talend-project"],
+                view: View::Table {
+                    rows: "/models",
+                    columns: vec![
+                        Column::new("/name", "Model"),
+                        Column::new("/layer", "Layer"),
+                        Column::new("/job", "Job"),
+                        Column::new("/rule", "Rule"),
+                        Column::new("/materialization", "Materialization"),
+                        Column::badge("/fidelity", "Fidelity"),
+                        Column::badge("/enabled", "Enabled"),
+                        Column::new("/why", "Why disabled"),
+                    ],
+                },
+                empty: "No models.",
+            },
+            Panel {
+                id: "patterns",
+                title: "Patterns recognised and refused",
+                command: report(),
+                params: vec!["talend-project"],
+                view: View::Table {
+                    rows: "/patterns",
+                    columns: vec![
+                        Column::new("/job", "Job"),
+                        Column::new("/table", "Table"),
+                        Column::badge("/rule", "Rule"),
+                        Column::new("/model", "Model"),
+                        Column::new("/notes/0", "Why"),
+                    ],
+                },
+                empty: "No pattern: every output is its own model.",
+            },
+            Panel {
+                id: "components",
+                title: "Components (click one)",
+                command: report(),
+                params: vec!["talend-project"],
+                view: View::Table {
+                    rows: "/components",
+                    columns: vec![
+                        Column::new("/job", "Job"),
+                        Column::new("/component", "Component"),
+                        Column::new("/component_type", "Type"),
+                        Column::badge("/fidelity", "Fidelity"),
+                        Column::new("/gap", "Gap"),
+                        Column::new("/notes_text", "Notes"),
+                    ],
+                },
+                empty: "No components.",
+            },
+            Panel {
+                id: "component-original",
+                title: "Component: original configuration",
+                command: vec!["talend", "explain", "--json"],
+                params: vec!["talend-project", "component"],
+                view: View::Code {
+                    left: "/components/0/configuration",
+                    right: "/components/0/map",
+                    left_label: "Parameters",
+                    right_label: "tMap, ELT map or schemas",
+                },
+                empty: "Not in the compiled knowledge: run the pipeline (build … commit).",
+            },
+            Panel {
+                id: "component-sql",
+                title: "Component: translation",
+                command: report(),
+                params: vec!["talend-project", "component"],
+                view: View::Code {
+                    left: "/component/notes_text",
+                    right: "/component/sql",
+                    left_label: "Notes",
+                    right_label: "Trino SQL of its models",
+                },
+                empty: "This component is in no model.",
+            },
+            Panel {
+                id: "questions",
+                title: "Questions",
+                command: report(),
+                params: vec!["talend-project"],
+                view: View::Table {
+                    rows: "/questions",
+                    columns: vec![
+                        Column::new("/kind", "Kind"),
+                        Column::new("/job", "Job"),
+                        Column::new("/component", "Component"),
+                        Column::new("/question", "Question"),
+                    ],
+                },
+                empty: "No questions.",
+            },
+            Panel {
+                id: "proposal",
+                title: "Proposal",
+                command: report(),
+                params: vec!["talend-project"],
+                view: View::Markdown {
+                    pointer: "/proposal",
+                },
+                empty: "Not translated yet.",
+            },
+        ],
+        actions: vec![
+            Action {
+                label: "Scan projects",
+                command: vec!["lakehouse", "talend", "scan"],
+                ..Default::default()
+            },
+            Action {
+                label: "Translate",
+                command: vec!["lakehouse", "talend", "translate"],
+                binds: vec![("talend-project", "talend-project")],
+                ..Default::default()
+            },
+        ],
+    }
+}
+
 fn pentaho_page() -> ConsolePage {
     let report = || vec!["lakehouse", "pentaho", "report", "--json"];
     ConsolePage {
@@ -1265,7 +1472,8 @@ mod tests {
                 "requirements",
                 "marts",
                 "extraction",
-                "pentaho"
+                "pentaho",
+                "talend"
             ]
         );
     }

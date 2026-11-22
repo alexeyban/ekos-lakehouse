@@ -541,6 +541,13 @@ impl EkosExtension for LakehouseExtension {
                             clap::Command::new("scan")
                                 .about("The Talend projects under the workspace's sources, with their jobs")
                                 .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
+                        )
+                        .subcommand(
+                            clap::Command::new("report")
+                                .about("The latest translation of each Talend project: models, patterns, questions, components (EKOS RFC 0268)")
+                                .arg(clap::Arg::new("talend-project").long("talend-project").value_name("PROJECT").help("One project"))
+                                .arg(clap::Arg::new("component").long("component").value_name("JOB:COMPONENT").help("One component of that project, with its models' SQL"))
+                                .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue).help("Machine-readable output")),
                         ),
                 )
                 .subcommand(
@@ -1344,6 +1351,7 @@ impl EkosExtension for LakehouseExtension {
             ("lakehouse pentaho report", Class::Read, false),
             // EKOS RFC 0268: reads the project's own source files (redacted), nothing else.
             ("lakehouse talend scan", Class::Read, false),
+            ("lakehouse talend report", Class::Read, false),
             // Reads the source files and the deployed plan, plans on Trino, branches the
             // repository. No model call.
             ("lakehouse talend translate", Class::External, false),
@@ -1731,6 +1739,36 @@ impl EkosExtension for LakehouseExtension {
                 let settings = settings::load_with(ctx.config, engines)?;
                 match p.subcommand() {
                     Some(("scan", m)) => talend_cmd::scan(ctx, m.get_flag("json")),
+                    Some(("report", m)) => {
+                        let v = talend_cmd::report_json(
+                            &talend_cmd::state_dir(ctx),
+                            m.get_one::<String>("talend-project").map(String::as_str),
+                            m.get_one::<String>("component").map(String::as_str),
+                        )?;
+                        if m.get_flag("json") {
+                            println!("{}", serde_json::to_string(&v)?);
+                        } else {
+                            for p in v["projects"].as_array().into_iter().flatten() {
+                                let s = &p["summary"];
+                                println!(
+                                    "{}: {} models ({} enabled, {} snapshots), {} patterns, {} questions → {}",
+                                    p["project"].as_str().unwrap_or_default(),
+                                    s["models"],
+                                    s["enabled"],
+                                    s["snapshots"],
+                                    s["patterns"],
+                                    s["questions"],
+                                    p["where"].as_str().unwrap_or_default()
+                                );
+                            }
+                            if v["projects"].as_array().is_none_or(Vec::is_empty) {
+                                println!(
+                                    "No Talend translation yet: run `lakehouse talend translate <project>`."
+                                );
+                            }
+                        }
+                        Ok(())
+                    }
                     Some(("translate", m)) => {
                         let o = talend_cmd::TranslateOptions {
                             project: m

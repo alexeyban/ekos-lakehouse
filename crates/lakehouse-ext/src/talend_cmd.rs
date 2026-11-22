@@ -186,6 +186,172 @@ fn project_jobs(root: &Path) -> std::collections::BTreeSet<String> {
     out
 }
 
+/// Where the latest translation of each project is kept: `<state>/lakehouse/talend/<pkg>.json`.
+pub fn state_dir(ctx: &CommandContext<'_>) -> PathBuf {
+    ctx.config
+        .ekos_dir(ctx.cwd)
+        .join("lakehouse")
+        .join("talend")
+}
+
+/// The report, each model's SQL and the proposal, as one file.
+pub fn save_report(
+    dir: &Path,
+    project: &str,
+    where_: &str,
+    t: &ekos_lakehouse_talend_dbt::Translation,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let pkg = ekos_lakehouse_etl_dbt::slug(project);
+    let sql: std::collections::BTreeMap<&str, &str> = t
+        .report
+        .models
+        .iter()
+        .filter_map(|m| t.files.get(&m.path).map(|f| (m.name.as_str(), f.as_str())))
+        .collect();
+    let doc = json!({
+        "project": project,
+        "where": where_,
+        "report": t.report,
+        "sql": sql,
+        "proposal": t.files.get(&format!("proposals/talend-{pkg}.md")),
+    });
+    std::fs::write(
+        dir.join(format!("{pkg}.json")),
+        serde_json::to_string(&doc)? + "\n",
+    )?;
+    Ok(())
+}
+
+/// `lakehouse talend report`: the latest translation of each project (one, with `project`; one
+/// component of it, with `component` = `JOB:COMPONENT`). Reads the files `translate` saved.
+pub fn report_json(
+    dir: &Path,
+    project: Option<&str>,
+    component: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut docs: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        paths.sort();
+        for p in paths {
+            let text = std::fs::read_to_string(&p)?;
+            docs.push(serde_json::from_str(&text)?);
+        }
+    }
+    let summary = |d: &serde_json::Value| {
+        let r = &d["report"];
+        let models = r["models"].as_array().cloned().unwrap_or_default();
+        let count = |f: &dyn Fn(&serde_json::Value) -> bool| models.iter().filter(|m| f(m)).count();
+        json!({
+            "models": models.len(),
+            "enabled": count(&|m| m["enabled"] == true),
+            "snapshots": count(&|m| m["layer"] == "snapshot"),
+            "exact": count(&|m| m["fidelity"] == "exact"),
+            "rewritten": count(&|m| m["fidelity"] == "rewritten"),
+            "gap": count(&|m| m["fidelity"] == "gap"),
+            "questions": r["questions"].as_array().map_or(0, Vec::len),
+            "patterns": r["patterns"].as_array().map_or(0, Vec::len),
+            "statements": r["statements"].as_array().map_or(0, Vec::len),
+        })
+    };
+    let projects: Vec<serde_json::Value> = docs
+        .iter()
+        .map(|d| {
+            json!({
+                "project": d["project"],
+                "translation": "translated",
+                "where": d["where"],
+                "summary": summary(d),
+            })
+        })
+        .collect();
+    let Some(name) = project else {
+        return Ok(json!({ "projects": projects }));
+    };
+    let Some(d) = docs.iter().find(|d| d["project"] == name) else {
+        return Ok(json!({ "projects": projects, "state": "not translated" }));
+    };
+    let r = &d["report"];
+    let models: Vec<serde_json::Value> = r["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|m| {
+            let mut m = m.clone();
+            m["why"] = json!(m["gaps"].as_array().and_then(|g| g.first()).cloned());
+            m
+        })
+        .collect();
+    let components: Vec<serde_json::Value> = r["components"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let mut c = c.clone();
+            c["notes_text"] = json!(c["notes"].as_array().map(|n| {
+                n.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            }));
+            c
+        })
+        .collect();
+    // The data flow, component by component: an edge from each input.
+    let nodes: Vec<serde_json::Value> = components
+        .iter()
+        .map(|c| json!({ "id": c["id"], "label": c["component"], "group": c["job"], "fidelity": c["fidelity"] }))
+        .collect();
+    let edges: Vec<serde_json::Value> = components
+        .iter()
+        .flat_map(|c| {
+            c["inputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|i| json!({ "from": i, "to": c["id"] }))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut out = json!({
+        "projects": projects,
+        "state": "translated",
+        "graph": { "nodes": nodes, "edges": edges },
+        "project": d["project"],
+        "where": d["where"],
+        "summary": summary(d),
+        "models": models,
+        "components": components,
+        "patterns": r["patterns"],
+        "questions": r["questions"],
+        "statements": r["statements"],
+        "proposal": d["proposal"],
+    });
+    if let Some(id) = component {
+        let Some(c) = components.iter().find(|c| c["id"] == id) else {
+            anyhow::bail!("`{name}` has no component `{id}` (as JOB:COMPONENT)");
+        };
+        let sql: Vec<String> = c["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| {
+                let m = m.as_str()?;
+                Some(format!("-- {m}\n{}", d["sql"][m].as_str()?))
+            })
+            .collect();
+        let mut c = c.clone();
+        c["sql"] = json!(sql.join("\n\n"));
+        out["component"] = c;
+    }
+    Ok(out)
+}
+
 /// `lakehouse talend translate <project>`.
 pub async fn translate(
     settings: &Settings,
@@ -323,6 +489,8 @@ pub async fn translate(
         }
         None => propose(repo, &pkg, &t)?,
     };
+    // The latest translation, for `talend report` and the console, before anyone merges it.
+    save_report(&state_dir(ctx), &o.project, &where_, &t)?;
     let enabled = t.report.models.iter().filter(|m| m.enabled).count();
     if o.json {
         println!(
@@ -457,5 +625,66 @@ mod tests {
         assert!(is_talend_path("proposals/talend-shop.md"));
         assert!(is_talend_path("dbt/models/gold/talend/shop/x.sql"));
         assert!(!is_talend_path("dbt/models/gold/pentaho/shop/x.sql"));
+    }
+
+    /// A one-job project: a file into a cleared table.
+    fn shop() -> ekos_lakehouse_talend_dbt::Translation {
+        let item = r#"<talendfile:ProcessType xmlns:talendfile="platform:/resource/org.talend.model/model/TalendFile.xsd" defaultContext="Default"><context name="Default"/><node componentName="tFileInputDelimited"><elementParameter field="TEXT" name="UNIQUE_NAME" value="tFileInputDelimited_1"/><elementParameter field="TEXT" name="FILENAME" value="&quot;/in/a.csv&quot;"/><metadata connector="FLOW" name="x"><column name="id" type="id_Integer" key="true"/></metadata></node><node componentName="tPostgresqlOutput"><elementParameter field="TEXT" name="UNIQUE_NAME" value="tDBOutput_1"/><elementParameter field="TEXT" name="TABLE" value="&quot;t&quot;"/><elementParameter field="TEXT" name="DATA_ACTION" value="INSERT"/><elementParameter field="TEXT" name="TABLE_ACTION" value="CLEAR"/><metadata connector="FLOW" name="x"><column name="id" type="id_Integer" key="true"/></metadata></node><connection connectorName="FLOW" label="row1" metaname="row1" source="tFileInputDelimited_1" target="tDBOutput_1"/></talendfile:ProcessType>"#;
+        let p = read_project(
+            "",
+            &[ProjectFile {
+                path: "process/jLoad_0.1.item".into(),
+                text: item.into(),
+            }],
+        );
+        let plan = ekos_lakehouse_bronze::plan::plan(&[], &Default::default());
+        ekos_lakehouse_talend_dbt::translate(
+            &p,
+            &plan,
+            &ekos_lakehouse_talend_dbt::Settings {
+                project: "Shop".into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn the_report_serves_the_saved_translation_by_project_and_component() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            report_json(dir.path(), None, None).unwrap()["projects"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        save_report(dir.path(), "Shop", "ekos/talend/shop/x", &shop()).unwrap();
+        let all = report_json(dir.path(), None, None).unwrap();
+        assert_eq!(all["projects"][0]["project"], "Shop");
+        assert_eq!(all["projects"][0]["where"], "ekos/talend/shop/x");
+        let one = report_json(dir.path(), Some("Shop"), None).unwrap();
+        assert_eq!(one["state"], "translated");
+        assert!(!one["models"].as_array().unwrap().is_empty());
+        assert!(
+            one["graph"]["edges"]
+                .as_array()
+                .is_some_and(|e| !e.is_empty()),
+            "{}",
+            one["graph"]
+        );
+        assert!(one["proposal"].as_str().unwrap().contains("Talend project"));
+        let c = report_json(dir.path(), Some("Shop"), Some("jLoad:tDBOutput_1")).unwrap();
+        assert!(
+            c["component"]["sql"]
+                .as_str()
+                .unwrap()
+                .contains("materialized='table'"),
+            "{}",
+            c["component"]
+        );
+        assert!(report_json(dir.path(), Some("Shop"), Some("jLoad:tX")).is_err());
+        assert_eq!(
+            report_json(dir.path(), Some("Other"), None).unwrap()["state"],
+            "not translated"
+        );
     }
 }
