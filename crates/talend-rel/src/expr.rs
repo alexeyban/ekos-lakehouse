@@ -25,6 +25,7 @@ pub const NOTE_PLATFORM_CHARSET: &str = "the routine reads the text's bytes in t
      default charset; the translation hashes UTF-8 (the same for ASCII text)";
 pub const NOTE_MONTH_ZERO: &str =
     "`getPartOfDate(\"MONTH\", …)` is zero-based (January = 0), as Java's Calendar";
+const NOTE_ISO_WEEK: &str = "`getPartOfDate(\"WEEK_OF_YEAR\", …)` is the ISO week, as Java's under the Monday-first, four-day locale the operator stated";
 
 /// `<qualifier>.<column>` → the column's SQL and type.
 pub type ColumnLookup<'a> = dyn Fn(&str, &str) -> Option<(Expr, KType)> + 'a;
@@ -53,6 +54,8 @@ pub struct Scope<'a> {
     /// The project's routines: a custom one whose body is a digest is lowered
     /// ([`crate::routine::digest`]).
     pub routines: &'a [ekos_talend::Routine],
+    /// The JVM's locale, when the operator stated it ([`crate::Options::locale`]).
+    pub locale: Option<crate::lower::Locale>,
     /// `Numeric.sequence("<name>", …)`: the column numbering the rows, when the component
     /// computed one (RFC 0267 phase 2 §Row order).
     pub sequence: &'a SequenceLookup<'a>,
@@ -397,6 +400,23 @@ impl Lowerer<'_, '_> {
                     "HOUR_OF_DAY" => f(Func::Hour),
                     "MINUTE" => f(Func::Minute),
                     "SECOND" => f(Func::Second),
+                    "WEEK_OF_YEAR" => match self.scope.locale {
+                        Some(l) if l.iso_weeks => {
+                            self.out.note(format!("{NOTE_ISO_WEEK} (`{}`)", l.tag));
+                            f(Func::IsoWeek)
+                        }
+                        Some(l) => {
+                            return gap(format!(
+                                "TalendDate.getPartOfDate part `WEEK_OF_YEAR` under `{}` counts weeks from Sunday, which has no SQL function here",
+                                l.tag
+                            ));
+                        }
+                        None => {
+                            return gap(
+                                "TalendDate.getPartOfDate part `WEEK_OF_YEAR` follows the JVM's locale: state it (`--locale`)",
+                            );
+                        }
+                    },
                     other => {
                         return gap(format!(
                             "TalendDate.getPartOfDate part `{other}` (locale-dependent or not mapped)"
@@ -420,6 +440,104 @@ impl Lowerer<'_, '_> {
                 (
                     Expr::call(Func::DateDiff(unit), vec![arg(0), arg(1)]),
                     KType::Integer,
+                )
+            }
+            // The last (first) day of the date's month, the time of day kept, as Talend's
+            // Calendar arithmetic keeps it.
+            ("TalendDate", "getLastDayOfMonth" | "getFirstDayOfMonth", 1) => {
+                let d = arg(0);
+                let day = |e: Expr| Expr::call(Func::Day, vec![e]);
+                let target = if name == "getLastDayOfMonth" {
+                    let last = Expr::call(
+                        Func::DateAdd(Unit::Day),
+                        vec![
+                            Expr::call(
+                                Func::DateAdd(Unit::Month),
+                                vec![
+                                    Expr::call(Func::DateTrunc(Unit::Month), vec![d.clone()]),
+                                    Expr::int(1),
+                                ],
+                            ),
+                            Expr::int(-1),
+                        ],
+                    );
+                    day(last)
+                } else {
+                    Expr::int(1)
+                };
+                (
+                    Expr::call(
+                        Func::DateAdd(Unit::Day),
+                        vec![d.clone(), Expr::bin(BinOp::Sub, target, day(d))],
+                    ),
+                    a[0].1,
+                )
+            }
+            // Both dates printed with a numeric pattern and compared as text: -1, 0 or 1, a null
+            // date before any other (Talend's `compareDate`).
+            ("TalendDate", "compareDate", 3) => {
+                let Some(p) = literal(2).filter(|p| plain_pattern(p)) else {
+                    return gap(
+                        "TalendDate.compareDate with a computed or locale-dependent pattern",
+                    );
+                };
+                let (d1, d2) = (arg(0), arg(1));
+                let fmt = |e: Expr| Expr::call(Func::FormatDatetime, vec![e, Expr::str(&p)]);
+                let null = |e: &Expr| Expr::IsNull {
+                    arg: Box::new(e.clone()),
+                    negated: false,
+                };
+                (
+                    Expr::case(
+                        vec![
+                            (Expr::bin(BinOp::And, null(&d1), null(&d2)), Expr::int(0)),
+                            (null(&d1), Expr::int(-1)),
+                            (null(&d2), Expr::int(1)),
+                            (
+                                Expr::bin(BinOp::Gt, fmt(d1.clone()), fmt(d2.clone())),
+                                Expr::int(1),
+                            ),
+                            (Expr::bin(BinOp::Lt, fmt(d1), fmt(d2)), Expr::int(-1)),
+                        ],
+                        Some(Expr::int(0)),
+                    ),
+                    KType::Integer,
+                )
+            }
+            ("TalendDate", "formatDate", 2)
+                if matches!(literal(0).as_deref(), Some("MMMM" | "EEEE"))
+                    && self.scope.locale.is_some() =>
+            {
+                let l = self.scope.locale.expect("checked");
+                let month = literal(0).as_deref() == Some("MMMM");
+                let (func, names, first): (Func, &[&str], i64) = if month {
+                    (Func::Month, &l.months[..], 1)
+                } else {
+                    (Func::DayOfWeekSunday1, &l.days[..], 1)
+                };
+                self.out.note(format!(
+                    "`formatDate(\"{}\", …)` prints the {} name in the JVM's locale; `{}` as the operator stated (CLDR names, Java 9+)",
+                    if month { "MMMM" } else { "EEEE" },
+                    if month { "month's" } else { "day's" },
+                    l.tag
+                ));
+                let part = Expr::call(func, vec![arg(1)]);
+                let when = names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| {
+                        (
+                            Expr::bin(BinOp::Eq, part.clone(), Expr::int(first + i as i64)),
+                            Expr::str(n),
+                        )
+                    })
+                    .collect();
+                (
+                    Expr::Case {
+                        when,
+                        otherwise: None,
+                    },
+                    KType::String,
                 )
             }
             ("TalendDate", "formatDate", 2) => {
@@ -653,8 +771,42 @@ fn context_literal(v: &str, ty: KType) -> Expr {
             .map_or_else(|_| Expr::str(v), Expr::int),
         KType::Number | KType::BigNumber => Expr::num(v.trim()),
         KType::Boolean => Expr::bool(v.trim().eq_ignore_ascii_case("true")),
+        // A date context's default (`yyyy-MM-dd HH:mm:ss`) is a timestamp, not text: date
+        // arithmetic over a text literal does not type-check in SQL.
+        KType::Date | KType::Timestamp if is_datetime_text(v) => Expr::Cast {
+            arg: Box::new(Expr::str(v.trim())),
+            to: KType::Timestamp,
+            length: -1,
+            precision: -1,
+        },
         _ => Expr::str(v),
     }
+}
+
+/// `yyyy-MM-dd` with an optional ` HH:mm[:ss]`.
+fn is_datetime_text(v: &str) -> bool {
+    let v = v.trim();
+    let b = v.as_bytes();
+    let digits =
+        |r: std::ops::Range<usize>| r.clone().all(|i| b.get(i).is_some_and(u8::is_ascii_digit));
+    let date = b.len() >= 10
+        && digits(0..4)
+        && b[4] == b'-'
+        && digits(5..7)
+        && b[7] == b'-'
+        && digits(8..10);
+    let time = match b.len() {
+        10 => true,
+        16 | 19 => {
+            b[10] == b' '
+                && digits(11..13)
+                && b[13] == b':'
+                && digits(14..16)
+                && (b.len() == 16 || (b[16] == b':' && digits(17..19)))
+        }
+        _ => false,
+    };
+    date && time
 }
 
 /// Every `Numeric.sequence(<name>, <start>, <step>)` call in a Java expression, once per call (each
@@ -732,6 +884,7 @@ mod tests {
                 job: "jLoad",
                 global: &|_| None,
                 routines: &[],
+                locale: None,
                 sequence: &|_| None,
             },
         )
@@ -766,6 +919,20 @@ mod tests {
         let (l, _) = scope_lower("context.schema").unwrap();
         assert_eq!(l.expr.sql(), "'ODS'");
         assert!(l.notes.iter().any(|n| n == NOTE_CONTEXT));
+    }
+
+    #[test]
+    fn the_last_day_of_the_month_keeps_the_time_and_compare_date_prints_both() {
+        let last = sql("TalendDate.getLastDayOfMonth(row1.D)");
+        assert!(last.contains("date_trunc('month'"), "{last}");
+        let cmp = sql(
+            "TalendDate.compareDate(TalendDate.getLastDayOfMonth(row1.D), row1.D, \"yyyy-MM-dd\")==0?1:0",
+        );
+        assert!(
+            cmp.contains("format_datetime") && cmp.contains("IS NULL"),
+            "{cmp}"
+        );
+        assert!(scope_lower("TalendDate.compareDate(row1.D, row1.D, \"MMMM\")").is_err());
     }
 
     #[test]

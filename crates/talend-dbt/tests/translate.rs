@@ -176,6 +176,7 @@ fn shop() -> Translation {
         &Settings {
             project: "Shop".into(),
             source_database: None,
+            ..Settings::default()
         },
     )
 }

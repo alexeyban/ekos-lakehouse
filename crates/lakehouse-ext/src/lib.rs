@@ -511,6 +511,19 @@ impl EkosExtension for LakehouseExtension {
                                 )
                                 .arg(clap::Arg::new("talend-project").value_name("PROJECT").required(true).help("The Talend project's name (see `talend scan`)"))
                                 .arg(
+                                    clap::Arg::new("faithful")
+                                        .long("faithful")
+                                        .value_name("JOB")
+                                        .action(clap::ArgAction::Append)
+                                        .help("Translate this job without pattern recognition, one model per output (repeatable; `all` for every job)"),
+                                )
+                                .arg(
+                                    clap::Arg::new("locale")
+                                        .long("locale")
+                                        .value_name("TAG")
+                                        .help("The JVM locale the jobs ran under (fr_FR, de_DE, en_GB, en_US, …): week numbers and month and day names follow it"),
+                                )
+                                .arg(
                                     clap::Arg::new("out")
                                         .long("out")
                                         .value_parser(clap::value_parser!(std::path::PathBuf))
@@ -1729,6 +1742,20 @@ impl EkosExtension for LakehouseExtension {
                                 .map(|o| ctx.invoked_from.join(o)),
                             explain: !m.get_flag("no-explain"),
                             json: m.get_flag("json"),
+                            faithful: m
+                                .get_many::<String>("faithful")
+                                .map(|v| {
+                                    v.map(|j| {
+                                        if j == "all" {
+                                            "*".to_string()
+                                        } else {
+                                            j.clone()
+                                        }
+                                    })
+                                    .collect()
+                                })
+                                .unwrap_or_default(),
+                            locale: m.get_one::<String>("locale").cloned(),
                         };
                         let repo = pipeline_dir(&settings, ctx);
                         talend_cmd::translate(&settings, ctx, &o, &repo).await

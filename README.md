@@ -111,7 +111,9 @@ ekos-lakehouse lakehouse pentaho scan    # Kettle packages: transformations, job
 ekos-lakehouse lakehouse pentaho translate etl   # silver + gold dbt models on a proposal branch
 ekos-lakehouse lakehouse pentaho report --package etl   # per model and step: fidelity, gaps, SQL
 ekos-lakehouse lakehouse talend scan     # Talend projects under the sources (EKOS RFC 0268)
-ekos-lakehouse lakehouse talend translate <project>   # silver + gold dbt models on a proposal branch
+ekos-lakehouse lakehouse talend translate <project>   # silver + gold dbt models (and snapshots) on a proposal branch
+ekos-lakehouse lakehouse talend translate <project> --locale fr_FR   # the JVM locale: week numbers, month names
+ekos-lakehouse lakehouse talend translate <project> --faithful jLoad   # no pattern recognition for this job
 ```
 
 A gold mart starts as a committed description:

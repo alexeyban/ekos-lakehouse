@@ -155,6 +155,35 @@ pub struct TranslateOptions {
     /// Plan every enabled model on Trino (when a Trino URL is configured).
     pub explain: bool,
     pub json: bool,
+    /// Jobs translated without pattern recognition (`*` for every job).
+    pub faithful: std::collections::BTreeSet<String>,
+    /// The JVM locale the jobs ran under.
+    pub locale: Option<String>,
+}
+
+/// The names of a project's jobs, from its item files (`process/…/<name>_<version>.item`).
+fn project_jobs(root: &Path) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![root.join("process")];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if let Some(stem) = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".item"))
+                && let Some((name, _version)) = stem.rsplit_once('_')
+            {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// `lakehouse talend translate <project>`.
@@ -180,15 +209,44 @@ pub async fn translate(
             "{e}: run `lakehouse generate` first — Talend tables resolve to the deployed silver models"
         )
     })?;
+    let locale = match o.locale.as_deref() {
+        None => None,
+        Some(tag) => Some(
+            ekos_lakehouse_talend_dbt::Locale::parse(tag).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown locale `{tag}` (known: {})",
+                    ekos_lakehouse_talend_dbt::Locale::KNOWN.join(", ")
+                )
+            })?,
+        ),
+    };
+    let unknown: Vec<&String> = o
+        .faithful
+        .iter()
+        .filter(|j| *j != "*" && !project_jobs(&dir.path).contains(*j))
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!("--faithful names no job of `{}`: {unknown:?}", o.project);
+    }
     let project = read_dir(&dir.path, &ctx.config.redaction_config());
-    let mut t = ekos_lakehouse_talend_dbt::translate(
-        &project,
-        &plan,
-        &ekos_lakehouse_talend_dbt::Settings {
-            project: o.project.clone(),
-            source_database: settings.source_database.clone(),
-        },
-    );
+    let s = ekos_lakehouse_talend_dbt::Settings {
+        project: o.project.clone(),
+        source_database: settings.source_database.clone(),
+        faithful: o.faithful.clone(),
+        locale,
+    };
+    // A long Java concatenation is a deep SQL expression: the parser needs more stack than an
+    // async worker thread has.
+    let mut t = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn_scoped(scope, || {
+                ekos_lakehouse_talend_dbt::translate(&project, &plan, &s)
+            })
+            .map(|h| h.join())
+    })
+    .map_err(|e| anyhow::anyhow!("cannot start the translation: {e}"))?
+    .map_err(|_| anyhow::anyhow!("the translation failed"))?;
     let pkg = ekos_lakehouse_etl_dbt::slug(&o.project);
     // Gate 4: Trino plans every enabled model; one it refuses is disabled with its message. A
     // model reading a landed file is not planned (where the file lands is a question).

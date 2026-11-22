@@ -54,13 +54,207 @@ pub struct ContextFromData {
     pub from: Option<NodeId>,
 }
 
+/// What the operator states about the run that the project does not (EKOS RFC 0268 phase 2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Options {
+    /// The JVM's default locale ([`Locale::parse`]). Unstated, what depends on it (week numbers,
+    /// month and day names) is a gap.
+    pub locale: Option<Locale>,
+}
+
+/// A JVM locale the lowering knows: its week rule (from the country) and its month and day
+/// names (from the language, CLDR's, as Java 9+ prints them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Locale {
+    pub tag: &'static str,
+    /// Weeks start on Monday and the first has four days: Java's `WEEK_OF_YEAR` is the ISO week.
+    pub iso_weeks: bool,
+    pub months: &'static [&'static str; 12],
+    /// Sunday first, as `DAY_OF_WEEK` counts.
+    pub days: &'static [&'static str; 7],
+}
+
+const MONTHS_FR: [&str; 12] = [
+    "janvier",
+    "février",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "août",
+    "septembre",
+    "octobre",
+    "novembre",
+    "décembre",
+];
+const DAYS_FR: [&str; 7] = [
+    "dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi",
+];
+const MONTHS_DE: [&str; 12] = [
+    "Januar",
+    "Februar",
+    "März",
+    "April",
+    "Mai",
+    "Juni",
+    "Juli",
+    "August",
+    "September",
+    "Oktober",
+    "November",
+    "Dezember",
+];
+const DAYS_DE: [&str; 7] = [
+    "Sonntag",
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
+];
+const MONTHS_EN: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const DAYS_EN: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const MONTHS_ES: [&str; 12] = [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+];
+const DAYS_ES: [&str; 7] = [
+    "domingo",
+    "lunes",
+    "martes",
+    "miércoles",
+    "jueves",
+    "viernes",
+    "sábado",
+];
+const MONTHS_IT: [&str; 12] = [
+    "gennaio",
+    "febbraio",
+    "marzo",
+    "aprile",
+    "maggio",
+    "giugno",
+    "luglio",
+    "agosto",
+    "settembre",
+    "ottobre",
+    "novembre",
+    "dicembre",
+];
+const DAYS_IT: [&str; 7] = [
+    "domenica",
+    "lunedì",
+    "martedì",
+    "mercoledì",
+    "giovedì",
+    "venerdì",
+    "sabato",
+];
+const MONTHS_NL: [&str; 12] = [
+    "januari",
+    "februari",
+    "maart",
+    "april",
+    "mei",
+    "juni",
+    "juli",
+    "augustus",
+    "september",
+    "oktober",
+    "november",
+    "december",
+];
+const DAYS_NL: [&str; 7] = [
+    "zondag",
+    "maandag",
+    "dinsdag",
+    "woensdag",
+    "donderdag",
+    "vrijdag",
+    "zaterdag",
+];
+
+impl Locale {
+    /// The locales the lowering knows.
+    pub const KNOWN: &'static [&'static str] = &[
+        "fr_FR", "fr_BE", "fr_CH", "de_DE", "de_AT", "de_CH", "en_GB", "en_IE", "en_US", "es_ES",
+        "it_IT", "nl_NL", "nl_BE",
+    ];
+
+    /// `fr_FR`, `de-DE`, …: `None` for a locale the lowering does not know.
+    pub fn parse(tag: &str) -> Option<Locale> {
+        let t = tag.replace('-', "_");
+        let tag = *Self::KNOWN.iter().find(|k| k.eq_ignore_ascii_case(&t))?;
+        let (lang, country) = tag.split_once('_')?;
+        let (months, days) = match lang {
+            "fr" => (&MONTHS_FR, &DAYS_FR),
+            "de" => (&MONTHS_DE, &DAYS_DE),
+            "en" => (&MONTHS_EN, &DAYS_EN),
+            "es" => (&MONTHS_ES, &DAYS_ES),
+            "it" => (&MONTHS_IT, &DAYS_IT),
+            _ => (&MONTHS_NL, &DAYS_NL),
+        };
+        Some(Locale {
+            tag,
+            // The United States count weeks from Sunday, the first having one day.
+            iso_weeks: country != "US",
+            months,
+            days,
+        })
+    }
+}
+
 /// Lowers one job (expand joblets first: `Project::expand`). `routines` are the project's
 /// (`Project::routines`): a custom routine whose body is a digest is lowered.
 pub fn lower_job(job: &Job, routines: &[Routine], catalog: &dyn Catalog) -> Lowering {
+    lower_job_with(job, routines, catalog, &Options::default())
+}
+
+/// [`lower_job`] with what the operator states about the run.
+pub fn lower_job_with(
+    job: &Job,
+    routines: &[Routine],
+    catalog: &dyn Catalog,
+    options: &Options,
+) -> Lowering {
     let mut b = Builder {
         job,
         routines,
         catalog,
+        options: *options,
         out: Lowering {
             ir: Ir {
                 transformation: job.path.clone(),
@@ -211,6 +405,7 @@ struct Builder<'a> {
     job: &'a Job,
     routines: &'a [Routine],
     catalog: &'a dyn Catalog,
+    options: Options,
     out: Lowering,
     /// `(component, port)` → the node rows leave from. Port `""` is the main output; a tMap's
     /// outputs are their names; `REJECT` / `DUPLICATE` the second outputs.
@@ -422,12 +617,16 @@ impl Builder<'_> {
             .engine
             .clone()
             .or_else(|| shared.and_then(|s| s.engine.clone()))?;
+        // The component's own value, or the shared connection's when the component leaves it
+        // empty (a component on an existing connection keeps `""` in its own field).
         let folded = |name: &str| {
-            param(c, name)
-                .or_else(|| shared.and_then(|s| param(s, name)))
-                .map(|v| self.job.fold(v))
-                .filter(|f| f.complete() && !f.text.is_empty())
-                .map(|f| f.text)
+            let of = |x: &Component| {
+                param(x, name)
+                    .map(|v| self.job.fold(v))
+                    .filter(|f| f.complete() && !f.text.is_empty())
+                    .map(|f| f.text)
+            };
+            of(c).or_else(|| shared.and_then(of))
         };
         Some(ekos_lakehouse_etl_rel::Connection {
             name: shared.map_or_else(|| c.unique_name.clone(), |s| s.unique_name.clone()),
@@ -443,15 +642,18 @@ impl Builder<'_> {
 
     fn table_ref(&self, c: &Component, table_param: &str, schema_param: &str) -> Option<TableRef> {
         let table = self.job.fold(param(c, table_param)?).text;
-        let schema = param(c, schema_param)
-            .or_else(|| {
+        let fold = |v: Option<&str>| {
+            v.map(|s| self.job.fold(s))
+                .filter(|f| f.complete() && !f.text.is_empty())
+                .map(|f| f.text)
+        };
+        let schema = fold(param(c, schema_param)).or_else(|| {
+            fold(
                 param(c, "CONNECTION")
                     .and_then(|n| self.job.component(n))
-                    .and_then(|conn| param(conn, "SCHEMA_DB"))
-            })
-            .map(|s| self.job.fold(s))
-            .filter(|f| f.complete() && !f.text.is_empty())
-            .map(|f| f.text);
+                    .and_then(|conn| param(conn, "SCHEMA_DB")),
+            )
+        });
         (!table.is_empty()).then_some(TableRef {
             connection: self.connection(c),
             schema,
@@ -717,6 +919,7 @@ impl Builder<'_> {
                         job: &self.job.name,
                         global: &global,
                         routines: self.routines,
+                        locale: self.options.locale,
                         sequence: &no_sequence,
                     },
                 )
@@ -841,11 +1044,22 @@ impl Builder<'_> {
     /// `table` parameter's `value` column per schema column).
     fn row_generator(&mut self, c: &Component, table: &str, value: &str) {
         let fields = schema(c, "");
-        let count = param(c, "NB_ROWS").map(|n| self.job.fold(n));
-        let Some(count) = count
-            .filter(|f| f.complete())
-            .and_then(|f| f.text.trim().parse::<u64>().ok())
-        else {
+        let mut count_notes: Vec<String> = Vec::new();
+        let count = match param(c, "NB_ROWS").and_then(|n| set_by_tjava(self.job, n)) {
+            Some(Ok((n, note))) => {
+                count_notes.push(note);
+                Some(n)
+            }
+            Some(Err(reason)) => {
+                self.gap(c, "", Vec::new(), reason);
+                return;
+            }
+            None => param(c, "NB_ROWS")
+                .map(|n| self.job.fold(n))
+                .filter(|f| f.complete())
+                .and_then(|f| f.text.trim().parse::<u64>().ok()),
+        };
+        let Some(count) = count else {
             self.gap(
                 c,
                 "",
@@ -900,6 +1114,7 @@ impl Builder<'_> {
             job: &self.job.name,
             global: &global,
             routines: self.routines,
+            locale: self.options.locale,
             sequence: &sequence,
         };
         let mut row = Vec::new();
@@ -934,13 +1149,19 @@ impl Builder<'_> {
             self.gap(c, "", Vec::new(), reason);
             return;
         }
+        let count_fidelity = if count_notes.is_empty() {
+            Fidelity::Exact
+        } else {
+            Fidelity::Rewritten
+        };
         if seqs.is_empty() {
+            notes.extend(count_notes);
             let id = self.push(
                 c,
                 Op::Generate { row, count },
                 Vec::new(),
                 fields,
-                fidelity,
+                fidelity.max(count_fidelity),
                 notes,
                 None,
             );
@@ -957,8 +1178,8 @@ impl Builder<'_> {
             },
             Vec::new(),
             vec![gen_field.clone()],
-            Fidelity::Exact,
-            Vec::new(),
+            count_fidelity,
+            count_notes,
             None,
         );
         let mut numbered = vec![gen_field];
@@ -1711,6 +1932,7 @@ impl Builder<'_> {
             job: &self.job.name,
             global: &global,
             routines: self.routines,
+            locale: self.options.locale,
             sequence: &sequence,
         };
         let mut fidelity = Fidelity::Exact;
@@ -1836,6 +2058,14 @@ impl Builder<'_> {
             out_notes.push(seq_note.clone());
         }
         let head = window(self, head, &late);
+        // The file each row came from travels with the row (EKOS RFC 0268 phase 2): a later
+        // component's `globalMap.get("…_CURRENT_FILEPATH")` reads it from its own input.
+        if let Some(p) = &path_field
+            && !items.iter().any(|(n, _)| n == PATH)
+        {
+            items.push((PATH.to_string(), Expr::col(p)));
+            schema.push(Field::new(PATH, KType::String));
+        }
         let id = self.push(
             c,
             Op::Project { items },
@@ -2674,6 +2904,125 @@ fn context_writers(job: &Job) -> BTreeMap<String, (String, String)> {
     out
 }
 
+/// `NB_ROWS` naming `context.<v>` that a `tJava` assigns (EKOS RFC 0268 phase 2): `None` when no
+/// `tJava` does; the count with its note for `TalendDate.diffDate(context.E, context.S, "dd")`
+/// (optionally cast, plus a constant), computed from the two defaults; a gap otherwise.
+fn set_by_tjava(job: &Job, nb_rows: &str) -> Option<Result<(u64, String), String>> {
+    use ekos_lakehouse_etl_expr::java::JExpr;
+    use ekos_lakehouse_etl_expr::stmt::{Stmt, parse_script};
+    let var = nb_rows.trim().strip_prefix("context.")?;
+    if !var.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+        return None;
+    }
+    let assigns = |code: &str| {
+        let compact: String = code.chars().filter(|ch| !ch.is_whitespace()).collect();
+        compact.contains(&format!("context.{var}="))
+    };
+    let tjava = job
+        .components
+        .iter()
+        .find(|c| c.component_type == "tJava" && param(c, "CODE").is_some_and(assigns))?;
+    let who = tjava.unique_name.clone();
+    let unknown = || {
+        Err(format!(
+            "the row count `context.{var}` is set at run time by {who}, in a form the lowering does not compute"
+        ))
+    };
+    let Ok(stmts) = parse_script(param(tjava, "CODE").unwrap_or_default(), false) else {
+        return Some(unknown());
+    };
+    let value = stmts.iter().find_map(|st| match st {
+        Stmt::Expr(JExpr::Assign("=", target, value))
+            if matches!(target.as_ref(), JExpr::Field(q, v)
+                if v == var && matches!(q.as_ref(), JExpr::Name(n) if n == "context")) =>
+        {
+            Some(value.as_ref().clone())
+        }
+        _ => None,
+    });
+    let Some(value) = value else {
+        return Some(unknown());
+    };
+    let (call, plus) = match &value {
+        JExpr::Binary("+", l, r) => match r.as_ref() {
+            JExpr::Int(k) => (l.as_ref().clone(), *k),
+            _ => return Some(unknown()),
+        },
+        other => (other.clone(), 0),
+    };
+    let call = match call {
+        JExpr::Cast(_, inner) => *inner,
+        other => other,
+    };
+    let ctx = |e: &JExpr| -> Option<String> {
+        match e {
+            JExpr::Field(q, v) if matches!(q.as_ref(), JExpr::Name(n) if n == "context") => {
+                Some(v.clone())
+            }
+            _ => None,
+        }
+    };
+    let JExpr::Call(Some(class), name, args) = &call else {
+        return Some(unknown());
+    };
+    if !matches!(class.as_ref(), JExpr::Name(n) if n == "TalendDate")
+        || name != "diffDate"
+        || args.len() != 3
+        || !matches!(&args[2], JExpr::Str(p) if p == "dd")
+    {
+        return Some(unknown());
+    }
+    let (Some(end), Some(start)) = (ctx(&args[0]), ctx(&args[1])) else {
+        return Some(unknown());
+    };
+    let day = |v: &str| {
+        job.context_var(v)
+            .and_then(|c| c.value.clone())
+            .and_then(|t| days_from_civil(&t))
+    };
+    let (Some(e), Some(s)) = (day(&end), day(&start)) else {
+        return Some(Err(format!(
+            "the row count `context.{var}` is set by {who} from `context.{end}` and `context.{start}`, which have no date default"
+        )));
+    };
+    let n = e - s + plus;
+    let Ok(n) = u64::try_from(n) else {
+        return Some(unknown());
+    };
+    Some(Ok((
+        n,
+        format!(
+            "the row count `context.{var}` is set at run time by {who}: the days from `context.{start}` to `context.{end}`{}, computed from their default values (replaceable at run time)",
+            if plus == 0 {
+                String::new()
+            } else {
+                format!(" plus {plus}")
+            }
+        ),
+    )))
+}
+
+/// Days since 1970-01-01 of a `yyyy-MM-dd…` text (Howard Hinnant's civil-days algorithm).
+fn days_from_civil(text: &str) -> Option<i64> {
+    let d = text.trim().get(..10)?;
+    let mut it = d.split('-');
+    let (y, m, day): (i64, i64, i64) = (
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+    );
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
 /// `System.out.println(…)` / `print`, and an `if` holding nothing else: logging, not data.
 fn is_logging(st: &ekos_lakehouse_etl_expr::stmt::Stmt) -> bool {
     use ekos_lakehouse_etl_expr::java::JExpr;
@@ -2749,6 +3098,7 @@ impl Builder<'_> {
             job: &self.job.name,
             global: &global,
             routines: self.routines,
+            locale: self.options.locale,
             sequence: &no_sequence,
         };
         let mut assigned: Vec<(String, Expr, KType)> = Vec::new();

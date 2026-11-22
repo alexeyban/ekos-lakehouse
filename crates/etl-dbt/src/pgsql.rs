@@ -217,6 +217,14 @@ impl VisitorMut for Walker<'_> {
     }
 
     fn pre_visit_expr(&mut self, e: &mut Expr) -> ControlFlow<()> {
+        // `schema.table.column`: the table is now a ref aliased by its own name, so the column
+        // is `table.column` (Trino resolves a qualifier against the FROM item's alias only).
+        if let Expr::CompoundIdentifier(parts) = e
+            && parts.len() > 2
+        {
+            let keep = parts.split_off(parts.len() - 2);
+            *parts = keep;
+        }
         match e {
             Expr::Identifier(_)
             | Expr::CompoundIdentifier(_)
@@ -398,6 +406,19 @@ mod tests {
             "SELECT o.id, CAST(o.total AS DECIMAL(38,10)) AS t, orders.status FROM {{ ref('public__orders') }} AS o JOIN {{ ref('public__customers') }} AS customers ON customers.id = o.customer_id WHERE lower(customers.name) LIKE lower('a%') AND SUBSTRING(o.code, 2, 3) = 'x'"
         );
         assert_eq!(r.notes.len(), 3, "{:?}", r.notes);
+    }
+
+    #[test]
+    fn a_column_qualified_by_schema_and_table_is_qualified_by_the_table() {
+        let r = to_trino(
+            "SELECT \"S\".\"T\".\"A\" FROM \"S\".\"T\" WHERE \"S\".\"T\".\"B\" = 1",
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "SELECT \"T\".\"A\" FROM {{ ref('public__t') }} AS \"T\" WHERE \"T\".\"B\" = 1"
+        );
     }
 
     #[test]

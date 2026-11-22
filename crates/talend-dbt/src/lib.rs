@@ -8,6 +8,9 @@
 //! is written disabled with its reasons.
 
 pub mod gates;
+pub mod patterns;
+
+pub use ekos_lakehouse_talend_rel::Locale;
 pub mod proposal;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,7 +22,7 @@ use ekos_lakehouse_etl_expr::{Fidelity, Gap, quote_ident as q, quote_str};
 use ekos_lakehouse_etl_rel::{
     Connection, Field, Ir, NoCatalog, NodeId, Op, SinkMode, SourceQuery, TableRef, render,
 };
-use ekos_lakehouse_talend_rel::{ContextFromData, lower_job};
+use ekos_lakehouse_talend_rel::{ContextFromData, lower_job_with};
 use ekos_talend::{Job, Project};
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +36,18 @@ pub struct Settings {
     pub project: String,
     /// The lakehouse source database (`[extensions.lakehouse] source-database`).
     pub source_database: Option<String>,
+    /// Jobs translated without pattern recognition, one model per output (`--faithful`; `*` is
+    /// every job). RFC 0268 phase 2.
+    pub faithful: BTreeSet<String>,
+    /// The JVM's default locale the jobs ran under (`--locale`): week numbers and month and day
+    /// names follow it.
+    pub locale: Option<ekos_lakehouse_talend_rel::Locale>,
+}
+
+impl Settings {
+    fn is_faithful(&self, job: &str) -> bool {
+        self.faithful.contains("*") || self.faithful.contains(job)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -40,6 +55,8 @@ pub struct Settings {
 pub enum Layer {
     Silver,
     Gold,
+    /// A dbt snapshot (RFC 0268 phase 2).
+    Snapshot,
 }
 
 /// The rule a gold model's materialization came from (RFC 0268 §Idioms, phase 1).
@@ -62,6 +79,14 @@ pub enum Rule {
     File,
     /// Not a sink: a silver chain.
     Chain,
+    /// SCD2 by hand: a dbt snapshot and the gold model over it (phase 2).
+    Snapshot,
+    /// Delete the matched rows, insert the staged ones: a merge on the deleted key (phase 2).
+    KeyedReplace,
+    /// Many writers of one rejects table: one `rej_` model (phase 2).
+    Rejects,
+    /// An update of a flag on the job's own source: no model (phase 2).
+    WriteBack,
 }
 
 /// One component as a reviewer sees it.
@@ -119,6 +144,19 @@ pub struct StatementReport {
     pub bookkeeping: bool,
 }
 
+/// A pattern recognised in a job, or a shape refused (RFC 0268 phase 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternReport {
+    pub job: String,
+    pub table: String,
+    /// The rule, or `None` when refused.
+    pub rule: Option<Rule>,
+    /// The model it became.
+    pub model: Option<String>,
+    pub components: Vec<String>,
+    pub notes: Vec<String>,
+}
+
 /// A context variable a `tJavaRow` sets from a row, and the sources that read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WatermarkReport {
@@ -139,6 +177,9 @@ pub struct Report {
     pub questions: Vec<Question>,
     pub statements: Vec<StatementReport>,
     pub watermarks: Vec<WatermarkReport>,
+    /// Patterns recognised and refused (phase 2).
+    #[serde(default)]
+    pub patterns: Vec<PatternReport>,
     /// Components outside every data flow, with why.
     pub skipped: Vec<(String, String)>,
     /// Files the jobs read, as `talend_files` dbt sources: (source table name, file as written).
@@ -169,16 +210,74 @@ pub struct Translation {
 /// A gold model's key tests, written once every gate has run: (job slug, description, keys).
 type Tests = BTreeMap<String, (String, String, Vec<String>)>;
 
-/// One job lowered.
+/// One job lowered, its patterns recognised.
 struct Lowered {
     job: Job,
     ir: Ir,
     skipped: Vec<(String, String)>,
     context_from_data: Vec<ContextFromData>,
+    patterns: patterns::Recognised,
+    /// Sinks a pattern replaced → the group's index.
+    absorbed: BTreeMap<NodeId, usize>,
+    /// Virtual sinks → the group's index.
+    virtual_sinks: BTreeMap<NodeId, usize>,
+}
+
+/// One writer of a `rej_` model: its body, rendered in its own job.
+struct Part {
+    job: String,
+    component: String,
+    body: Result<String, Vec<String>>,
+    fidelity: Fidelity,
+    components: Vec<String>,
+}
+
+/// A rejects table many components write (RFC 0268 phase 2).
+struct Union {
+    name: String,
+    table: TableRef,
+    /// `(job, sink)` of each writer.
+    members: Vec<(String, NodeId)>,
+    /// Target columns, keys first: the order every part selects.
+    columns: Vec<String>,
+    keys: Vec<String>,
+    mode: SinkMode,
+    parts: Vec<Part>,
+}
+
+/// Cross-job state the per-job translation reads and fills.
+struct Shared<'a> {
+    resolver: &'a Resolver<'a>,
+    pkg: &'a str,
+    writers: &'a BTreeMap<TableKey, Vec<String>>,
+    read_tables: &'a BTreeSet<TableKey>,
+    unions: &'a mut Vec<Union>,
 }
 
 fn gold_name(pkg: &str, job: &str, component: &str) -> String {
     format!("talend__{pkg}__{}__{}", slug(job), slug(component))
+}
+
+/// A sink's model name: a pattern's is named after its table.
+fn sink_name(pkg: &str, l: &Lowered, n: &ekos_lakehouse_etl_rel::RelNode) -> String {
+    match (l.virtual_sinks.get(&n.id), &n.op) {
+        (Some(_), Op::Sink { sink }) => gold_name(pkg, &l.job.name, &sink.target.table),
+        _ => gold_name(pkg, &l.job.name, &n.step),
+    }
+}
+
+/// The Trino type of a column of the empty relation a self-read reads on the first build.
+fn trino_type(t: ekos_lakehouse_etl_expr::KType) -> &'static str {
+    use ekos_lakehouse_etl_expr::KType;
+    match t {
+        KType::Integer => "bigint",
+        KType::Number => "double",
+        KType::BigNumber => "decimal(38,10)",
+        KType::Timestamp => "timestamp(6)",
+        KType::Date => "date",
+        KType::Boolean => "boolean",
+        _ => "varchar",
+    }
 }
 
 /// Translates a project's latest jobs.
@@ -186,46 +285,85 @@ pub fn translate(project: &Project, plan: &Plan, s: &Settings) -> Translation {
     let pkg = slug(&s.project);
     let mut jobs: Vec<&Job> = project.jobs.iter().filter(|j| j.latest).collect();
     jobs.sort_by(|a, b| a.name.cmp(&b.name).then(a.path.cmp(&b.path)));
+    let options = ekos_lakehouse_talend_rel::Options { locale: s.locale };
     let lowered: Vec<Lowered> = jobs
         .iter()
         .map(|j| {
             let job = project.expand(j).job;
-            let l = lower_job(&job, &project.routines, &NoCatalog);
+            let l = lower_job_with(&job, &project.routines, &NoCatalog, &options);
+            let mut ir = l.ir;
+            let patterns = if s.is_faithful(&job.name) {
+                patterns::Recognised::default()
+            } else {
+                patterns::recognise(&mut ir)
+            };
+            let mut absorbed = BTreeMap::new();
+            let mut virtual_sinks = BTreeMap::new();
+            for (i, g) in patterns.groups.iter().enumerate() {
+                for m in &g.members {
+                    absorbed.insert(*m, i);
+                }
+                if let Some(v) = g.sink {
+                    virtual_sinks.insert(v, i);
+                }
+            }
             Lowered {
                 job,
-                ir: l.ir,
+                ir,
                 skipped: l.skipped,
                 context_from_data: l.context_from_data,
+                patterns,
+                absorbed,
+                virtual_sinks,
             }
         })
         .collect();
-    // The tables the project writes: each the gold model of its first writer.
-    let mut written: BTreeMap<TableKey, (String, Vec<Field>)> = BTreeMap::new();
-    let mut writers: BTreeMap<TableKey, Vec<String>> = BTreeMap::new();
-    for l in &lowered {
+    // The writers of each table: every sink no pattern replaced, and the patterns' own.
+    let mut by_table: BTreeMap<TableKey, Vec<(usize, NodeId)>> = BTreeMap::new();
+    for (li, l) in lowered.iter().enumerate() {
         for n in &l.ir.nodes {
             if let Op::Sink { sink } = &n.op
                 && sink.target.schema.as_deref() != Some("files")
+                && !l.absorbed.contains_key(&n.id)
             {
-                let k = key(&sink.target);
-                let name = gold_name(&pkg, &l.job.name, &n.step);
-                writers.entry(k.clone()).or_default().push(name.clone());
-                written.entry(k).or_insert_with(|| {
-                    let fields = sink
-                        .columns
-                        .iter()
-                        .map(|(stream, col)| {
-                            let ty = n
-                                .schema
-                                .iter()
-                                .find(|f| f.name == *stream)
-                                .map_or(Default::default(), |f| f.ty);
-                            Field::new(col, ty)
-                        })
-                        .collect();
-                    (name, fields)
-                });
+                by_table
+                    .entry(key(&sink.target))
+                    .or_default()
+                    .push((li, n.id));
             }
+        }
+    }
+    let mut unions = rejects_unions(&lowered, &by_table, &pkg, s);
+    let mut written: BTreeMap<TableKey, (String, Vec<Field>)> = BTreeMap::new();
+    let mut writers: BTreeMap<TableKey, Vec<String>> = BTreeMap::new();
+    for (k, ws) in &by_table {
+        let union = unions.iter().find(|u| key(&u.table) == *k);
+        for (li, id) in ws {
+            let l = &lowered[*li];
+            let n = l.ir.node(*id);
+            let Op::Sink { sink } = &n.op else { continue };
+            let name = match union {
+                Some(u) => u.name.clone(),
+                None => sink_name(&pkg, l, n),
+            };
+            if !writers.get(k).is_some_and(|w| w.contains(&name)) {
+                writers.entry(k.clone()).or_default().push(name.clone());
+            }
+            written.entry(k.clone()).or_insert_with(|| {
+                let fields = sink
+                    .columns
+                    .iter()
+                    .map(|(stream, col)| {
+                        let ty = n
+                            .schema
+                            .iter()
+                            .find(|f| f.name == *stream)
+                            .map_or(Default::default(), |f| f.ty);
+                        Field::new(col, ty)
+                    })
+                    .collect();
+                (name, fields)
+            });
         }
     }
     let resolver = Resolver {
@@ -255,16 +393,31 @@ pub fn translate(project: &Project, plan: &Plan, s: &Settings) -> Translation {
     let mut aliases: BTreeSet<String> = BTreeSet::new();
     let mut tests: Tests = BTreeMap::new();
     for l in &lowered {
+        let mut shared = Shared {
+            resolver: &resolver,
+            pkg: &pkg,
+            writers: &writers,
+            read_tables: &read_tables,
+            unions: &mut unions,
+        };
         translate_job(
             l,
-            &resolver,
-            &pkg,
-            &writers,
-            &read_tables,
+            &mut shared,
             &mut report,
             &mut files,
             &mut locations,
             &mut aliases,
+            &mut tests,
+        );
+    }
+    for u in unions {
+        write_union(
+            u,
+            &pkg,
+            &resolver,
+            &mut report,
+            &mut files,
+            &mut locations,
             &mut tests,
         );
     }
@@ -475,7 +628,11 @@ fn disable_in(report: &mut Report, files: &mut BTreeMap<String, String>, name: &
     m.fidelity = Fidelity::Gap;
     m.gaps.push(reason.to_string());
     if let Some(sql) = files.get_mut(&m.path) {
-        *sql = disable(sql, &[reason.to_string()]);
+        *sql = if m.layer == Layer::Snapshot {
+            disable_snapshot(&m.gaps)
+        } else {
+            disable(sql, &[reason.to_string()])
+        };
     }
 }
 
@@ -576,23 +733,224 @@ fn input_components(ir: &Ir, n: &ekos_lakehouse_etl_rel::RelNode) -> Vec<String>
     out
 }
 
+/// The `rej_` models: a table several components write, all upserts (or all inserts) on the same
+/// keys and columns, none reading it, each from a reject branch (RFC 0268 phase 2).
+fn rejects_unions(
+    lowered: &[Lowered],
+    by_table: &BTreeMap<TableKey, Vec<(usize, NodeId)>>,
+    pkg: &str,
+    s: &Settings,
+) -> Vec<Union> {
+    let mut out = Vec::new();
+    for ws in by_table.values() {
+        if ws.len() < 2 {
+            continue;
+        }
+        let sinks: Vec<(
+            &Lowered,
+            &ekos_lakehouse_etl_rel::RelNode,
+            &ekos_lakehouse_etl_rel::Sink,
+        )> = ws
+            .iter()
+            .filter_map(|(li, id)| {
+                let l = &lowered[*li];
+                let n = l.ir.node(*id);
+                match &n.op {
+                    Op::Sink { sink } => Some((l, n, sink)),
+                    _ => None,
+                }
+            })
+            .collect();
+        let (_, _, first) = sinks[0];
+        let cols = |x: &ekos_lakehouse_etl_rel::Sink| -> BTreeSet<String> {
+            x.columns.iter().map(|(_, c)| c.to_lowercase()).collect()
+        };
+        let keys = |x: &ekos_lakehouse_etl_rel::Sink| -> BTreeSet<String> {
+            x.keys.iter().map(|(_, c)| c.to_lowercase()).collect()
+        };
+        let alike = sinks.iter().all(|(l, n, x)| {
+            matches!(x.mode, SinkMode::Upsert | SinkMode::Insert)
+                && x.mode == first.mode
+                && keys(x) == keys(first)
+                && cols(x) == cols(first)
+                && !(first.mode == SinkMode::Upsert && x.keys.is_empty())
+                && !s.is_faithful(&l.job.name)
+                && !l.virtual_sinks.contains_key(&n.id)
+                && !patterns::reads(&l.ir, n.id, &x.target)
+                && patterns::upstream(&l.ir, n.id).iter().any(|i| {
+                    let m = l.ir.node(*i);
+                    // A reject output, a duplicate, or a lookup's matched or unmatched rows.
+                    m.notes.iter().any(|t| t.to_lowercase().contains("reject"))
+                        || m.schema.iter().any(|f| f.name == "__talend_row_in_key")
+                        || matches!(m.op, Op::Lookup { .. })
+                })
+        });
+        if !alike {
+            continue;
+        }
+        let mut columns: Vec<String> = first.keys.iter().map(|(_, c)| c.clone()).collect();
+        for (_, c) in &first.columns {
+            if !columns.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+                columns.push(c.clone());
+            }
+        }
+        out.push(Union {
+            name: format!("talend__{pkg}__rej_{}", slug(&first.target.table)),
+            table: first.target.clone(),
+            members: sinks
+                .iter()
+                .map(|(l, n, _)| (l.job.name.clone(), n.id))
+                .collect(),
+            columns,
+            keys: first.keys.iter().map(|(_, c)| c.clone()).collect(),
+            mode: first.mode,
+            parts: Vec::new(),
+        });
+    }
+    out
+}
+
+/// Writes a `rej_` model from its parts.
 #[allow(clippy::too_many_arguments)]
+fn write_union(
+    u: Union,
+    pkg: &str,
+    resolver: &Resolver<'_>,
+    report: &mut Report,
+    files: &mut BTreeMap<String, String>,
+    locations: &mut BTreeMap<String, (String, String)>,
+    tests: &mut Tests,
+) {
+    let _ = resolver;
+    let alias = format!("rej_{}", slug(&u.table.table));
+    let path = format!("dbt/models/gold/talend/{pkg}/{}.sql", u.name);
+    let mut gaps: Vec<String> = Vec::new();
+    for p in &u.parts {
+        if let Err(g) = &p.body {
+            for x in g {
+                gaps.push(format!("{}:{}: {x}", p.job, p.component));
+            }
+        }
+    }
+    let select = u
+        .columns
+        .iter()
+        .map(|c| q(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cfg = match u.mode {
+        SinkMode::Upsert => format!(
+            "{{{{ config(materialized='incremental', incremental_strategy='merge', unique_key=[{}], schema='gold_talend', alias='{alias}') }}}}",
+            u.keys
+                .iter()
+                .map(|k| quote_str(k))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => format!(
+            "{{{{ config(materialized='incremental', incremental_strategy='append', schema='gold_talend', alias='{alias}') }}}}"
+        ),
+    };
+    let (sql, enabled) = if gaps.is_empty() {
+        let body = u
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                format!(
+                    "-- {}:{}\nSELECT {select} FROM (\n{}\n) AS w{i}",
+                    gates::inert(&p.job),
+                    gates::inert(&p.component),
+                    p.body.as_ref().expect("no gap")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\nUNION ALL\n");
+        (format!("{HEADER}\n{cfg}\n\n{body}\n"), true)
+    } else {
+        (disable("", &gaps), false)
+    };
+    let fidelity = u
+        .parts
+        .iter()
+        .map(|p| p.fidelity)
+        .max()
+        .unwrap_or(Fidelity::Rewritten)
+        .max(Fidelity::Rewritten);
+    if enabled && !u.keys.is_empty() {
+        tests.insert(
+            u.name.clone(),
+            (
+                format!("rej_{}", slug(&u.table.table)),
+                format!("Talend rejects → {}", u.table.table),
+                u.keys.clone(),
+            ),
+        );
+    }
+    let mut components = Vec::new();
+    for p in &u.parts {
+        for c in &p.components {
+            components.push(format!("{}:{c}", p.job));
+        }
+    }
+    let jobs: BTreeSet<&str> = u.parts.iter().map(|p| p.job.as_str()).collect();
+    report.patterns.push(PatternReport {
+        job: jobs.iter().copied().collect::<Vec<_>>().join(", "),
+        table: u.table.table.clone(),
+        rule: Some(Rule::Rejects),
+        model: Some(u.name.clone()),
+        components: u.parts.iter().map(|p| format!("{}:{}", p.job, p.component)).collect(),
+        notes: vec![format!(
+            "{} components write rejected rows into `{}`: one model, their rows UNION ALL{}",
+            u.parts.len(),
+            u.table.table,
+            if u.mode == SinkMode::Upsert {
+                "; a merge refuses two rows with one key in a run, where Talend's row-by-row upsert keeps the last"
+            } else {
+                ""
+            }
+        )],
+    });
+    files.insert(path.clone(), sql);
+    locations.insert(u.name.clone(), ("gold_talend".into(), alias));
+    report.models.push(ModelReport {
+        name: u.name,
+        layer: Layer::Gold,
+        path,
+        job: jobs.iter().copied().collect::<Vec<_>>().join(", "),
+        rule: Rule::Rejects,
+        fidelity: if enabled { fidelity } else { Fidelity::Gap },
+        enabled,
+        materialization: if u.mode == SinkMode::Upsert {
+            "incremental (merge)".into()
+        } else {
+            "incremental (append)".into()
+        },
+        target: Some(u.table.table.clone()),
+        components,
+        gaps,
+    });
+}
+
 fn translate_job(
     l: &Lowered,
-    resolver: &Resolver<'_>,
-    pkg: &str,
-    writers: &BTreeMap<TableKey, Vec<String>>,
-    read_tables: &BTreeSet<TableKey>,
+    shared: &mut Shared<'_>,
     report: &mut Report,
     files: &mut BTreeMap<String, String>,
     locations: &mut BTreeMap<String, (String, String)>,
     aliases: &mut BTreeSet<String>,
     tests: &mut Tests,
 ) {
+    let resolver = shared.resolver;
+    let pkg = shared.pkg;
+    let writers = shared.writers;
+    let read_tables = shared.read_tables;
     let ir = &l.ir;
     let job = &l.job.name;
     let jslug = slug(job);
     let mut source_sql: BTreeMap<NodeId, String> = BTreeMap::new();
+    // A self-reading source's SQL in the model that writes its table (`{{ this }}`).
+    let mut self_sql: BTreeMap<NodeId, String> = BTreeMap::new();
     let mut blocked: BTreeMap<NodeId, String> = BTreeMap::new();
     let question = |report: &mut Report, component: &str, kind: &str, text: String| {
         report.questions.push(Question {
@@ -604,6 +962,86 @@ fn translate_job(
     };
     for (c, why) in &l.skipped {
         report.skipped.push((format!("{job}:{c}"), why.clone()));
+    }
+    for g in &l.patterns.groups {
+        let rule = match g.kind {
+            patterns::Kind::Snapshot(_) => Rule::Snapshot,
+            patterns::Kind::KeyedReplace { .. } => Rule::KeyedReplace,
+            patterns::Kind::WriteBack => Rule::WriteBack,
+        };
+        report.patterns.push(PatternReport {
+            job: job.clone(),
+            table: g.table.table.clone(),
+            rule: Some(rule),
+            model: g.sink.map(|v| sink_name(pkg, l, ir.node(v))),
+            components: g.members.iter().map(|m| ir.node(*m).step.clone()).collect(),
+            notes: g.notes.clone(),
+        });
+        for (c, k, text) in &g.questions {
+            question(report, c, k, text.clone());
+        }
+    }
+    for (c, k, text) in &l.patterns.refused {
+        report.patterns.push(PatternReport {
+            job: job.clone(),
+            table: String::new(),
+            rule: None,
+            model: None,
+            components: vec![c.clone()],
+            notes: vec![text.clone()],
+        });
+        question(report, c, k, text.clone());
+    }
+    // A model that reads its own table through a source (a lookup on the target): the source
+    // reads `{{ this }}` in an incremental run and an empty relation on the first build.
+    let model_sinks: Vec<NodeId> = ir
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, Op::Sink { .. }) && !l.absorbed.contains_key(&n.id))
+        .map(|n| n.id)
+        .collect();
+    // Source → (the model that writes its table, the table, the model's columns).
+    let mut self_src: BTreeMap<NodeId, (NodeId, TableKey, Vec<Field>)> = BTreeMap::new();
+    for &sid in &model_sinks {
+        let n = ir.node(sid);
+        let Op::Sink { sink } = &n.op else { continue };
+        let incremental = !sink.truncate
+            && matches!(
+                sink.mode,
+                SinkMode::Insert | SinkMode::Upsert | SinkMode::Update
+            )
+            && sink.target.schema.as_deref() != Some("files");
+        let tk = key(&sink.target);
+        let sole = writers.get(&tk).is_some_and(|w| w.len() == 1);
+        // A lookup on the target only: a job whose main flow reads its own table re-reads every
+        // row it wrote, and stays a question.
+        if !incremental || !sole || patterns::main_reads(ir, sid, &sink.target) {
+            continue;
+        }
+        let up = patterns::upstream(ir, sid);
+        let fields: Vec<Field> = sink
+            .columns
+            .iter()
+            .map(|(st, c)| Field::new(c, n.field(st).map_or(Default::default(), |f| f.ty)))
+            .collect();
+        for &u in &up {
+            let m = ir.node(u);
+            let Op::Source {
+                query: SourceQuery::Sql { tables, .. },
+            } = &m.op
+            else {
+                continue;
+            };
+            let own = matches!(tables.as_slice(), [t] if key(&completed(t, resolver)) == tk);
+            // Only columns the model writes: `{{ this }}` has no others.
+            let cols_ok = m
+                .schema
+                .iter()
+                .all(|f| fields.iter().any(|x| x.name.eq_ignore_ascii_case(&f.name)));
+            if own && cols_ok {
+                self_src.insert(u, (sid, tk.clone(), fields.clone()));
+            }
+        }
     }
 
     // Watermarks.
@@ -674,18 +1112,26 @@ fn translate_job(
             continue;
         }
         let conn = tables.first().and_then(|t| t.connection.clone());
+        let own = self_src.get(&n.id);
         let resolve = |name: &sqlparser::ast::ObjectName| -> Result<String, Gap> {
-            match resolver.resolve(&completed(&table_of(name, conn.as_ref()), resolver)) {
+            let t = completed(&table_of(name, conn.as_ref()), resolver);
+            if let Some((_, tk, _)) = own
+                && key(&t) == *tk
+            {
+                return Ok(SELF_MARK.into());
+            }
+            match resolver.resolve(&t) {
                 Resolution::Silver { model, .. } | Resolution::Gold { model, .. } => Ok(model),
                 Resolution::Unknown(why) => Err(Gap::new(why)),
             }
         };
-        let readable = tables.iter().all(|t| {
-            matches!(
-                resolver.resolve(&completed(t, resolver)),
-                Resolution::Silver { .. } | Resolution::Gold { .. }
-            )
-        });
+        let readable = own.is_some()
+            || tables.iter().all(|t| {
+                matches!(
+                    resolver.resolve(&completed(t, resolver)),
+                    Resolution::Silver { .. } | Resolution::Gold { .. }
+                )
+            });
         let r = if readable {
             pgsql::to_trino(text, &resolve)
         } else {
@@ -700,7 +1146,37 @@ fn translate_job(
         };
         match r {
             Ok(r) => {
-                source_sql.insert(n.id, r.sql);
+                let mark = format!("{{{{ ref('{SELF_MARK}') }}}}");
+                let sql = match own {
+                    Some((_, tk, fields)) => {
+                        let empty = fields
+                            .iter()
+                            .map(|f| {
+                                format!("CAST(NULL AS {}) AS {}", trino_type(f.ty), q(&f.name))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        // One line: the Trino check keeps the first-build branch of a line.
+                        self_sql.insert(
+                            n.id,
+                            r.sql.replace('\n', " ").replace(
+                                &mark,
+                                &format!(
+                                    "{{% if is_incremental() %}}{{{{ this }}}}{{% else %}}(SELECT {empty} WHERE FALSE){{% endif %}}"
+                                ),
+                            ),
+                        );
+                        // Any other model reads the table's model.
+                        let model = writers
+                            .get(tk)
+                            .and_then(|w| w.first())
+                            .cloned()
+                            .unwrap_or_default();
+                        r.sql.replace(&mark, &format!("{{{{ ref('{model}') }}}}"))
+                    }
+                    None => r.sql,
+                };
+                source_sql.insert(n.id, sql);
             }
             Err(g) => {
                 if g.reason.contains("not the lakehouse source")
@@ -737,11 +1213,30 @@ fn translate_job(
     };
     let mut chain_of: BTreeMap<NodeId, String> = BTreeMap::new();
     let mut chains: Vec<(String, Vec<NodeId>)> = Vec::new();
+    // Sinks downstream of a node.
+    let sinks_after = |id: NodeId| -> Vec<NodeId> {
+        ir.nodes
+            .iter()
+            .filter(|m| {
+                matches!(m.op, Op::Sink { .. }) && patterns::upstream(ir, m.id).contains(&id)
+            })
+            .map(|m| m.id)
+            .collect()
+    };
     for n in &ir.nodes {
         if !matches!(
             n.op,
             Op::Source { .. } | Op::Values { .. } | Op::Generate { .. }
-        ) {
+        ) || self_src.contains_key(&n.id)
+        {
+            continue;
+        }
+        let after = sinks_after(n.id);
+        if !after.is_empty() && after.iter().all(|x| l.absorbed.contains_key(x)) {
+            report.skipped.push((
+                format!("{job}:{}", n.step),
+                "read only by outputs a recognised pattern replaced".into(),
+            ));
             continue;
         }
         let mut chain = vec![n.id];
@@ -812,7 +1307,9 @@ fn translate_job(
             "{{{{ config(materialized='table', schema='silver_talend', alias='{alias}') }}}}"
         );
         let sql = if gaps.is_empty() {
-            match render::model_sql(ir, chain, &select_all(&end.schema), &inputs) {
+            match scoped(ir, chain)
+                .and_then(|()| render::model_sql(ir, chain, &select_all(&end.schema), &inputs))
+            {
                 Ok(body) => gate(&format!("{HEADER}\n{config}\n\n{body}\n"), ir, resolver),
                 Err(g) => Err(vec![g.reason]),
             }
@@ -846,12 +1343,27 @@ fn translate_job(
         });
     }
 
-    // Gold models: one per sink.
+    // Gold models: one per sink (a pattern's virtual sink stands for the ones it replaced).
     for n in &ir.nodes {
         let Op::Sink { sink } = &n.op else {
             continue;
         };
-        let name = gold_name(pkg, job, &n.step);
+        if let Some(gi) = l.absorbed.get(&n.id) {
+            if let Some(v) = l.patterns.groups[*gi].sink {
+                let model = sink_name(pkg, l, ir.node(v));
+                model_of.entry(n.step.clone()).or_default().push(model);
+            }
+            continue;
+        }
+        let group = l.virtual_sinks.get(&n.id).map(|gi| &l.patterns.groups[*gi]);
+        let union_at = shared
+            .unions
+            .iter()
+            .position(|u| u.members.iter().any(|(j, id)| j == job && *id == n.id));
+        let name = match union_at {
+            Some(ui) => shared.unions[ui].name.clone(),
+            None => sink_name(pkg, l, n),
+        };
         let input = n.inputs[0];
         let mut ids = BTreeSet::new();
         let mut stack = vec![input];
@@ -875,24 +1387,29 @@ fn translate_job(
                 gaps.push(format!("reads `{cn}`, which is disabled ({})", blocked[i]));
             }
         }
-        let fidelity = ids
+        let mut fidelity = ids
             .iter()
             .map(|i| ir.node(*i).fidelity)
             .chain([n.fidelity])
             .max()
             .unwrap_or(Fidelity::Exact);
+        if group.is_some() {
+            fidelity = fidelity.max(Fidelity::Rewritten);
+        }
         let target_key = key(&sink.target);
         let file = sink.target.schema.as_deref() == Some("files");
         let mut alias = slug(&sink.target.table);
-        if !aliases.insert(format!("{}.{alias}", target_key.1)) {
+        if union_at.is_none() && !aliases.insert(format!("{}.{alias}", target_key.1)) {
             alias = format!("{alias}__{}", slug(&n.step));
         }
-        if let Some(w) = writers.get(&target_key)
+        if union_at.is_none()
+            && group.is_none()
+            && let Some(w) = writers.get(&target_key)
             && w.len() > 1
             && w.first() != Some(&name)
         {
             gaps.push(format!(
-                "the table `{}` is also written by `{}`: two writers of one table become one model in RFC 0268 phase 2",
+                "the table `{}` is also written by `{}`: two writers of one table that no rule of RFC 0268 phase 2 makes one load",
                 sink.target.table, w[0]
             ));
             question(
@@ -907,6 +1424,7 @@ fn translate_job(
                 ),
             );
         }
+        // The columns, keys first; a `rej_` part selects its union's order.
         let mut columns: Vec<(String, String)> = sink.keys.to_vec();
         for c in &sink.columns {
             if !columns
@@ -916,13 +1434,28 @@ fn translate_job(
                 columns.push(c.clone());
             }
         }
+        if let Some(ui) = union_at {
+            let order = &shared.unions[ui].columns;
+            columns.sort_by_key(|(_, c)| {
+                order
+                    .iter()
+                    .position(|o| o.eq_ignore_ascii_case(c))
+                    .unwrap_or(usize::MAX)
+            });
+        }
         let final_select = columns
             .iter()
             .map(|(s2, c)| format!("{} AS {}", q(s2), q(c)))
             .collect::<Vec<_>>()
             .join(", ");
+        let snapshot = match group.map(|g| &g.kind) {
+            Some(patterns::Kind::Snapshot(sn)) => Some(sn),
+            _ => None,
+        };
         let (rule, materialization, cfg) = if file {
             (Rule::File, "none", String::new())
+        } else if snapshot.is_some() {
+            (Rule::Snapshot, "view over a snapshot", String::new())
         } else {
             match sink.mode {
                 SinkMode::Insert if sink.truncate => (
@@ -942,7 +1475,9 @@ fn translate_job(
                 SinkMode::Upsert | SinkMode::Update if !sink.keys.is_empty() => {
                     let keys: Vec<String> = sink.keys.iter().map(|(_, c)| quote_str(c)).collect();
                     (
-                        if sink.mode == SinkMode::Update {
+                        if group.is_some() {
+                            Rule::KeyedReplace
+                        } else if sink.mode == SinkMode::Update {
                             Rule::Update
                         } else {
                             Rule::Merge
@@ -957,6 +1492,11 @@ fn translate_job(
                 SinkMode::Delete => (Rule::Delete, "none", String::new()),
                 _ => (Rule::NoKey, "none", String::new()),
             }
+        };
+        let rule = if union_at.is_some() {
+            Rule::Rejects
+        } else {
+            rule
         };
         match rule {
             Rule::File => gaps.push(format!("{} writes a file: not a dbt model", n.step_type)),
@@ -1010,7 +1550,30 @@ fn translate_job(
                 None => Err(vec!["the output reads nothing translated".into()]),
             }
         } else {
-            render::model_sql(ir, &ids, &final_select, &inputs).map_err(|g| vec![g.reason])
+            // The model that writes a self-read source's table reads it as `{{ this }}`.
+            let mine: BTreeMap<NodeId, String> = self_src
+                .iter()
+                .filter(|(_, (owner, _, _))| *owner == n.id)
+                .filter_map(|(src, _)| self_sql.get(src).map(|q| (*src, q.clone())))
+                .collect();
+            let own_sql: BTreeMap<NodeId, String>;
+            let own_inputs;
+            let here = if mine.is_empty() {
+                &inputs
+            } else {
+                let mut m = source_sql.clone();
+                m.extend(mine);
+                own_sql = m;
+                own_inputs = render::Inputs {
+                    node_ref: &node_ref,
+                    source_sql: &own_sql,
+                    table_ref: &table_ref,
+                };
+                &own_inputs
+            };
+            scoped(ir, &ids)
+                .and_then(|()| render::model_sql(ir, &ids, &final_select, here))
+                .map_err(|g| vec![g.reason])
         };
         let body = body.map(|b| {
             if rule == Rule::Update {
@@ -1023,6 +1586,60 @@ fn translate_job(
                 b
             }
         });
+        let mut components: Vec<String> = Vec::new();
+        for i in ids.iter().chain([&n.id]) {
+            let st = &ir.node(*i).step;
+            if !components.contains(st) {
+                components.push(st.clone());
+            }
+        }
+        if let Some(g) = group {
+            for m in &g.members {
+                let st = &ir.node(*m).step;
+                if !components.contains(st) {
+                    components.push(st.clone());
+                }
+            }
+        }
+        for st in &components {
+            model_of.entry(st.clone()).or_default().push(name.clone());
+        }
+        // A `rej_` part: kept for its union, which is written once every job is translated.
+        if let Some(ui) = union_at {
+            let checked = body.and_then(|b| gate(&b, ir, resolver).map(|_| b));
+            shared.unions[ui].parts.push(Part {
+                job: job.clone(),
+                component: n.step.clone(),
+                body: checked,
+                fidelity,
+                components,
+            });
+            continue;
+        }
+        if let (Some(sn), Some(g)) = (snapshot, group) {
+            write_snapshot(
+                SnapshotModel {
+                    name: &name,
+                    alias: &alias,
+                    pkg,
+                    job,
+                    table: &sink.target.table,
+                    sn,
+                    notes: &g.notes,
+                    columns: &columns,
+                    body: body.map(|b| (b, final_select.clone())),
+                    fidelity,
+                    components,
+                },
+                ir,
+                resolver,
+                report,
+                files,
+                locations,
+                tests,
+            );
+            continue;
+        }
         let path = format!("dbt/models/gold/talend/{pkg}/{name}.sql");
         let checked = body.and_then(|b| gate(&format!("{HEADER}\n{cfg}\n\n{b}\n"), ir, resolver));
         let (sql, enabled, gaps) = match checked {
@@ -1041,19 +1658,6 @@ fn translate_job(
         }
         files.insert(path.clone(), sql);
         locations.insert(name.clone(), ("gold_talend".into(), alias));
-        let components: Vec<String> = {
-            let mut c: Vec<String> = Vec::new();
-            for i in ids.iter().chain([&n.id]) {
-                let st = &ir.node(*i).step;
-                if !c.contains(st) {
-                    c.push(st.clone());
-                }
-            }
-            c
-        };
-        for st in &components {
-            model_of.entry(st.clone()).or_default().push(name.clone());
-        }
         report.models.push(ModelReport {
             name: name.clone(),
             layer: Layer::Gold,
@@ -1153,6 +1757,181 @@ fn translate_job(
     }
 }
 
+/// Gate 2b (RFC 0268 phase 2): every column a projection, filter, lookup or join of the model
+/// reads is a column of its own input. The anti-invention gate checks names against the whole
+/// job; this one checks them where they are read, so a value a flow dropped is not read later.
+fn scoped(ir: &Ir, ids: &[NodeId]) -> Result<(), Gap> {
+    for id in ids {
+        let n = ir.node(*id);
+        let has = |i: usize, c: &str| {
+            n.inputs
+                .get(i)
+                .is_some_and(|x| ir.node(*x).schema.iter().any(|f| f.name == c))
+        };
+        let any = |c: &str| (0..n.inputs.len()).any(|i| has(i, c));
+        let bad = match &n.op {
+            Op::Project { items } => items
+                .iter()
+                .flat_map(|(_, e)| e.columns())
+                .find(|c| !any(c)),
+            Op::Filter { predicate } => predicate.columns().into_iter().find(|c| !any(c)),
+            Op::Lookup { keys, .. } | Op::Join { keys, .. } if n.inputs.len() == 2 => {
+                keys.iter().find_map(|(a, b)| {
+                    if !has(0, a) {
+                        Some(a.clone())
+                    } else if !has(1, b) {
+                        Some(b.clone())
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => None,
+        };
+        if let Some(c) = bad {
+            return Err(Gap::new(format!(
+                "`{}` reads `{c}`, which its input does not have (scope)",
+                n.step
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The model a self-reading source names until it is `{{ this }}`.
+const SELF_MARK: &str = "__ekos_self__";
+
+/// A snapshot and the gold model over it (RFC 0268 phase 2).
+struct SnapshotModel<'a> {
+    name: &'a str,
+    alias: &'a str,
+    pkg: &'a str,
+    job: &'a str,
+    table: &'a str,
+    sn: &'a patterns::Snapshot,
+    notes: &'a [String],
+    /// `(stream field, target column)` the snapshot selects.
+    columns: &'a [(String, String)],
+    /// The rendered SQL and its final select, or why not.
+    body: Result<(String, String), Vec<String>>,
+    fidelity: Fidelity,
+    components: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_snapshot(
+    m: SnapshotModel<'_>,
+    ir: &Ir,
+    resolver: &Resolver<'_>,
+    report: &mut Report,
+    files: &mut BTreeMap<String, String>,
+    locations: &mut BTreeMap<String, (String, String)>,
+    tests: &mut Tests,
+) {
+    let snap = format!("{}__history", m.name);
+    let snap_path = format!("dbt/snapshots/talend/{}/{snap}.sql", m.pkg);
+    let path = format!("dbt/models/gold/talend/{}/{}.sql", m.pkg, m.name);
+    let list = |v: &[String]| {
+        v.iter()
+            .map(|c| quote_str(c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let sn = m.sn;
+    let notes: String = m
+        .notes
+        .iter()
+        .map(|n| format!("-- {}\n", gates::inert(n)))
+        .collect();
+    let snap_sql = m.body.and_then(|(b, _)| {
+        gate(
+            &format!(
+                "{HEADER}\n{notes}{{% snapshot {snap} %}}\n{{{{ config(target_schema='snapshots_talend', unique_key=[{}], strategy='check', check_cols=[{}]) }}}}\n\n{b}\n{{% endsnapshot %}}\n",
+                list(&sn.unique_key),
+                list(&sn.check_cols)
+            ),
+            ir,
+            resolver,
+        )
+    });
+    // The table's own columns back: the flag from the version's end, the clock columns from its
+    // bounds, a database-assigned key from dbt's version id.
+    let (flag, current, closed) = &sn.flag;
+    let mut cols: Vec<String> = m.columns.iter().map(|(_, c)| q(c)).collect();
+    cols.push(format!(
+        "CASE WHEN dbt_valid_to IS NULL THEN {} ELSE {} END AS {}",
+        patterns::lit_text(current),
+        patterns::lit_text(closed),
+        q(flag)
+    ));
+    for c in &sn.valid_from {
+        cols.push(format!("dbt_valid_from AS {}", q(c)));
+    }
+    for c in &sn.valid_to {
+        cols.push(format!("dbt_valid_to AS {}", q(c)));
+    }
+    if let Some(k) = &sn.surrogate {
+        cols.push(format!("dbt_scd_id AS {}", q(k)));
+    }
+    let view = format!(
+        "{HEADER}\n{{{{ config(materialized='view', schema='gold_talend', alias='{}') }}}}\n\nSELECT {} FROM {{{{ ref('{snap}') }}}}\n",
+        m.alias,
+        cols.join(", ")
+    );
+    let (snap_file, view_file, enabled, gaps) = match snap_sql {
+        Ok(sq) => (sq, view, true, Vec::new()),
+        Err(g) => (disable_snapshot(&g), disable("", &g), false, g),
+    };
+    // No key test: the gold model holds every version of a key.
+    let _ = tests;
+    files.insert(snap_path.clone(), snap_file);
+    files.insert(path.clone(), view_file);
+    locations.insert(snap.clone(), ("snapshots_talend".into(), snap.clone()));
+    locations.insert(
+        m.name.to_string(),
+        ("gold_talend".into(), m.alias.to_string()),
+    );
+    let fidelity = if enabled { m.fidelity } else { Fidelity::Gap };
+    report.models.push(ModelReport {
+        name: snap,
+        layer: Layer::Snapshot,
+        path: snap_path,
+        job: m.job.to_string(),
+        rule: Rule::Snapshot,
+        fidelity,
+        enabled,
+        materialization: "snapshot (check)".into(),
+        target: Some(m.table.to_string()),
+        components: m.components.clone(),
+        gaps: gaps.clone(),
+    });
+    report.models.push(ModelReport {
+        name: m.name.to_string(),
+        layer: Layer::Gold,
+        path,
+        job: m.job.to_string(),
+        rule: Rule::Snapshot,
+        fidelity,
+        enabled,
+        materialization: "view".into(),
+        target: Some(m.table.to_string()),
+        components: m.components,
+        gaps,
+    });
+}
+
+/// A disabled snapshot: comments only. A snapshot file holds no `config()` outside a snapshot
+/// block, so nothing of it is left for dbt to read.
+fn disable_snapshot(gaps: &[String]) -> String {
+    let mut out = format!("{HEADER}\n-- DISABLED: not fully translated.\n");
+    for g in gaps {
+        for line in g.lines() {
+            out.push_str(&format!("--   {}\n", gates::inert(line)));
+        }
+    }
+    out
+}
+
 /// Gates 2 and 3 (RFC 0268 §Gates) on a model's SQL: every column it names is one of its nodes',
 /// a table's it reads, or one the translator made; and no Java is left in it.
 fn gate(sql: &str, ir: &Ir, resolver: &Resolver<'_>) -> Result<String, Vec<String>> {
@@ -1160,10 +1939,17 @@ fn gate(sql: &str, ir: &Ir, resolver: &Resolver<'_>) -> Result<String, Vec<Strin
         return Err(vec![format!("Java text left in the SQL: `{j}`")]);
     }
     // The columns the shared renderer makes itself (`etl_rel::render`, lookups).
-    let mut known: BTreeSet<String> = ["ekos_match", "ekos_rn"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
+    let mut known: BTreeSet<String> = [
+        "ekos_match",
+        "ekos_rn",
+        // dbt's snapshot columns (RFC 0268 phase 2).
+        "dbt_valid_from",
+        "dbt_valid_to",
+        "dbt_scd_id",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
     let add = |known: &mut BTreeSet<String>, f: &Field| {
         known.insert(f.name.to_ascii_lowercase());
     };
