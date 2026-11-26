@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1304.0" height="190.0" viewBox="0 0 1304.0 190.0">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#555555"/></marker></defs>
+  <line x1="100.0" y1="60.0" x2="652.0" y2="130.0" stroke="#555555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="836.0" y1="60.0" x2="468.0" y2="130.0" stroke="#555555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="1020.0" y1="60.0" x2="284.0" y2="130.0" stroke="#555555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="1204.0" y1="60.0" x2="836.0" y2="130.0" stroke="#555555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="284.0" y1="60.0" x2="468.0" y2="130.0" stroke="#555555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="652.0" y1="60.0" x2="284.0" y2="130.0" stroke="#555555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="468.0" y1="60.0" x2="1020.0" y2="130.0" stroke="#555555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="20.0" y="20.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="100.0" y="40.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">tMap_Reload_At_Each_Row_2</text>
+  <rect x="204.0" y="20.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="284.0" y="40.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">jobParent</text>
+  <rect x="388.0" y="20.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="468.0" y="40.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">ELTdemo</text>
+  <rect x="572.0" y="20.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="652.0" y="40.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">tBufferOutput2</text>
+  <rect x="756.0" y="20.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="836.0" y="40.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">jobAndContext</text>
+  <rect x="940.0" y="20.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="1020.0" y="40.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">tRunJobRow</text>
+  <rect x="1124.0" y="20.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="1204.0" y="40.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">tMysqlBulkExec</text>
+  <rect x="204.0" y="130.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="284.0" y="150.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">tBufferOutput</text>
+  <rect x="388.0" y="130.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="468.0" y="150.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">jobChildren</text>
+  <rect x="572.0" y="130.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="652.0" y="150.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">tMap_Reload_At_Each_Row_1</text>
+  <rect x="756.0" y="130.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="836.0" y="150.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">tMysqlOutputBulk</text>
+  <rect x="940.0" y="130.0" width="160.0" height="40.0" rx="6" fill="#eef2ff" stroke="#3355bb"/>
+  <text x="1020.0" y="150.0" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="12">createTables4ETL</text>
+</svg>

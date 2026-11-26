@@ -1,0 +1,3 @@
+﻿tFileOutputXML (project LOCAL_PROJECT_DATA_INTEGRATION_DEMOS, version 0.1): 2 components, 1 links, 0 context variables, 4 lineage rows, 1 findings
+  tRowGenerator_2 (tRowGenerator)
+  tFileOutputXML_1 (tFileOutputXML)
