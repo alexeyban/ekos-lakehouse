@@ -1,0 +1,17 @@
+[workspace]
+root = 'C:\ekos-test\src\di-demos'
+log-level = "info"
+log-format = "pretty"
+
+[observe]
+paths = ["."]
+ignore-patterns = [".ekos", ".git", "target", "node_modules"]
+
+[[sources]]
+name = "talend-demo"
+kind = "dir"
+path = 'C:\ekos-test\src\di-demos'
+
+# Talend Open Studio and its bundled demo projects are Apache-2.0 (set for the docs)
+[docs-estate]
+licences = { "talend-demo" = "Apache-2.0" }

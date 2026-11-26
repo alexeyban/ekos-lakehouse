@@ -1,0 +1,18 @@
+Census of LOCAL_PROJECT_DATA_INTEGRATION_DEMOS (Talend "Data Integration Demos")
+Source: C:\ekos-sandbox\TOS_BD-20211109_1610-V8.0.1\workspace\LOCAL_PROJECT_DATA_INTEGRATION_DEMOS
+Counted 2026-11-23 from the folder listing (*.item files).
+
+Jobs (process/*.item)            170 items = 169 distinct jobs (tAddCRC has versions 0.1 and 0.2)
+  root                             3  (beforeRunJobs, priorTest, readme)
+  t01_Compo                      155
+  t02_Concatening                  4
+  t03_DemoRoutines                 4
+  t04_Context                      4
+Joblets                            0  (no joblets folder)
+Contexts (context/*.item)          1  (globalContext)
+Connections (metadata/connections) 1  (demoMysql)
+Other metadata                     8  (4 fileDelimited, 4 fileXml)
+Routines (code/routines)          16  (2 user: DemoRoutines, GetRandomPhoneNum; 14 system)
+SQL templates (sqlPatterns)       68
+Business models                    1
+Documentation                      1
