@@ -42,4 +42,4 @@ EKOS was built from EKOS `main` (2026-11-23), EKOS-Lakehouse 0.1.1 from this rep
 
 ## Licence and changes
 
-The Talend demo project is part of Talend Open Studio, Apache-2.0, © Talend. Two Studio user password hashes in `source/LOCAL_PROJECT_DATA_INTEGRATION_DEMOS/talend.project` were blanked before publishing; nothing else in `source/` was changed. The connection and job passwords in the items are Studio's encrypted values as shipped.
+The Talend demo project is part of Talend Open Studio, Apache-2.0, © Talend. Two Studio user password hashes in `source/LOCAL_PROJECT_DATA_INTEGRATION_DEMOS/talend.project` were blanked before publishing; nothing else in `source/` was changed. In `docs/solution-architect/`, the links to `Architecture.md` were pointed at `../curated/Architecture.md`, because the two layouts were generated into separate folders. The connection and job passwords in the items are Studio's encrypted values as shipped.
